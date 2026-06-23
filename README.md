@@ -1,88 +1,264 @@
-# Server Sync Mod Template
+# DataForge
 
-Can be used to already have your project set up and ready to go with ServerSync and basic version checking. Please see the [Original Repository](https://github.com/blaxxun-boop/ServerSync) if you have to update, or have further questions this template might not answer.
+DataForge is a Valheim BepInEx mod for managing item, recipe, piece, and status effect data with compact YAML.
 
-Thank you Blaxxun for ServerSync!
+It is built around a simple workflow:
 
-ServerSync
-==========
+1. Let DataForge generate readable reference files from the loaded modpack.
+2. Copy only the entries you want to change into an override file.
+3. Edit the compact fields you care about.
+4. Use full scaffold files only when you need every supported field.
 
-Bundling the dll
-----------------
+The goal is to make large modpacks easier to tune without turning every item, recipe, or piece into a wall of config.
 
-You need to ensure the dll is available to your mod.
+## Why Use It
 
-Including the dll is best done via ILRepack (https://github.com/ravibpatel/ILRepack.Lib.MSBuild.Task). You can load this package (ILRepack.Lib.MSBuild.Task) from NuGet.
+- Reference files are generated from the actual loaded game data, including vanilla and modded content.
+- Reference output omits common default values, so the files stay useful for browsing.
+- Override files are compact and hand-editable.
+- Full scaffold generation is available on demand for deep edits.
+- YAML payloads are server-synced, so server rules can drive client behavior.
+- Owner sections and resource-map sorting make large references easier to scan.
+- Cloning, material/icon tweaks, localization, and live-safe refreshes are handled in one place.
+- Several modpack stability helpers are included for common Valheim mod conflicts.
 
-Then create a file ILRepack.targets in your project folder. File content:
+## Supported Domains
+
+### Items
+
+DataForge can edit common item fields, including:
+
+- name, description, weight, value, stack size, teleportability, floating behavior
+- durability, food values, armor, equip modifiers, damage, block values, attacks
+- status effects attached to equip, consume, attack, perfect block, or full adrenaline
+- item cloning from an existing prefab
+- visual overrides such as material, color, emission, custom icon, and auto icon rendering
+- item acquisition multipliers for drops, pickup, crafting, cooking, and smelting
+
+Example:
+
+```yaml
+- item: SwordIron
+  override: true
+  weight: 0.8
+  durability: 250, 50
+  damage:
+    slash: 55, 0
+  primaryAttack:
+    cost: 12
 ```
-<?xml version="1.0" encoding="utf-8"?>
-<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-    <Target Name="ILRepacker" AfterTargets="Build">
-        <ItemGroup>
-            <InputAssemblies Include="$(TargetPath)" />
-            <InputAssemblies Include="$(OutputPath)\ServerSync.dll" />
-        </ItemGroup>
-        <ILRepack Parallel="true" DebugInfo="true" Internalize="true" InputAssemblies="@(InputAssemblies)" OutputFile="$(TargetPath)" TargetKind="SameAsPrimaryAssembly" LibraryPath="$(OutputPath)" />
-    </Target>
-</Project>
+
+Clone example:
+
+```yaml
+- item: SwordIronHeavy
+  override: true
+  cloneFrom: SwordIron
+  name: Heavy iron sword
+  weight: 1.4
+  visual:
+    icon: auto
+    iconRotation: 23, 51, 25.8
+    material: blackmetal
+    color: 0.8, 0.85, 1, 1
+    emission: 0.15
+  damage:
+    slash: 72, 0
 ```
 
-Using the ServerSync
---------------------
+### Recipes
 
-Declare a variable:
+Recipes use the result prefab as the main key. If the same result has multiple recipes, reference files use suffixes such as `SwordIron;1` and `SwordIron;2`.
 
-`ServerSync.ConfigSync configSync = new ServerSync.ConfigSync("my.mod.guid") { DisplayName = "My Mod Name", CurrentVersion = "1.2.3", MinimumRequiredVersion = "1.2.0" };`
+DataForge supports:
 
-All of DisplayName, CurrentVersion and MinimumRequiredVersion are optional.
-If CurrentVersion is specified, then the user will see a warning in their BepInEx log if the server version does not match the client version.
-If also MinimumRequiredVersion is specified and the client has an older version than the servers MinimumRequiredVersion, the client will be immediately disconnected and see an error message, explaining why.
-To display a friendly name for your mod in the error messages, specify DisplayName, otherwise the primary identifier will be used.
-Also note that the primary identifier (I propose using the GUID, "my.mod.guid") should never be changed (changing it will break backwards compatibility completely).
+- compact crafting station syntax
+- compact resource syntax
+- recipe amount
+- recipe removal
+- one-of ingredient recipes
+- quality-based output bonus fields
 
-There are two public methods on the ServerSync.ConfigSync class:
+Example:
 
-- `AddConfigEntry<T>(ConfigEntry<T> configEntry)`
-
-  Registers a BepInEx ConfigEntry to be synchronized.
-
-- `AddLockingConfigEntry<T>(ConfigEntry<T> lockingConfig) where T : IConvertible`
-
-  Registers a BepInEx ConfigEntry to be synchronized, whose value determines whether the config is locked. If the value is zero when converted to integer, the config is not locked. Otherwise it is locked.
-  This method must be called at most once. If not called at all, the config will never be locked.
-
-Useful properties:
-
-- `static bool ProcessingServerUpdate`
-
-  The mod is receiving and applying configs from the server. Used internally to avoid config writing loops.
-
-- `bool IsSourceOfTruth`
-
-  Whether the local config is currently being used. False if a remote config is currently applied.
-
-Additionally, there is a class `ServerSync.CustomSyncedValue<T>(ConfigSync, string Identifier, T value = default)` to synchronize arbitrary data (more precisely: all data which Valheims native serialization supports).
-This class registers itself to the passed ConfigSync instance upon instantiation.
-It provides a Value property and a ValueChanged event handler.
-The Identifier must be unique for the given ConfigSync instance.
-
-
-Handy config function
----------------------
-
-To avoid manually adding each config entry to the ConfigSync instance, I propose to add a simple wrapper `config()` (with the same signature as `Config.Bind()`) to your UnityBasePlugin class:
-
+```yaml
+- recipe: SwordIron
+  override: true
+  craftingStation: forge, 2
+  resources:
+  - Iron: 20, 10
+  - Wood: 5
 ```
-ConfigEntry<T> config<T>(string group, string name, T value, ConfigDescription description, bool synchronizedSetting = true)
-{
-    ConfigEntry<T> configEntry = Config.Bind(group, name, value, description);
 
-    SyncedConfigEntry<T> syncedConfigEntry = configSync.AddConfigEntry(configEntry);
-    syncedConfigEntry.SynchronizedConfig = synchronizedSetting;
+### Pieces
 
-    return configEntry;
-}
+Piece overrides focus on the fields that are most useful for modpack tuning:
 
-ConfigEntry<T> config<T>(string group, string name, T value, string description, bool synchronizedSetting = true) => config(group, name, value, new ConfigDescription(description), synchronizedSetting);
+- build table and category placement
+- sort order inside a build tab
+- required crafting station
+- build resources
+- health
+- comfort amount and comfort group
+- selected component configuration for containers, crafting stations, extensions, smelters, cooking stations, fermenters, sap collectors, and beehives
+
+Example:
+
+```yaml
+- piece: wood_wall
+  override: true
+  pieceTable: Hammer
+  category: Building
+  sortOrder: 80
+  needStation: None
+  health: 250
+  resources:
+  - Wood: 4
 ```
+
+Component example:
+
+```yaml
+- piece: smelter
+  override: true
+  smelter:
+    input: Coal, 20, 10
+    output: 2, 30
+    conversions:
+    - CopperOre: Copper
+    - TinOre: Tin
+```
+
+### Status Effects
+
+Status effects can be edited or cloned with compact fields for duration, cooldown, icons, messages, stats, skill modifiers, damage modifiers, and effect prefabs.
+
+Example:
+
+```yaml
+- effect: Rested
+  override: true
+  time: 600, 0
+  stats:
+    regenMultiplier: 1, 1.5, 1
+    raiseSkill: Swords, 1.0
+    attackDamage: Swords, 1.25
+  damageTakenModifiers:
+    fire: Resistant
+    poison: Weak
+```
+
+## Files
+
+DataForge uses:
+
+```text
+BepInEx/config/DataForge/
+```
+
+Main files:
+
+```text
+items.yml
+items_*.yml
+items.reference.yml
+recipes.yml
+recipes_*.yml
+recipes.reference.yml
+effects.yml
+effects_*.yml
+effects.reference.yml
+pieces.yml
+pieces_*.yml
+pieces.reference.yml
+z_materials.reference.txt
+z_resourcemap.txt
+localization/*.yml
+icon/*.png
+```
+
+Files like `items_extra.yml`, `recipes_balance.yml`, `effects_magic.yml`, and `pieces_building.yml` are valid override files. This lets you split large configs by theme without changing the schema.
+
+## Reference And Scaffold
+
+Reference files are generated automatically when game data is ready and the client/server is the source of truth.
+
+Reference files are meant for browsing and copy-paste edits:
+
+- common defaults are omitted
+- entries are grouped by owner section when possible
+- item and recipe references use resource-map sorting
+- piece references use tier sorting
+
+Full scaffold files are generated only by command:
+
+```text
+dataforge:full item
+dataforge:full recipe
+dataforge:full effect
+dataforge:full piece
+dataforge:full all
+```
+
+Full scaffold files expose the supported field surface more completely and are useful when a reference entry hides a default value you want to override.
+
+## Localization
+
+Server-synced localization files live in:
+
+```text
+BepInEx/config/DataForge/localization/
+```
+
+Example:
+
+```yaml
+$df_item_meadhealthtest: "Test item"
+$df_item_meadhealthtest_description: "A test item cloned from major healing mead."
+```
+
+Use the token in an override field:
+
+```yaml
+- item: MeadHealthtest
+  override: true
+  cloneFrom: MeadHealthMajor
+  name: $df_item_meadhealthtest
+  description: $df_item_meadhealthtest_description
+```
+
+You can also write direct text instead of a `$` token.
+
+## Icons And Materials
+
+Custom item icons are loaded from:
+
+```text
+BepInEx/config/DataForge/icon/
+```
+
+Use 256x256 PNG files when possible. ServerSync synchronizes the YAML value, but each client still needs the same local PNG file.
+
+`z_materials.reference.txt` is generated as a material lookup list for visual overrides.
+
+## ServerSync
+
+DataForge uses ServerSync for override payloads and server-owned config. A dedicated server can act as the source of truth for YAML changes, while clients receive the synced payload when joining.
+
+Large generated reference files are not sent to clients. Override payloads are what matter for runtime behavior.
+
+## Included Quality-Of-Life Tweaks
+
+DataForge also includes a few optional helpers for modpack operation:
+
+- show comfort values in the hammer build UI
+- highlight same comfort-group pieces while hovering a comfort piece
+- ignore station extension spacing checks
+- allow fireplaces to store extra fuel without changing the displayed vanilla max fuel
+- profile lobby-to-world startup timing while diagnosing slow joins
+
+## Notes
+
+DataForge is designed for loaded modpacks, not just vanilla data. Reference output depends on what is installed and when other mods register their content.
+
+For best results, copy from reference files into override files and edit only the fields you intend to own.
