@@ -2,7 +2,7 @@
   "name": "DataForge",
   "version_number": "1.0.0",
   "website_url": "",
-  "description": "YAML reference, scaffold, and override support for Valheim items, pieces, and game data.",
+  "description": "Compact YAML reference, scaffold, override, and ServerSync workflows for Valheim items, recipes, pieces, and status effects, with clean references, cloning, localization, visual tweaks, live-safe updates, and modpack QoL helpers.",
   "dependencies": [
     "denikson-BepInExPack_Valheim-5.4.2202"
   ]
