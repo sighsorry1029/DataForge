@@ -26,8 +26,13 @@ internal static class ItemVisualOverrides
     private static readonly Dictionary<string, IconCacheEntry> IconCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, Material> MaterialLookupCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> MaterialLookupMissCache = new(StringComparer.OrdinalIgnoreCase);
-    private static MethodInfo? LoadImageMethod;
-    private static MethodInfo? EncodeToPngMethod;
+    private static readonly MethodInfo? LoadImageMethod = ResolveLoadImageMethod();
+    private static readonly MethodInfo? EncodeToPngMethod = typeof(ImageConversion).GetMethod(
+        "EncodeToPNG",
+        BindingFlags.Public | BindingFlags.Static,
+        null,
+        new[] { typeof(Texture2D) },
+        null);
     private static bool MaterialLookupCacheBuilt;
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
@@ -537,30 +542,27 @@ internal static class ItemVisualOverrides
 
     private static bool TryLoadImage(Texture2D texture, byte[] data)
     {
-        MethodInfo? method = LoadImageMethod ??= ResolveLoadImageMethod();
-        if (method == null)
+        if (LoadImageMethod == null)
         {
             DataForgeLogContext.Warning("Could not locate UnityEngine.ImageConversion.LoadImage for visual.icon.");
             return false;
         }
 
-        ParameterInfo[] parameters = method.GetParameters();
-        object?[] args = parameters.Length == 3
+        object?[] args = LoadImageMethod.GetParameters().Length == 3
             ? new object?[] { texture, data, false }
             : new object?[] { texture, data };
-        return method.Invoke(null, args) is bool loaded && loaded;
+        return LoadImageMethod.Invoke(null, args) is bool loaded && loaded;
     }
 
     private static bool TryEncodePng(Texture2D texture, out byte[] png)
     {
         png = Array.Empty<byte>();
-        MethodInfo? method = EncodeToPngMethod ??= ResolveEncodeToPngMethod();
-        if (method == null)
+        if (EncodeToPngMethod == null)
         {
             return false;
         }
 
-        if (method.Invoke(null, new object?[] { texture }) is byte[] encoded && encoded.Length > 0)
+        if (EncodeToPngMethod.Invoke(null, new object?[] { texture }) is byte[] encoded && encoded.Length > 0)
         {
             png = encoded;
             return true;
@@ -571,67 +573,18 @@ internal static class ItemVisualOverrides
 
     private static MethodInfo? ResolveLoadImageMethod()
     {
-        Type? imageConversionType = ResolveImageConversionType();
-
-        return imageConversionType?
-            .GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .FirstOrDefault(method =>
-            {
-                if (!method.Name.Equals("LoadImage", StringComparison.Ordinal))
-                {
-                    return false;
-                }
-
-                ParameterInfo[] parameters = method.GetParameters();
-                return (parameters.Length == 2 || parameters.Length == 3) &&
-                       parameters[0].ParameterType == typeof(Texture2D) &&
-                       parameters[1].ParameterType == typeof(byte[]);
-            });
-    }
-
-    private static MethodInfo? ResolveEncodeToPngMethod()
-    {
-        return ResolveImageConversionType()?
-            .GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .FirstOrDefault(method =>
-            {
-                if (!method.Name.Equals("EncodeToPNG", StringComparison.Ordinal))
-                {
-                    return false;
-                }
-
-                ParameterInfo[] parameters = method.GetParameters();
-                return parameters.Length == 1 &&
-                       parameters[0].ParameterType == typeof(Texture2D) &&
-                       method.ReturnType == typeof(byte[]);
-            });
-    }
-
-    private static Type? ResolveImageConversionType()
-    {
-        Type? imageConversionType = Type.GetType("UnityEngine.ImageConversion, UnityEngine.ImageConversionModule");
-        if (imageConversionType != null)
-        {
-            return imageConversionType;
-        }
-
-        imageConversionType = AppDomain.CurrentDomain.GetAssemblies()
-            .Select(assembly => assembly.GetType("UnityEngine.ImageConversion", throwOnError: false))
-            .FirstOrDefault(type => type != null);
-        if (imageConversionType != null)
-        {
-            return imageConversionType;
-        }
-
-        try
-        {
-            return Assembly.Load("UnityEngine.ImageConversionModule")
-                .GetType("UnityEngine.ImageConversion", throwOnError: false);
-        }
-        catch
-        {
-            return null;
-        }
+        return typeof(ImageConversion).GetMethod(
+                   "LoadImage",
+                   BindingFlags.Public | BindingFlags.Static,
+                   null,
+                   new[] { typeof(Texture2D), typeof(byte[]), typeof(bool) },
+                   null)
+               ?? typeof(ImageConversion).GetMethod(
+                   "LoadImage",
+                   BindingFlags.Public | BindingFlags.Static,
+                   null,
+                   new[] { typeof(Texture2D), typeof(byte[]) },
+                   null);
     }
 
     private static string? ResolveIconPath(string iconName)

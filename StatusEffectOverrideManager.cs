@@ -23,7 +23,7 @@ internal static class StatusEffectOverrideManager
     private const string SyncedPayloadKey = "effects";
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
     private const string ReferenceStateKey = "effects";
-    private const string ReferenceLogicVersion = "2026-06-22-effect-reference-state-v1";
+    private const string ReferenceLogicVersion = "2026-06-24-effect-reference-state-v2";
 
     private static readonly object StateLock = new();
     private static readonly Dictionary<string, StatusEffectDefinition> Baselines = new(StringComparer.OrdinalIgnoreCase);
@@ -34,7 +34,7 @@ internal static class StatusEffectOverrideManager
     private static readonly Dictionary<string, IconCacheEntry> IconCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> CreatedClones = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> RuntimeAppliedEffectKeys = new(StringComparer.OrdinalIgnoreCase);
-    private static MethodInfo? LoadImageMethod;
+    private static readonly MethodInfo? LoadImageMethod = ResolveLoadImageMethod();
     private static readonly IDeserializer Deserializer = new DeserializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
         .Build();
@@ -58,7 +58,6 @@ internal static class StatusEffectOverrideManager
     private static FileSystemWatcher? Watcher;
     private static DataForgeFileWatcher.DebouncedAction? ReloadDebouncer;
     private static bool ObjectDbReady;
-    private static bool AllStatusEffectBaselinesCaptured;
     private static bool RuntimeStateWasApplied;
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
@@ -166,10 +165,12 @@ internal static class StatusEffectOverrideManager
         {
             return;
         }
+
         List<StatusEffectEntry> entriesToApply = FilterEntries(entries, changedEffectKeys);
         Dictionary<string, List<StatusEffectEntry>> entriesByEffect = BuildEnabledDefinitionEntriesByEffect(entriesToApply);
         HashSet<string> runtimeEffectKeys = GetRuntimeApplyEffectKeys(entriesByEffect);
 
+        DataForgeStatusEffectOwnership.NotifyStatusEffectOverridesWillApply();
         CaptureBaselinesForEntriesIfNeeded(entriesToApply);
         CleanupCreatedEffects(entries);
         EnsureCloneEffects(entries);
@@ -179,6 +180,7 @@ internal static class StatusEffectOverrideManager
         {
             ApplyLiveSafeToActiveStatusEffects(entriesByEffect);
             UpdateRuntimeAppliedEffectState(new Dictionary<string, List<StatusEffectEntry>>(StringComparer.OrdinalIgnoreCase));
+            DataForgeStatusEffectOwnership.NotifyStatusEffectOverridesApplied();
             return;
         }
 
@@ -204,6 +206,29 @@ internal static class StatusEffectOverrideManager
 
         ApplyLiveSafeToActiveStatusEffects(entriesByEffect);
         UpdateRuntimeAppliedEffectState(entriesByEffect);
+        DataForgeStatusEffectOwnership.NotifyStatusEffectOverridesApplied();
+    }
+
+    internal static bool HasActiveStatusEffectOverride(string? effectName)
+    {
+        if (!DataForgePlugin.StatusEffectOverridesEnabled || string.IsNullOrWhiteSpace(effectName))
+        {
+            return false;
+        }
+
+        string normalized = NormalizeStatusEffectName(Utils.GetPrefabName(effectName));
+        if (normalized.Length == 0)
+        {
+            return false;
+        }
+
+        lock (StateLock)
+        {
+            return ActiveEntries.Any(entry =>
+                entry.Override &&
+                entry.HasDefinition &&
+                string.Equals(NormalizeStatusEffectName(entry.Effect), normalized, StringComparison.OrdinalIgnoreCase));
+        }
     }
 
     private static bool ShouldSkipRemoteClientBaselineWork()
@@ -754,7 +779,7 @@ internal static class StatusEffectOverrideManager
 
     private static bool CaptureAllBaselinesIfNeeded()
     {
-        if (AllStatusEffectBaselinesCaptured || ObjectDB.instance == null)
+        if (ObjectDB.instance == null)
         {
             return false;
         }
@@ -768,7 +793,6 @@ internal static class StatusEffectOverrideManager
             refreshed += baselineRefreshed ? 1 : 0;
         }
 
-        AllStatusEffectBaselinesCaptured = true;
         if (added > 0 || refreshed > 0)
         {
             DataForgePlugin.Log.LogInfo($"Captured {added} new status effect baselines. Tracking {Baselines.Count} total.");
@@ -1191,57 +1215,32 @@ internal static class StatusEffectOverrideManager
 
     private static bool TryLoadImage(Texture2D texture, byte[] data)
     {
-        MethodInfo? method = LoadImageMethod ??= ResolveLoadImageMethod();
-        if (method == null)
+        if (LoadImageMethod == null)
         {
             DataForgeLogContext.Warning("Could not locate UnityEngine.ImageConversion.LoadImage for status effect icon.");
             return false;
         }
 
-        ParameterInfo[] parameters = method.GetParameters();
-        object?[] args = parameters.Length == 3
+        object?[] args = LoadImageMethod.GetParameters().Length == 3
             ? new object?[] { texture, data, false }
             : new object?[] { texture, data };
-        return method.Invoke(null, args) is bool loaded && loaded;
+        return LoadImageMethod.Invoke(null, args) is bool loaded && loaded;
     }
 
     private static MethodInfo? ResolveLoadImageMethod()
     {
-        Type? imageConversionType = Type.GetType("UnityEngine.ImageConversion, UnityEngine.ImageConversionModule");
-        if (imageConversionType == null)
-        {
-            imageConversionType = AppDomain.CurrentDomain.GetAssemblies()
-                .Select(assembly => assembly.GetType("UnityEngine.ImageConversion", throwOnError: false))
-                .FirstOrDefault(type => type != null);
-        }
-
-        if (imageConversionType == null)
-        {
-            try
-            {
-                imageConversionType = Assembly.Load("UnityEngine.ImageConversionModule")
-                    .GetType("UnityEngine.ImageConversion", throwOnError: false);
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        return imageConversionType?
-            .GetMethods(BindingFlags.Public | BindingFlags.Static)
-            .FirstOrDefault(method =>
-            {
-                if (!method.Name.Equals("LoadImage", StringComparison.Ordinal))
-                {
-                    return false;
-                }
-
-                ParameterInfo[] parameters = method.GetParameters();
-                return (parameters.Length == 2 || parameters.Length == 3) &&
-                       parameters[0].ParameterType == typeof(Texture2D) &&
-                       parameters[1].ParameterType == typeof(byte[]);
-            });
+        return typeof(ImageConversion).GetMethod(
+                   "LoadImage",
+                   BindingFlags.Public | BindingFlags.Static,
+                   null,
+                   new[] { typeof(Texture2D), typeof(byte[]), typeof(bool) },
+                   null)
+               ?? typeof(ImageConversion).GetMethod(
+                   "LoadImage",
+                   BindingFlags.Public | BindingFlags.Static,
+                   null,
+                   new[] { typeof(Texture2D), typeof(byte[]) },
+                   null);
     }
 
     private static string? ResolveIconPath(string iconName)
@@ -2059,6 +2058,7 @@ internal static class StatusEffectOverrideManager
         }
 
         EnsureConfigDirectoryAndDefaultOverride();
+        CaptureAllBaselinesIfNeeded();
         string sourceSignature = ComputeReferenceSourceSignature();
         string referencePath = Path.Combine(ConfigDirectory, ReferenceFileName);
         if (ShouldSkipReferenceUpdate(referencePath, sourceSignature))
@@ -2066,7 +2066,6 @@ internal static class StatusEffectOverrideManager
             return;
         }
 
-        CaptureAllBaselinesIfNeeded();
         bool wrote = GeneratedArtifactWriter.WriteReferenceIfReady(
             Baselines.Count > 0,
             ConfigDirectory,

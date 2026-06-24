@@ -25,7 +25,7 @@ internal static class ItemOverrideManager
     private const string CloneRootName = "DataForge_ItemClones";
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
     private const string ReferenceStateKey = "items";
-    private const string ReferenceLogicVersion = "2026-06-22-item-reference-state-v1";
+    private const string ReferenceLogicVersion = "2026-06-24-item-reference-state-v2";
 
     private static readonly object StateLock = new();
     private static readonly Dictionary<string, ItemDefinition> Baselines = new(StringComparer.OrdinalIgnoreCase);
@@ -64,7 +64,6 @@ internal static class ItemOverrideManager
     private static DataForgeFileWatcher.DebouncedAction? ReloadDebouncer;
     private static bool ObjectDbReady;
     private static bool ZNetSceneReady;
-    private static bool AllItemBaselinesCaptured;
     private static bool RuntimeStateWasApplied;
     private static bool GlobalMultiplierStateWasApplied;
     private static bool LiveSafeStateWasApplied;
@@ -799,7 +798,7 @@ internal static class ItemOverrideManager
 
     private static void CaptureAllBaselinesIfNeeded()
     {
-        if (AllItemBaselinesCaptured || ObjectDB.instance == null)
+        if (ObjectDB.instance == null)
         {
             return;
         }
@@ -813,7 +812,6 @@ internal static class ItemOverrideManager
             }
         }
 
-        AllItemBaselinesCaptured = true;
         if (added > 0)
         {
             DataForgePlugin.Log.LogInfo($"Captured {added} new item prefab baselines. Tracking {Baselines.Count} total.");
@@ -2583,6 +2581,7 @@ internal static class ItemOverrideManager
         }
 
         EnsureConfigDirectoryAndDefaultOverride();
+        CaptureAllBaselinesIfNeeded();
         string sourceSignature = ComputeReferenceSourceSignature();
         string referencePath = Path.Combine(ConfigDirectory, ReferenceFileName);
         if (ShouldSkipReferenceUpdate(referencePath, sourceSignature))
@@ -2590,7 +2589,6 @@ internal static class ItemOverrideManager
             return;
         }
 
-        CaptureAllBaselinesIfNeeded();
         bool wrote = GeneratedArtifactWriter.WriteReferenceIfReady(
             Baselines.Count > 0,
             ConfigDirectory,

@@ -26,7 +26,7 @@ internal static class RecipeOverrideManager
     private const string SyncedPayloadKey = "recipes";
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
     private const string ReferenceStateKey = "recipes";
-    private const string ReferenceLogicVersion = "2026-06-22-recipe-reference-state-v1";
+    private const string ReferenceLogicVersion = "2026-06-24-recipe-reference-state-v2";
 
     private static readonly object StateLock = new();
     private static readonly Dictionary<string, RecipeDefinition> Baselines = new(StringComparer.OrdinalIgnoreCase);
@@ -70,7 +70,6 @@ internal static class RecipeOverrideManager
     private static bool ZNetSceneReady;
     private static int ActiveQualityBonusRecipeCount;
     private static bool RecipeLookupCacheDirty = true;
-    private static bool AllRecipeBaselinesCaptured;
     private static bool RuntimeStateWasApplied;
     private static Dictionary<string, string> ActiveEntrySignaturesByRecipe = new(StringComparer.OrdinalIgnoreCase);
     private static HashSet<string>? PendingChangedRecipeKeys;
@@ -613,7 +612,7 @@ internal static class RecipeOverrideManager
 
     private static void CaptureAllBaselinesIfNeeded()
     {
-        if (AllRecipeBaselinesCaptured || ObjectDB.instance == null)
+        if (ObjectDB.instance == null)
         {
             return;
         }
@@ -627,7 +626,6 @@ internal static class RecipeOverrideManager
             }
         }
 
-        AllRecipeBaselinesCaptured = true;
         if (added > 0)
         {
             DataForgePlugin.Log.LogInfo($"Captured {added} new recipe baselines. Tracking {Baselines.Count} total.");
@@ -1608,6 +1606,7 @@ internal static class RecipeOverrideManager
         }
 
         EnsureConfigDirectoryAndDefaultOverride();
+        CaptureAllBaselinesIfNeeded();
         string sourceSignature = ComputeReferenceSourceSignature();
         string referencePath = Path.Combine(ConfigDirectory, ReferenceFileName);
         if (ShouldSkipReferenceUpdate(referencePath, sourceSignature))
@@ -1615,7 +1614,6 @@ internal static class RecipeOverrideManager
             return;
         }
 
-        CaptureAllBaselinesIfNeeded();
         bool wrote = GeneratedArtifactWriter.WriteReferenceIfReady(
             Baselines.Count > 0,
             ConfigDirectory,

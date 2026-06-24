@@ -24,7 +24,7 @@ internal static class PieceOverrideManager
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
     private const int DefaultPieceSortOrder = 100;
     private const string ReferenceStateKey = "pieces";
-    private const string ReferenceLogicVersion = "2026-06-22-piece-reference-state-v1";
+    private const string ReferenceLogicVersion = "2026-06-24-piece-reference-state-v2";
     private static readonly HashSet<string> IgnoredCategoryNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "Feasts",
@@ -43,7 +43,6 @@ internal static class PieceOverrideManager
     private static readonly Dictionary<string, PieceDefinition> Baselines = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<PieceTable, List<GameObject>> PieceTableOrderBaselines = new(ReferenceComparer<PieceTable>.Instance);
     private static readonly HashSet<int> ManagedStationExtensionInstanceIds = new();
-    private static bool AllPieceBaselinesCaptured;
     private static readonly HashSet<string> RuntimeAppliedPieceKeys = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, string> PieceTableAliases = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -632,7 +631,7 @@ internal static class PieceOverrideManager
 
     private static void CaptureAllBaselinesIfNeeded()
     {
-        if (AllPieceBaselinesCaptured || !ObjectDbReady || ZNetScene.instance == null || ObjectDB.instance == null)
+        if (!ObjectDbReady || ZNetScene.instance == null || ObjectDB.instance == null)
         {
             return;
         }
@@ -646,8 +645,10 @@ internal static class PieceOverrideManager
             }
         }
 
-        AllPieceBaselinesCaptured = true;
-        DataForgePlugin.Log.LogInfo($"Captured {added} piece prefab baselines. Tracking {Baselines.Count} total.");
+        if (added > 0)
+        {
+            DataForgePlugin.Log.LogInfo($"Captured {added} piece prefab baselines. Tracking {Baselines.Count} total.");
+        }
     }
 
     private static void CaptureBaselinesForPiecesIfNeeded(IEnumerable<string>? prefabNames)
@@ -2916,6 +2917,7 @@ internal static class PieceOverrideManager
         }
 
         EnsureConfigDirectoryAndDefaultOverride();
+        CaptureAllBaselinesIfNeeded();
         string sourceSignature = ComputeReferenceSourceSignature();
         string referencePath = Path.Combine(ConfigDirectory, ReferenceFileName);
         if (ShouldSkipReferenceUpdate(referencePath, sourceSignature))
@@ -2923,7 +2925,6 @@ internal static class PieceOverrideManager
             return;
         }
 
-        CaptureAllBaselinesIfNeeded();
         bool wrote = GeneratedArtifactWriter.WriteReferenceIfReady(
             Baselines.Count > 0,
             ConfigDirectory,

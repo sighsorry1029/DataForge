@@ -1,6 +1,22 @@
 # DataForge
 
-DataForge is a Valheim BepInEx mod for managing item, recipe, piece, and status effect data with compact YAML.
+Easy way to configure recipes, items, pieces and effects by organized reference system. Item cloning with visual tweaks and localization. <br> 
+Weight, stack, amount multiplier for items. Shows comfort group and value in hammer tab.
+
+![](https://i.ibb.co/5xFswvGZ/comfort.gif) <br>
+Small qol of marking the comfort number and comfort group within hammer tab.
+
+## Included Quality-Of-Life Tweaks
+
+DataForge also includes a few optional helpers for modpack operation:
+
+- show comfort values in the hammer build UI
+- highlight same comfort-group pieces while hovering a comfort piece
+- ignore station extension spacing checks
+- allow fireplaces to store extra fuel without changing the displayed vanilla max fuel
+- profile lobby-to-world startup timing while diagnosing slow joins
+
+## Workflow
 
 It is built around a simple workflow:
 
@@ -101,6 +117,7 @@ Piece overrides focus on the fields that are most useful for modpack tuning:
 - health
 - comfort amount and comfort group
 - selected component configuration for containers, crafting stations, extensions, smelters, cooking stations, fermenters, sap collectors, and beehives
+- `stationExtension` can add a `StationExtension` component to a piece that does not already have one. DataForge also removes StationExtension components it added when they are no longer configured; native/original extension components are restored from baseline instead of being deleted.
 
 Example:
 
@@ -241,24 +258,5 @@ Use 256x256 PNG files when possible. ServerSync synchronizes the YAML value, but
 
 `z_materials.reference.txt` is generated as a material lookup list for visual overrides.
 
-## ServerSync
-
-DataForge uses ServerSync for override payloads and server-owned config. A dedicated server can act as the source of truth for YAML changes, while clients receive the synced payload when joining.
-
-Large generated reference files are not sent to clients. Override payloads are what matter for runtime behavior.
-
-## Included Quality-Of-Life Tweaks
-
-DataForge also includes a few optional helpers for modpack operation:
-
-- show comfort values in the hammer build UI
-- highlight same comfort-group pieces while hovering a comfort piece
-- ignore station extension spacing checks
-- allow fireplaces to store extra fuel without changing the displayed vanilla max fuel
-- profile lobby-to-world startup timing while diagnosing slow joins
-
-## Notes
-
-DataForge is designed for loaded modpacks, not just vanilla data. Reference output depends on what is installed and when other mods register their content.
-
-For best results, copy from reference files into override files and edit only the fields you intend to own.
+## Github
+https://github.com/sighsorry1029/DataForge

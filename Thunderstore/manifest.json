@@ -1,9 +1,9 @@
 {
   "name": "DataForge",
-  "version_number": "1.0.0",
-  "website_url": "",
-  "description": "Compact YAML reference, scaffold, override, and ServerSync workflows for Valheim items, recipes, pieces, and status effects, with clean references, cloning, localization, visual tweaks, live-safe updates, and modpack QoL helpers.",
+  "version_number": "1.0.1",
+  "website_url": "https://discord.gg/jkcJCq2sK5",
+  "description": "Easy way to configure recipes, items, pieces and effects by organized reference system. Item cloning with visual tweaks and localization. Weight, stack, amount multiplier for items. Shows comfort group and value in hammer tab.",
   "dependencies": [
-    "denikson-BepInExPack_Valheim-5.4.2202"
+    "denikson-BepInExPack_Valheim-5.4.2333"
   ]
 }

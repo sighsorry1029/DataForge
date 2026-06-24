@@ -85,6 +85,10 @@
         <Reference Include="System.Core"/>
         <Reference Include="System.Data"/>
         <Reference Include="System.Xml"/>
+        <Reference Include="netstandard">
+            <HintPath>$(CorlibPath)\netstandard.dll</HintPath>
+            <Private>False</Private>
+        </Reference>
         <Reference Include="UnityEngine">
             <HintPath>$(CorlibPath)\UnityEngine.dll</HintPath>
         </Reference>
@@ -96,6 +100,9 @@
         </Reference>
         <Reference Include="UnityEngine.IMGUIModule">
             <HintPath>$(CorlibPath)\UnityEngine.IMGUIModule.dll</HintPath>
+        </Reference>
+        <Reference Include="UnityEngine.ImageConversionModule">
+            <HintPath>$(CorlibPath)\UnityEngine.ImageConversionModule.dll</HintPath>
         </Reference>
         <Reference Include="UnityEngine.InputLegacyModule">
             <HintPath>$(CorlibPath)\UnityEngine.InputLegacyModule.dll</HintPath>
@@ -147,6 +154,7 @@
         <Compile Include="VneiPrefabCleanupGuard.cs"/>
         <Compile Include="ReferenceDefaultRules.cs"/>
         <Compile Include="ReferenceValue.cs"/>
+        <Compile Include="StatusEffectOwnershipApi.cs"/>
         <Compile Include="StatusEffectOverrideManager.cs"/>
         <Compile Include="PieceOverrideManager.cs"/>
     </ItemGroup>

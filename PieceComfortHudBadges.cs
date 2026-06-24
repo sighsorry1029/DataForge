@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Reflection;
 using HarmonyLib;
 using TMPro;
 using UnityEngine;
@@ -48,11 +50,9 @@ internal static class PieceComfortHudBadges
         for (int index = 0; index < hud.m_pieceIcons.Count; index++)
         {
             Hud.PieceIconData iconData = hud.m_pieceIcons[index];
-            int comfort = index < buildPieces.Count && buildPieces[index] != null
-                ? buildPieces[index].m_comfort
-                : 0;
+            Piece piece = index < buildPieces.Count ? buildPieces[index] : null!;
 
-            if (comfort <= 0)
+            if (piece == null || piece.m_comfort <= 0 || VeiledRecipesSoftCompat.ShouldMaskPiece(player, piece))
             {
                 HideBadge(iconData);
                 continue;
@@ -64,7 +64,7 @@ internal static class PieceComfortHudBadges
                 continue;
             }
 
-            string text = comfort.ToString(CultureInfo.InvariantCulture);
+            string text = piece.m_comfort.ToString(CultureInfo.InvariantCulture);
             if (!string.Equals(badge.text, text, System.StringComparison.Ordinal))
             {
                 badge.text = text;
@@ -80,15 +80,16 @@ internal static class PieceComfortHudBadges
         }
 
         AnyBadgeVisible = anyVisible;
-        RefreshGroupHighlights(hud, buildPieces);
+        RefreshGroupHighlights(hud, player, buildPieces);
     }
 
-    private static void RefreshGroupHighlights(Hud hud, List<Piece> buildPieces)
+    private static void RefreshGroupHighlights(Hud hud, Player player, List<Piece> buildPieces)
     {
         Piece hoveredPiece = hud.m_hoveredPiece;
         if (hoveredPiece == null ||
             hoveredPiece.m_comfort <= 0 ||
-            hoveredPiece.m_comfortGroup == Piece.ComfortGroup.None)
+            hoveredPiece.m_comfortGroup == Piece.ComfortGroup.None ||
+            VeiledRecipesSoftCompat.ShouldMaskPiece(player, hoveredPiece))
         {
             HideVisibleGroupHighlights(hud);
             return;
@@ -102,7 +103,8 @@ internal static class PieceComfortHudBadges
             Piece piece = index < buildPieces.Count ? buildPieces[index] : null!;
             bool shouldHighlight = piece != null &&
                 piece.m_comfort > 0 &&
-                piece.m_comfortGroup == hoveredGroup;
+                piece.m_comfortGroup == hoveredGroup &&
+                !VeiledRecipesSoftCompat.ShouldMaskPiece(player, piece);
 
             if (!shouldHighlight)
             {
@@ -357,6 +359,83 @@ internal static class PieceComfortHudBadges
         }
 
         return null!;
+    }
+}
+
+internal static class VeiledRecipesSoftCompat
+{
+    private const string CompatTypeName = "VeiledRecipes.VeiledRecipesCompat";
+    private const string CompatAssemblyQualifiedName = CompatTypeName + ", VeiledRecipes";
+    private static bool Initialized;
+    private static bool LoggedFailure;
+    private static ShouldMaskPieceDelegate? ShouldMaskPieceMethod;
+
+    private delegate bool ShouldMaskPieceDelegate(Player player, Piece piece);
+
+    internal static bool ShouldMaskPiece(Player player, Piece piece)
+    {
+        if (player == null || piece == null)
+        {
+            return false;
+        }
+
+        EnsureInitialized();
+        if (ShouldMaskPieceMethod == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            return ShouldMaskPieceMethod(player, piece);
+        }
+        catch (Exception ex)
+        {
+            if (!LoggedFailure)
+            {
+                LoggedFailure = true;
+                DataForgePlugin.Log.LogDebug($"VeiledRecipes piece mask check failed: {ex.Message}");
+            }
+
+            return false;
+        }
+    }
+
+    private static void EnsureInitialized()
+    {
+        if (Initialized)
+        {
+            return;
+        }
+
+        Initialized = true;
+        Type? compatType = Type.GetType(CompatAssemblyQualifiedName, throwOnError: false);
+        if (compatType == null)
+        {
+            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                compatType = assembly.GetType(CompatTypeName, throwOnError: false);
+                if (compatType != null)
+                {
+                    break;
+                }
+            }
+        }
+
+        MethodInfo? method = compatType?.GetMethod(
+            "ShouldMaskPiece",
+            BindingFlags.Public | BindingFlags.Static,
+            binder: null,
+            types: new[] { typeof(Player), typeof(Piece) },
+            modifiers: null);
+
+        if (method != null)
+        {
+            ShouldMaskPieceMethod = Delegate.CreateDelegate(
+                typeof(ShouldMaskPieceDelegate),
+                method,
+                throwOnBindFailure: false) as ShouldMaskPieceDelegate;
+        }
     }
 }
 
