@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.3
+
+- Added a client-side hammer highlight for crafting stations and their station extensions.
+- Changed the weight multiplier option to apply to all item weights while preserving explicit item YAML `weight` overrides.
+- Kept stack multiplier behavior limited to stackable items.
+
+## 1.0.2
+
+- Changed the mod author/GUID to `sighsorry.DataForge`.
+
 ## 1.0.1
 
 - Removed dynamic loading of `UnityEngine.ImageConversionModule` from item and status-effect icon loaders.

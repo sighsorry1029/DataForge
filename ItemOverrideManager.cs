@@ -172,7 +172,7 @@ internal static class ItemOverrideManager
         CleanupCreatedPrefabs(entries, destroy: true);
         EnsureClonePrefabs(entries, warnIfMissingSource: true);
         Dictionary<string, List<ItemEntry>> entriesByItem = BuildEnabledEntriesByItem(entries);
-        bool shouldApplyAllItems = HasGlobalStackableMultiplierOverrides() || GlobalMultiplierStateWasApplied;
+        bool shouldApplyAllItems = HasGlobalItemMultiplierOverrides() || GlobalMultiplierStateWasApplied;
         HashSet<string>? applyItemKeys = shouldApplyAllItems
             ? null
             : GetRuntimeApplyKeys(entriesByItem, changedItemKeys);
@@ -194,7 +194,7 @@ internal static class ItemOverrideManager
         }
 
         ObjectDB.instance.UpdateRegisters();
-        UpdateRuntimeAppliedItemState(entriesByItem, HasGlobalStackableMultiplierOverrides());
+        UpdateRuntimeAppliedItemState(entriesByItem, HasGlobalItemMultiplierOverrides());
         UpdateLiveSafeItemState(entriesByItem, shouldRefreshExistingItems);
     }
 
@@ -226,7 +226,7 @@ internal static class ItemOverrideManager
         CleanupCreatedPrefabs(entries, destroy: true);
         EnsureClonePrefabs(entries, warnIfMissingSource: ZNetSceneReady);
         Dictionary<string, List<ItemEntry>> entriesByItem = BuildEnabledEntriesByItem(entries);
-        bool shouldApplyAllItems = HasGlobalStackableMultiplierOverrides() || GlobalMultiplierStateWasApplied;
+        bool shouldApplyAllItems = HasGlobalItemMultiplierOverrides() || GlobalMultiplierStateWasApplied;
         HashSet<string>? applyItemKeys = shouldApplyAllItems
             ? null
             : GetRuntimeApplyKeys(entriesByItem, changedItemKeys);
@@ -248,7 +248,7 @@ internal static class ItemOverrideManager
         }
 
         ObjectDB.instance.UpdateRegisters();
-        UpdateRuntimeAppliedItemState(entriesByItem, HasGlobalStackableMultiplierOverrides());
+        UpdateRuntimeAppliedItemState(entriesByItem, HasGlobalItemMultiplierOverrides());
         UpdateLiveSafeItemState(entriesByItem, shouldRefreshExistingItems);
     }
 
@@ -256,7 +256,7 @@ internal static class ItemOverrideManager
     {
         if (!DataForgePlugin.IsRemoteServerClient ||
             DataForgePlugin.StackableStackMultiplier != 1 ||
-            Math.Abs(DataForgePlugin.StackableWeightMultiplier - 1f) > 0.0001f)
+            Math.Abs(DataForgePlugin.ItemWeightMultiplier - 1f) > 0.0001f)
         {
             return false;
         }
@@ -581,10 +581,10 @@ internal static class ItemOverrideManager
         return entriesByItem;
     }
 
-    private static bool HasGlobalStackableMultiplierOverrides()
+    private static bool HasGlobalItemMultiplierOverrides()
     {
         return DataForgePlugin.StackableStackMultiplier != 1 ||
-               Math.Abs(DataForgePlugin.StackableWeightMultiplier - 1f) > 0.0001f;
+               Math.Abs(DataForgePlugin.ItemWeightMultiplier - 1f) > 0.0001f;
     }
 
     private static HashSet<string> GetRuntimeApplyKeys(
@@ -1422,7 +1422,7 @@ internal static class ItemOverrideManager
 
             if (Baselines.TryGetValue(prefabName, out baseline))
             {
-                ApplyGlobalStackableMultipliers(itemDrop.m_itemData.m_shared, baseline);
+                ApplyGlobalItemMultipliers(itemDrop.m_itemData.m_shared, baseline);
             }
 
             if (!entriesByItem.TryGetValue(prefabName, out List<ItemEntry> entries))
@@ -1654,7 +1654,7 @@ internal static class ItemOverrideManager
 
         if (Baselines.TryGetValue(prefabName, out baseline))
         {
-            ApplyGlobalStackableMultipliers(item.m_shared, baseline);
+            ApplyGlobalItemMultipliers(item.m_shared, baseline);
             applied = true;
         }
 
@@ -1772,22 +1772,22 @@ internal static class ItemOverrideManager
         Copy(basics.Teleportable, value => shared.m_teleportable = value);
     }
 
-    private static void ApplyGlobalStackableMultipliers(ItemDrop.ItemData.SharedData shared, ItemDefinition baseline)
+    private static void ApplyGlobalItemMultipliers(ItemDrop.ItemData.SharedData shared, ItemDefinition baseline)
     {
         BasicsDefinition? basics = baseline.Basics;
-        if (basics?.MaxStackSize == null || basics.MaxStackSize.Value <= 1)
+        if (basics == null)
         {
             return;
         }
 
         int stackMultiplier = DataForgePlugin.StackableStackMultiplier;
-        if (stackMultiplier != 1)
+        if (stackMultiplier != 1 && basics.MaxStackSize.HasValue && basics.MaxStackSize.Value > 1)
         {
             long multipliedStack = (long)basics.MaxStackSize.Value * stackMultiplier;
             shared.m_maxStackSize = (int)Math.Min(int.MaxValue, Math.Max(1L, multipliedStack));
         }
 
-        float weightMultiplier = DataForgePlugin.StackableWeightMultiplier;
+        float weightMultiplier = DataForgePlugin.ItemWeightMultiplier;
         if (Math.Abs(weightMultiplier - 1f) <= 0.0001f)
         {
             return;

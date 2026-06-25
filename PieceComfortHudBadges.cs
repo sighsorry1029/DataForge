@@ -13,10 +13,13 @@ internal static class PieceComfortHudBadges
 {
     private const string BadgeObjectName = "DataForgeComfortBadge";
     private const string GroupHighlightObjectName = "DataForgeComfortGroupHighlight";
+    private const string StationExtensionHighlightObjectName = "DataForgeStationExtensionHighlight";
     private static readonly Color BadgeColor = new(1f, 0.42f, 0f, 1f);
     private static readonly Color GroupHighlightColor = new(1f, 0.42f, 0f, 0.3f);
+    private static readonly Color StationExtensionHighlightColor = new(0.25f, 0.95f, 1f, 0.26f);
     private static bool AnyBadgeVisible;
     private static bool AnyGroupHighlightVisible;
+    private static bool AnyStationExtensionHighlightVisible;
 
     internal static void RefreshVisibleHud()
     {
@@ -37,16 +40,40 @@ internal static class PieceComfortHudBadges
             return;
         }
 
-        if (!DataForgePlugin.ShowPieceComfortInHammer)
+        if (!DataForgePlugin.ShowPieceComfortInHammer &&
+            !DataForgePlugin.HighlightStationExtensionsInHammer)
         {
             HideVisibleBadges(hud);
             HideVisibleGroupHighlights(hud);
+            HideVisibleStationExtensionHighlights(hud);
             return;
         }
 
         List<Piece> buildPieces = player.GetBuildPieces();
-        bool anyVisible = false;
+        if (DataForgePlugin.ShowPieceComfortInHammer)
+        {
+            RefreshComfortBadges(hud, player, buildPieces);
+            RefreshGroupHighlights(hud, player, buildPieces);
+        }
+        else
+        {
+            HideVisibleBadges(hud);
+            HideVisibleGroupHighlights(hud);
+        }
 
+        if (DataForgePlugin.HighlightStationExtensionsInHammer)
+        {
+            RefreshStationExtensionHighlights(hud, player, buildPieces);
+        }
+        else
+        {
+            HideVisibleStationExtensionHighlights(hud);
+        }
+    }
+
+    private static void RefreshComfortBadges(Hud hud, Player player, List<Piece> buildPieces)
+    {
+        bool anyVisible = false;
         for (int index = 0; index < hud.m_pieceIcons.Count; index++)
         {
             Hud.PieceIconData iconData = hud.m_pieceIcons[index];
@@ -80,7 +107,6 @@ internal static class PieceComfortHudBadges
         }
 
         AnyBadgeVisible = anyVisible;
-        RefreshGroupHighlights(hud, player, buildPieces);
     }
 
     private static void RefreshGroupHighlights(Hud hud, Player player, List<Piece> buildPieces)
@@ -108,11 +134,11 @@ internal static class PieceComfortHudBadges
 
             if (!shouldHighlight)
             {
-                HideGroupHighlight(iconData);
+                HideHighlight(iconData, GroupHighlightObjectName);
                 continue;
             }
 
-            Image highlight = GetOrCreateGroupHighlight(iconData);
+            Image highlight = GetOrCreateHighlight(iconData, GroupHighlightObjectName, GroupHighlightColor);
             if (highlight == null)
             {
                 continue;
@@ -128,6 +154,118 @@ internal static class PieceComfortHudBadges
         }
 
         AnyGroupHighlightVisible = anyVisible;
+    }
+
+    private static void RefreshStationExtensionHighlights(Hud hud, Player player, List<Piece> buildPieces)
+    {
+        Piece hoveredPiece = hud.m_hoveredPiece;
+        if (hoveredPiece == null ||
+            VeiledRecipesSoftCompat.ShouldMaskPiece(player, hoveredPiece) ||
+            !TryGetRelatedCraftingStation(hoveredPiece, out CraftingStation targetStation))
+        {
+            HideVisibleStationExtensionHighlights(hud);
+            return;
+        }
+
+        bool anyVisible = false;
+        for (int index = 0; index < hud.m_pieceIcons.Count; index++)
+        {
+            Hud.PieceIconData iconData = hud.m_pieceIcons[index];
+            Piece piece = index < buildPieces.Count ? buildPieces[index] : null!;
+            bool shouldHighlight = piece != null &&
+                !VeiledRecipesSoftCompat.ShouldMaskPiece(player, piece) &&
+                IsRelatedToCraftingStation(piece, targetStation);
+
+            if (!shouldHighlight)
+            {
+                HideHighlight(iconData, StationExtensionHighlightObjectName);
+                continue;
+            }
+
+            Image highlight = GetOrCreateHighlight(iconData, StationExtensionHighlightObjectName, StationExtensionHighlightColor);
+            if (highlight == null)
+            {
+                continue;
+            }
+
+            if (!highlight.gameObject.activeSelf)
+            {
+                highlight.gameObject.SetActive(true);
+            }
+
+            highlight.transform.SetAsFirstSibling();
+            anyVisible = true;
+        }
+
+        AnyStationExtensionHighlightVisible = anyVisible;
+    }
+
+    private static bool TryGetRelatedCraftingStation(Piece piece, out CraftingStation station)
+    {
+        station = null!;
+        if (piece == null)
+        {
+            return false;
+        }
+
+        CraftingStation ownStation = piece.GetComponent<CraftingStation>();
+        if (ownStation != null)
+        {
+            station = ownStation;
+            return true;
+        }
+
+        StationExtension extension = piece.GetComponent<StationExtension>();
+        if (extension?.m_craftingStation != null)
+        {
+            station = extension.m_craftingStation;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsRelatedToCraftingStation(Piece piece, CraftingStation targetStation)
+    {
+        if (piece == null || targetStation == null)
+        {
+            return false;
+        }
+
+        CraftingStation ownStation = piece.GetComponent<CraftingStation>();
+        if (IsSameCraftingStation(ownStation, targetStation))
+        {
+            return true;
+        }
+
+        StationExtension extension = piece.GetComponent<StationExtension>();
+        return IsSameCraftingStation(extension?.m_craftingStation, targetStation);
+    }
+
+    private static bool IsSameCraftingStation(CraftingStation? left, CraftingStation? right)
+    {
+        if (left == null || right == null)
+        {
+            return false;
+        }
+
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        string leftPrefab = Utils.GetPrefabName(left.gameObject);
+        string rightPrefab = Utils.GetPrefabName(right.gameObject);
+        if (!string.IsNullOrWhiteSpace(leftPrefab) &&
+            !string.IsNullOrWhiteSpace(rightPrefab) &&
+            string.Equals(leftPrefab, rightPrefab, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return !string.IsNullOrWhiteSpace(left.m_name) &&
+               !string.IsNullOrWhiteSpace(right.m_name) &&
+               string.Equals(left.m_name, right.m_name, StringComparison.OrdinalIgnoreCase);
     }
 
     private static TMP_Text GetOrCreateBadge(Hud hud, Hud.PieceIconData iconData)
@@ -200,10 +338,25 @@ internal static class PieceComfortHudBadges
 
         foreach (Hud.PieceIconData iconData in hud.m_pieceIcons)
         {
-            HideGroupHighlight(iconData);
+            HideHighlight(iconData, GroupHighlightObjectName);
         }
 
         AnyGroupHighlightVisible = false;
+    }
+
+    private static void HideVisibleStationExtensionHighlights(Hud hud)
+    {
+        if (!AnyStationExtensionHighlightVisible || hud.m_pieceIcons == null)
+        {
+            return;
+        }
+
+        foreach (Hud.PieceIconData iconData in hud.m_pieceIcons)
+        {
+            HideHighlight(iconData, StationExtensionHighlightObjectName);
+        }
+
+        AnyStationExtensionHighlightVisible = false;
     }
 
     private static void HideBadge(Hud.PieceIconData iconData)
@@ -220,22 +373,22 @@ internal static class PieceComfortHudBadges
         }
     }
 
-    private static Image GetOrCreateGroupHighlight(Hud.PieceIconData iconData)
+    private static Image GetOrCreateHighlight(Hud.PieceIconData iconData, string objectName, Color color)
     {
         if (iconData?.m_go == null)
         {
             return null!;
         }
 
-        Transform existing = iconData.m_go.transform.Find(GroupHighlightObjectName);
+        Transform existing = iconData.m_go.transform.Find(objectName);
         if (existing != null && existing.TryGetComponent(out Image existingImage))
         {
-            existingImage.color = GroupHighlightColor;
+            existingImage.color = color;
             existingImage.raycastTarget = false;
             return existingImage;
         }
 
-        GameObject highlightObject = new(GroupHighlightObjectName);
+        GameObject highlightObject = new(objectName);
         highlightObject.SetActive(false);
         highlightObject.transform.SetParent(iconData.m_go.transform, worldPositionStays: false);
 
@@ -247,7 +400,7 @@ internal static class PieceComfortHudBadges
         rect.offsetMax = Vector2.zero;
 
         Image image = highlightObject.AddComponent<Image>();
-        image.color = GroupHighlightColor;
+        image.color = color;
         image.raycastTarget = false;
         if (iconData.m_go.TryGetComponent(out Image background) && background.sprite != null)
         {
@@ -260,14 +413,14 @@ internal static class PieceComfortHudBadges
         return image;
     }
 
-    private static void HideGroupHighlight(Hud.PieceIconData iconData)
+    private static void HideHighlight(Hud.PieceIconData iconData, string objectName)
     {
         if (iconData?.m_go == null)
         {
             return;
         }
 
-        Transform existing = iconData.m_go.transform.Find(GroupHighlightObjectName);
+        Transform existing = iconData.m_go.transform.Find(objectName);
         if (existing != null && existing.gameObject.activeSelf)
         {
             existing.gameObject.SetActive(false);

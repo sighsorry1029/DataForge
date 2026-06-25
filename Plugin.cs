@@ -14,8 +14,8 @@ namespace DataForge;
 public class DataForgePlugin : BaseUnityPlugin
 {
     internal const string ModName = "DataForge";
-    internal const string ModVersion = "1.0.1";
-    internal const string Author = "blizz";
+    internal const string ModVersion = "1.0.3";
+    internal const string Author = "sighsorry";
     internal const string ModGUID = $"{Author}.{ModName}";
 
     private static readonly string ConfigFileName = $"{ModGUID}.cfg";
@@ -45,8 +45,9 @@ public class DataForgePlugin : BaseUnityPlugin
     private static ConfigEntry<Toggle> _enableStatusEffectOverrides = null!;
     private static ConfigEntry<Toggle> _enablePieceOverrides = null!;
     private static ConfigEntry<int> _stackableStackMultiplier = null!;
-    private static ConfigEntry<float> _stackableWeightMultiplier = null!;
+    private static ConfigEntry<float> _itemWeightMultiplier = null!;
     private static ConfigEntry<Toggle> _showPieceComfortInHammer = null!;
+    private static ConfigEntry<Toggle> _highlightStationExtensionsInHammer = null!;
     private static ConfigEntry<Toggle> _ignoreStationExtensionSpacing = null!;
     private static ConfigEntry<int> _maxStoredFireplaceFuel = null!;
     private static ConfigEntry<Toggle> _logStartupTimings = null!;
@@ -78,8 +79,9 @@ public class DataForgePlugin : BaseUnityPlugin
     internal static bool StatusEffectOverridesEnabled => _enableStatusEffectOverrides.Value.IsOn();
     internal static bool PieceOverridesEnabled => _enablePieceOverrides.Value.IsOn();
     internal static int StackableStackMultiplier => Math.Min(10, Math.Max(1, _stackableStackMultiplier.Value));
-    internal static float StackableWeightMultiplier => Math.Min(2f, Math.Max(0f, _stackableWeightMultiplier.Value));
+    internal static float ItemWeightMultiplier => Math.Min(2f, Math.Max(0f, _itemWeightMultiplier.Value));
     internal static bool ShowPieceComfortInHammer => _showPieceComfortInHammer.Value.IsOn();
+    internal static bool HighlightStationExtensionsInHammer => _highlightStationExtensionsInHammer.Value.IsOn();
     internal static bool IgnoreStationExtensionSpacing => _ignoreStationExtensionSpacing.Value.IsOn();
     internal static int MaxStoredFireplaceFuel => Math.Min(MaxStoredFireplaceFuelLimit, Math.Max(0, _maxStoredFireplaceFuel.Value));
     internal static bool LogStartupTimings => _logStartupTimings.Value.IsOn();
@@ -139,15 +141,15 @@ public class DataForgePlugin : BaseUnityPlugin
             order: 500);
         _stackableStackMultiplier.SettingChanged += (_, _) => ItemOverrideManager.ApplyCurrentConfiguration();
 
-        _stackableWeightMultiplier = ConfigEntry(
+        _itemWeightMultiplier = ConfigEntry(
             "2 - Misc",
-            "Stackable Weight Multiplier",
+            "Item Weight Multiplier",
             1f,
             new ConfigDescription(
-                "Multiplier applied to baseline item weight for stackable items unless weight is explicitly set in item YAML. 1 disables this feature; 0 makes affected items weightless.",
+                "Multiplier applied to baseline item weight for all items unless weight is explicitly set in item YAML. 1 disables this feature; 0 makes affected items weightless.",
                 new AcceptableValueRange<float>(0f, 2f)),
             order: 400);
-        _stackableWeightMultiplier.SettingChanged += (_, _) => ItemOverrideManager.ApplyCurrentConfiguration();
+        _itemWeightMultiplier.SettingChanged += (_, _) => ItemOverrideManager.ApplyCurrentConfiguration();
 
         _showPieceComfortInHammer = ConfigEntry(
             "2 - Misc",
@@ -157,6 +159,15 @@ public class DataForgePlugin : BaseUnityPlugin
             synchronizedSetting: false,
             order: 300);
         _showPieceComfortInHammer.SettingChanged += (_, _) => PieceComfortHudBadges.RefreshVisibleHud();
+
+        _highlightStationExtensionsInHammer = ConfigEntry(
+            "2 - Misc",
+            "Highlight Station Extensions In Hammer",
+            Toggle.On,
+            "If on, hovering a crafting station or station extension in the hammer tab highlights related station/extension pieces in pale cyan. This setting is client-side only.",
+            synchronizedSetting: false,
+            order: 250);
+        _highlightStationExtensionsInHammer.SettingChanged += (_, _) => PieceComfortHudBadges.RefreshVisibleHud();
 
         _ignoreStationExtensionSpacing = ConfigEntry(
             "2 - Misc",
