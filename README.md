@@ -116,8 +116,10 @@ Piece overrides focus on the fields that are most useful for modpack tuning:
 - build resources
 - health
 - comfort amount and comfort group
+- visual material overrides, plus prefab scale overrides for newly placed pieces
 - selected component configuration for containers, crafting stations, extensions, smelters, cooking stations, fermenters, sap collectors, and beehives
-- `stationExtension` can add a `StationExtension` component to a piece that does not already have one. DataForge also removes StationExtension components it added when they are no longer configured; native/original extension components are restored from baseline instead of being deleted.
+- `stationExtension` can add a `StationExtension` component to a piece that does not already have one. `stationExtension: None` can disable an existing extension, and native/original extension components are restored from baseline instead of being deleted.
+- `craftingStation` can edit an existing station component or add one to a piece that does not already have one. If the field is removed later, DataForge removes only the station component it added.
 
 Example:
 
@@ -129,6 +131,9 @@ Example:
   sortOrder: 80
   needStation: None
   health: 250
+  visual:
+    scale: 2
+    material: amber
   resources:
   - Wood: 4
 ```
@@ -149,6 +154,8 @@ Component example:
 ### Status Effects
 
 Status effects can be edited or cloned with compact fields for duration, cooldown, icons, messages, stats, skill modifiers, damage modifiers, and effect prefabs.
+
+DataForge also adds tooltip lines for `attackDamage` and `raiseSkill`, using localization tokens from `localization/English.yml`.
 
 Example:
 
@@ -245,6 +252,13 @@ Use the token in an override field:
 ```
 
 You can also write direct text instead of a `$` token.
+
+DataForge creates English tooltip tokens for effect fields such as `attackDamage` and `raiseSkill`. You can edit them in `English.yml`:
+
+```yaml
+$df_se_tooltip_attack_damage: "{0} attack damage: <color=orange>x{1}%</color>"
+$df_se_tooltip_raise_skill: "{0} skill XP: <color=orange>{1}</color>"
+```
 
 ## Icons And Materials
 

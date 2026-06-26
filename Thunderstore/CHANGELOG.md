@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.4
+
+- Added automatic VNEI reindexing after DataForge item, recipe, and piece changes.
+- Added Korean localization defaults and improved missing localization fallback for status-effect tooltips.
+- Added tooltip lines for status-effect attack damage and skill experience modifiers.
+- Added piece scale and visual material overrides, plus `stationExtension: None` support.
+- Improved piece crafting-station component overrides for adding and removing DataForge-managed stations.
+
 ## 1.0.3
 
 - Added a client-side hammer highlight for crafting stations and their station extensions.

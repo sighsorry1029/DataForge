@@ -196,6 +196,7 @@ internal static class ItemOverrideManager
         ObjectDB.instance.UpdateRegisters();
         UpdateRuntimeAppliedItemState(entriesByItem, HasGlobalItemMultiplierOverrides());
         UpdateLiveSafeItemState(entriesByItem, shouldRefreshExistingItems);
+        VneiRefreshManager.RequestRefresh(DomainName);
     }
 
     internal static void ApplyCurrentConfiguration()
@@ -250,6 +251,7 @@ internal static class ItemOverrideManager
         ObjectDB.instance.UpdateRegisters();
         UpdateRuntimeAppliedItemState(entriesByItem, HasGlobalItemMultiplierOverrides());
         UpdateLiveSafeItemState(entriesByItem, shouldRefreshExistingItems);
+        VneiRefreshManager.RequestRefresh(DomainName);
     }
 
     private static bool ShouldSkipRemoteClientBaselineWork()

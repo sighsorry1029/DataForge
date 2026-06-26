@@ -6,6 +6,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using BepInEx;
+using HarmonyLib;
 using ServerSync;
 using UnityEngine;
 using YamlDotNet.Serialization;
@@ -705,8 +706,8 @@ internal static class StatusEffectOverrideManager
             "#     staggerModifier: 0                  # -0.25 => stagger taken -25%.",
             "#     addMaxCarryWeight: 0                # 100 => carry weight +100.",
             "#     Skill values for attackDamage/raiseSkill/skillLevel/skillLevel2: None, Swords, Knives, Clubs, Polearms, Spears, Blocking, Axes, Bows, ElementalMagic, BloodMagic, Unarmed, Pickaxes, WoodCutting, Crossbows, Jump, Sneak, Run, Swim, Fishing, Cooking, Farming, Crafting, Dodge, Ride, All.",
-            "#     attackDamage: None, 1               # Swords, 1.25 => Swords attacks deal x1.25 (*125%) total damage.",
-            "#     raiseSkill: None, 0                 # Swords, 1.0 => Swords skill XP gain +100%.",
+            "#     attackDamage: None, 1               # Swords, 1.25 => Swords attacks deal x1.25 (*125%) total damage; tooltip uses $df_se_tooltip_attack_damage.",
+            "#     raiseSkill: None, 0                 # Swords, 1.0 => Swords skill XP gain +100%; tooltip uses $df_se_tooltip_raise_skill.",
             "#     skillLevel: None, 0                 # Swords, 15 => treat Swords as +15 levels while active.",
             "#     skillLevel2: None, 0                # Blocking, 10 => treat Blocking as +10 levels while active.",
             "#   staminaDrainModifier:",
@@ -2701,5 +2702,130 @@ internal static class StatusEffectOverrideManager
 
         public DateTime LastWriteTimeUtc { get; }
         public Sprite Sprite { get; }
+    }
+}
+
+[HarmonyPatch(typeof(SE_Stats), nameof(SE_Stats.GetTooltipString))]
+internal static class DataForgeSeStatsTooltipPatch
+{
+    private const string AttackDamageToken = "$df_se_tooltip_attack_damage";
+    private const string AttackDamageFallback = "{0} attack damage: <color=orange>x{1}%</color>";
+    private const string RaiseSkillToken = "$df_se_tooltip_raise_skill";
+    private const string RaiseSkillFallback = "{0} skill XP: <color=orange>{1}</color>";
+
+    private static void Postfix(SE_Stats __instance, ref string __result)
+    {
+        try
+        {
+            if (__instance.m_modifyAttackSkill != Skills.SkillType.None &&
+                !Mathf.Approximately(__instance.m_damageModifier, 1f))
+            {
+                AppendLine(
+                    ref __result,
+                    FormatLocalized(
+                        AttackDamageToken,
+                        AttackDamageFallback,
+                        LocalizeSkill(__instance.m_modifyAttackSkill),
+                        FormatUnsignedPercent(__instance.m_damageModifier)));
+            }
+
+            if (__instance.m_raiseSkill != Skills.SkillType.None &&
+                !Mathf.Approximately(__instance.m_raiseSkillModifier, 0f))
+            {
+                AppendLine(
+                    ref __result,
+                    FormatLocalized(
+                        RaiseSkillToken,
+                        RaiseSkillFallback,
+                        LocalizeSkill(__instance.m_raiseSkill),
+                        FormatSignedPercent(__instance.m_raiseSkillModifier)));
+            }
+        }
+        catch (Exception exception)
+        {
+            DataForgePlugin.Log.LogWarning($"Failed to append DataForge status effect tooltip lines: {exception.Message}");
+        }
+    }
+
+    private static string LocalizeSkill(Skills.SkillType skill)
+    {
+        if (skill == Skills.SkillType.All)
+        {
+            return TryLocalize("$df_skill_all", "All");
+        }
+
+        string fallback = skill.ToString();
+        string token = "$skill_" + fallback.ToLowerInvariant();
+        return TryLocalize(token, fallback);
+    }
+
+    private static string TryLocalize(string token, string fallback)
+    {
+        Localization localization = Localization.instance;
+        if (localization == null)
+        {
+            return fallback;
+        }
+
+        string localized = localization.Localize(token);
+        return string.IsNullOrWhiteSpace(localized) ||
+               localized.Equals(token, StringComparison.OrdinalIgnoreCase) ||
+               localized.Equals(FormatMissingToken(token), StringComparison.OrdinalIgnoreCase)
+            ? fallback
+            : localized;
+    }
+
+    private static string FormatMissingToken(string token)
+    {
+        return "[" + token.TrimStart('$') + "]";
+    }
+
+    private static string FormatLocalized(string token, string fallback, params object[] args)
+    {
+        string template = TryLocalize(token, fallback);
+        try
+        {
+            return string.Format(CultureInfo.InvariantCulture, template, args);
+        }
+        catch (FormatException)
+        {
+            return string.Format(CultureInfo.InvariantCulture, fallback, args);
+        }
+    }
+
+    private static string FormatUnsignedPercent(float multiplier)
+    {
+        return FormatNumber(multiplier * 100f);
+    }
+
+    private static string FormatSignedPercent(float modifier)
+    {
+        return (modifier * 100f).ToString("+0.###;-0.###;0", CultureInfo.InvariantCulture) + "%";
+    }
+
+    private static string FormatNumber(float value)
+    {
+        return value.ToString("0.###", CultureInfo.InvariantCulture);
+    }
+
+    private static void AppendLine(ref string tooltip, string line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return;
+        }
+
+        if (string.IsNullOrEmpty(tooltip))
+        {
+            tooltip = line + "\n";
+            return;
+        }
+
+        if (!tooltip.EndsWith("\n", StringComparison.Ordinal))
+        {
+            tooltip += "\n";
+        }
+
+        tooltip += line + "\n";
     }
 }

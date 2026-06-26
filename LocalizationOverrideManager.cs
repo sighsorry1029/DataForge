@@ -14,8 +14,21 @@ internal static class LocalizationOverrideManager
 {
     private const string DomainName = "localization";
     private const string DefaultLanguageFileName = "English.yml";
+    private const string KoreanLanguageFileName = "Korean.yml";
     private const string SyncedPayloadKey = "localization";
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
+    private static readonly (string Token, string Text)[] BuiltInEnglishTranslations =
+    {
+        ("$df_se_tooltip_attack_damage", "{0} attack damage: <color=orange>x{1}%</color>"),
+        ("$df_se_tooltip_raise_skill", "{0} skill XP: <color=orange>{1}</color>"),
+        ("$df_skill_all", "All")
+    };
+    private static readonly (string Token, string Text)[] BuiltInKoreanTranslations =
+    {
+        ("$df_se_tooltip_attack_damage", "{0} 공격 피해: <color=orange>x{1}%</color>"),
+        ("$df_se_tooltip_raise_skill", "{0} 기술 경험치: <color=orange>{1}</color>"),
+        ("$df_skill_all", "전체")
+    };
 
     private static readonly object StateLock = new();
     private static readonly IDeserializer Deserializer = new DeserializerBuilder()
@@ -431,6 +444,16 @@ internal static class LocalizationOverrideManager
         {
             File.WriteAllText(path, DefaultEnglishLocalizationTemplate());
         }
+
+        EnsureBuiltInTranslations(path, BuiltInEnglishTranslations, "# Built-in DataForge tooltip tokens. You can edit these texts.");
+
+        string koreanPath = Path.Combine(LocalizationDirectory, KoreanLanguageFileName);
+        if (!File.Exists(koreanPath))
+        {
+            File.WriteAllText(koreanPath, DefaultKoreanLocalizationTemplate());
+        }
+
+        EnsureBuiltInTranslations(koreanPath, BuiltInKoreanTranslations, "# DataForge 기본 툴팁 토큰입니다. 원하는 문구로 수정할 수 있습니다.");
     }
 
     private static string DefaultEnglishLocalizationTemplate()
@@ -451,6 +474,11 @@ internal static class LocalizationOverrideManager
             "# Example localization entry:",
             "# $df_item_meadhealthtest: \"Test item\"",
             "# $df_item_meadhealthtest_description: \"A test item cloned from major healing mead.\"",
+            "",
+            "# Built-in DataForge tooltip tokens. You can edit these texts.",
+            "$df_se_tooltip_attack_damage: \"{0} attack damage: <color=orange>x{1}%</color>\"",
+            "$df_se_tooltip_raise_skill: \"{0} skill XP: <color=orange>{1}</color>\"",
+            "$df_skill_all: \"All\"",
             "#",
             "# Example item override:",
             "# - item: MeadHealthtest",
@@ -459,6 +487,84 @@ internal static class LocalizationOverrideManager
             "#   description: Direct text override without localization",
             ""
         });
+    }
+
+    private static string DefaultKoreanLocalizationTemplate()
+    {
+        return string.Join(Environment.NewLine, new[]
+        {
+            "# DataForge 서버 동기화 localization 파일입니다.",
+            "#",
+            "# 이 폴더에는 Valheim 언어 이름을 파일명으로 사용합니다:",
+            "# English.yml, Korean.yml, Turkish.yml, German.yml 등.",
+            "#",
+            "# English.yml은 기본 fallback 파일입니다. 클라이언트 언어가 한국어이면",
+            "# DataForge는 English.yml을 먼저 적용한 뒤 Korean.yml을 덮어씁니다.",
+            "#",
+            "# override 필드에 $df_item_meadhealthtest 같은 토큰을 넣으면 이 파일의 번역을 사용합니다.",
+            "# $ 토큰을 쓰지 않고 필드에 직접 텍스트를 넣어도 그대로 표시됩니다.",
+            "#",
+            "# 예시 localization 항목:",
+            "# $df_item_meadhealthtest: \"테스트 아이템\"",
+            "# $df_item_meadhealthtest_description: \"대형 체력 벌꿀주를 복제한 테스트 아이템입니다.\"",
+            "",
+            "# DataForge 기본 툴팁 토큰입니다. 원하는 문구로 수정할 수 있습니다.",
+            "$df_se_tooltip_attack_damage: \"{0} 공격 피해: <color=orange>x{1}%</color>\"",
+            "$df_se_tooltip_raise_skill: \"{0} 기술 경험치: <color=orange>{1}</color>\"",
+            "$df_skill_all: \"전체\"",
+            "#",
+            "# 예시 item override:",
+            "# - item: MeadHealthtest",
+            "#   cloneFrom: MeadHealthMajor",
+            "#   name: $df_item_meadhealthtest",
+            "#   description: localization 토큰 없이 직접 입력한 설명",
+            ""
+        });
+    }
+
+    private static void EnsureBuiltInTranslations(
+        string path,
+        IReadOnlyCollection<(string Token, string Text)> translations,
+        string header)
+    {
+        string yaml = File.ReadAllText(path);
+        Dictionary<string, string?> existing;
+        try
+        {
+            existing = Deserializer.Deserialize<Dictionary<string, string?>>(yaml) ??
+                       new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return;
+        }
+
+        HashSet<string> existingTokens = new(existing.Keys.Select(NormalizeToken), StringComparer.OrdinalIgnoreCase);
+        List<(string Token, string Text)> missing = translations
+            .Where(entry => !existingTokens.Contains(NormalizeToken(entry.Token)))
+            .ToList();
+        if (missing.Count == 0)
+        {
+            return;
+        }
+
+        using StreamWriter writer = File.AppendText(path);
+        if (yaml.Length > 0 && !yaml.EndsWith(Environment.NewLine, StringComparison.Ordinal))
+        {
+            writer.WriteLine();
+        }
+
+        writer.WriteLine();
+        writer.WriteLine(header);
+        foreach ((string token, string text) in missing)
+        {
+            writer.WriteLine($"{token}: {QuoteYaml(text)}");
+        }
+    }
+
+    private static string QuoteYaml(string value)
+    {
+        return "\"" + value.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
     }
 
     private static bool IsLocalizationFile(string path)

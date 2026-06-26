@@ -207,6 +207,7 @@ internal static class RecipeOverrideManager
         {
             RefreshLiveRecipeState();
             UpdateRuntimeAppliedRecipeState(new List<RecipeEntry>());
+            VneiRefreshManager.RequestRefresh(DomainName);
             return;
         }
 
@@ -243,6 +244,7 @@ internal static class RecipeOverrideManager
 
         RefreshLiveRecipeState();
         UpdateRuntimeAppliedRecipeState(entries);
+        VneiRefreshManager.RequestRefresh(DomainName);
     }
 
     private static void RefreshLiveRecipeState()

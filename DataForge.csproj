@@ -152,6 +152,7 @@
         <Compile Include="StationExtensionSpacingBypass.cs"/>
         <Compile Include="PieceTableCategoryGuard.cs"/>
         <Compile Include="VneiPrefabCleanupGuard.cs"/>
+        <Compile Include="VneiRefreshManager.cs"/>
         <Compile Include="ReferenceDefaultRules.cs"/>
         <Compile Include="ReferenceValue.cs"/>
         <Compile Include="StatusEffectOwnershipApi.cs"/>

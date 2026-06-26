@@ -791,7 +791,7 @@ internal static class ItemVisualOverrides
         }
     }
 
-    private static Material? ResolveMaterial(string materialName)
+    internal static Material? ResolveMaterial(string materialName)
     {
         string normalizedName = NormalizeMaterialName(materialName);
         if (normalizedName.Length == 0)

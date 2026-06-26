@@ -24,7 +24,7 @@ internal static class PieceOverrideManager
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
     private const int DefaultPieceSortOrder = 100;
     private const string ReferenceStateKey = "pieces";
-    private const string ReferenceLogicVersion = "2026-06-24-piece-reference-state-v2";
+    private const string ReferenceLogicVersion = "2026-06-26-piece-visual-scale-v1";
     private static readonly HashSet<string> IgnoredCategoryNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "Feasts",
@@ -43,6 +43,9 @@ internal static class PieceOverrideManager
     private static readonly Dictionary<string, PieceDefinition> Baselines = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<PieceTable, List<GameObject>> PieceTableOrderBaselines = new(ReferenceComparer<PieceTable>.Instance);
     private static readonly HashSet<int> ManagedStationExtensionInstanceIds = new();
+    private static readonly HashSet<int> ManagedCraftingStationInstanceIds = new();
+    private static readonly Dictionary<int, List<StationExtensionSnapshot>> StationExtensionRemovalSnapshots = new();
+    private static readonly Dictionary<int, List<RendererMaterialSnapshot>> PieceMaterialSnapshots = new();
     private static readonly HashSet<string> RuntimeAppliedPieceKeys = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, string> PieceTableAliases = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -83,6 +86,7 @@ internal static class PieceOverrideManager
     private static bool RuntimeStateWasApplied;
     private static bool PieceTableSortWasApplied;
     private static bool PieceTableMembershipWasApplied;
+    private static bool CraftingStationTopologyChanged;
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
 
@@ -197,6 +201,8 @@ internal static class PieceOverrideManager
             RefreshLocalBuildPieces();
         }
 
+        ReapplyRecipesIfCraftingStationTopologyChanged();
+
         RuntimeStateWasApplied = hasActiveRuntimeDefinitions;
         RuntimeAppliedPieceKeys.Clear();
         if (hasActiveRuntimeDefinitions)
@@ -208,6 +214,7 @@ internal static class PieceOverrideManager
         }
         PieceTableSortWasApplied = hasActiveSortOrders;
         PieceTableMembershipWasApplied = hasActivePieceTableAssignments || hasActiveRemovedPieces;
+        VneiRefreshManager.RequestRefresh(DomainName);
     }
 
     private static bool ShouldSkipRemoteClientBaselineWork()
@@ -267,6 +274,11 @@ internal static class PieceOverrideManager
         PieceTablesReady = false;
         RuntimeStateWasApplied = false;
         RuntimeAppliedPieceKeys.Clear();
+        ManagedCraftingStationInstanceIds.Clear();
+        ManagedStationExtensionInstanceIds.Clear();
+        StationExtensionRemovalSnapshots.Clear();
+        PieceMaterialSnapshots.Clear();
+        CraftingStationTopologyChanged = false;
         PieceTableSortWasApplied = false;
         PieceTableMembershipWasApplied = false;
     }
@@ -590,6 +602,9 @@ internal static class PieceOverrideManager
             "#   canBeRemoved: true                  # false prevents removing the placed piece with a hammer.",
             "#   health: 100                         # max structural health when the prefab is damageable.",
             "#   comfort: 0, None                    # comfort amount, comfort group: None, Fire, Bed, Banner, Chair, Table, Carpet.",
+            "#   visual:",
+            "#     scale: 1                          # uniform prefab scale for newly placed pieces; larger values also affect collider/support behavior.",
+            "#     material: wood                    # material name from z_materials.reference.txt; replaces piece renderer material slots.",
             "#   resources:",
             "#   - Wood: 2                           # item: amount; add ', false' to disable build resource recovery.",
             "#   sapCollector: Sap, 60, 10           # produced item, seconds per unit, max stored units.",
@@ -609,8 +624,8 @@ internal static class PieceOverrideManager
             "#     conversions:",
             "#     - CopperOre: Copper               # from item: to item.",
             "#   container: 10, 4                    # width, height.",
-            "#   stationExtension: forge, 5           # target crafting station prefab/name, max station distance.",
-            "#   craftingStation:",
+            "#   stationExtension: forge, 5           # target station prefab/name, max distance. Use None to remove/disable StationExtension.",
+            "#   craftingStation:                    # edits an existing CraftingStation, or adds one if missing; omit later to remove DataForge-added station.",
             "#     name: $piece_forge                # CraftingStation.m_name localization token or text.",
             "#     discoveryRange: 4                 # station discovery range.",
             "#     buildRange: 20, 0                 # base build range, extra range per extension level.",
@@ -624,6 +639,10 @@ internal static class PieceOverrideManager
             "# Example:",
             "# - piece: wood_wall",
             "#   health: 250",
+            "#   visual:",
+            "#     scale: 2",
+            "#     material: amber",
+            "#   stationExtension: None",
             "#   resources:",
             "#   - Wood: 4"
         }) + Environment.NewLine;
@@ -734,7 +753,7 @@ internal static class PieceOverrideManager
 
         foreach ((string prefabName, Piece piece) in pieces)
         {
-            ApplyConfiguredState(piece.gameObject, prefabName, adjustHealthZdo: false);
+            ApplyConfiguredState(piece.gameObject, prefabName, adjustHealthZdo: false, applyVisualScale: true);
         }
     }
 
@@ -774,7 +793,7 @@ internal static class PieceOverrideManager
                 continue;
             }
 
-            ApplyConfiguredState(piece.gameObject, prefabName, adjustHealthZdo: true);
+            ApplyConfiguredState(piece.gameObject, prefabName, adjustHealthZdo: true, applyVisualScale: false);
         }
     }
 
@@ -785,22 +804,21 @@ internal static class PieceOverrideManager
                gameObject.GetComponent<WearNTear>() != null;
     }
 
-    private static void ApplyConfiguredState(GameObject gameObject, string prefabName, bool adjustHealthZdo)
+    private static void ApplyConfiguredState(GameObject gameObject, string prefabName, bool adjustHealthZdo, bool applyVisualScale)
     {
+        RestorePieceVisualMaterials(gameObject);
         bool finalHasStationExtension = false;
+        bool finalHasCraftingStation = false;
         if (Baselines.TryGetValue(prefabName, out PieceDefinition? baseline))
         {
             finalHasStationExtension = baseline.StationExtension != null;
-            ApplyDefinition(gameObject, baseline, adjustHealthZdo);
+            finalHasCraftingStation = baseline.CraftingStation != null;
+            ApplyDefinition(gameObject, baseline, adjustHealthZdo, applyVisualScale);
         }
 
         if (!DataForgePlugin.PieceOverridesEnabled)
         {
-            if (!finalHasStationExtension)
-            {
-                RemoveManagedStationExtensionIfPresent(gameObject);
-            }
-
+            RemoveManagedComponentsIfAbsent(gameObject, finalHasStationExtension, finalHasCraftingStation);
             return;
         }
 
@@ -812,11 +830,7 @@ internal static class PieceOverrideManager
 
         if (entries == null)
         {
-            if (!finalHasStationExtension)
-            {
-                RemoveManagedStationExtensionIfPresent(gameObject);
-            }
-
+            RemoveManagedComponentsIfAbsent(gameObject, finalHasStationExtension, finalHasCraftingStation);
             return;
         }
 
@@ -824,15 +838,26 @@ internal static class PieceOverrideManager
         {
             PieceDefinition definition = PieceDefinition.From(entry);
             finalHasStationExtension = finalHasStationExtension || definition.StationExtension != null;
+            finalHasCraftingStation = finalHasCraftingStation || definition.CraftingStation != null;
             using (DataForgeLogContext.Push(entry.LogContext))
             {
-                ApplyDefinition(gameObject, definition, adjustHealthZdo);
+                ApplyDefinition(gameObject, definition, adjustHealthZdo, applyVisualScale);
             }
         }
 
-        if (!finalHasStationExtension)
+        RemoveManagedComponentsIfAbsent(gameObject, finalHasStationExtension, finalHasCraftingStation);
+    }
+
+    private static void RemoveManagedComponentsIfAbsent(GameObject gameObject, bool hasStationExtension, bool hasCraftingStation)
+    {
+        if (!hasStationExtension)
         {
             RemoveManagedStationExtensionIfPresent(gameObject);
+        }
+
+        if (!hasCraftingStation)
+        {
+            RemoveManagedCraftingStationIfPresent(gameObject);
         }
     }
 
@@ -949,7 +974,7 @@ internal static class PieceOverrideManager
         return removedPieces;
     }
 
-    private static void ApplyDefinition(GameObject gameObject, PieceDefinition definition, bool adjustHealthZdo)
+    private static void ApplyDefinition(GameObject gameObject, PieceDefinition definition, bool adjustHealthZdo, bool applyVisualScale)
     {
         Piece piece = gameObject.GetComponent<Piece>();
         if (piece != null && definition.Piece != null)
@@ -957,7 +982,7 @@ internal static class PieceOverrideManager
             ApplyPieceDefinition(piece, definition.Piece, adjustHealthZdo);
         }
 
-        ApplySupportedComponentDefinitions(gameObject, definition);
+        ApplySupportedComponentDefinitions(gameObject, definition, applyVisualScale);
     }
 
     private static void ApplyPieceDefinition(Piece piece, PieceComponentDefinition definition, bool adjustHealthZdo)
@@ -1130,7 +1155,7 @@ internal static class PieceOverrideManager
         DataForgeLogContext.Warning($"{GetPrefabName(piece.gameObject)} has invalid negative health; keeping previous value.");
     }
 
-    private static void ApplySupportedComponentDefinitions(GameObject gameObject, PieceDefinition definition)
+    private static void ApplySupportedComponentDefinitions(GameObject gameObject, PieceDefinition definition, bool applyVisualScale)
     {
         if (definition.SapCollector != null)
         {
@@ -1193,11 +1218,22 @@ internal static class PieceOverrideManager
 
         if (definition.CraftingStation != null)
         {
-            CraftingStation craftingStation = gameObject.GetComponent<CraftingStation>();
+            CraftingStation? craftingStation = gameObject.GetComponent<CraftingStation>();
+            if (craftingStation == null)
+            {
+                craftingStation = AddManagedCraftingStation(gameObject);
+            }
+
             if (craftingStation != null)
             {
                 ApplyCraftingStationComponentDefinition(craftingStation, definition.CraftingStation);
+                EnsureCraftingStationRuntimeRegistration(craftingStation);
             }
+        }
+
+        if (definition.Visual != null)
+        {
+            ApplyPieceVisualDefinition(gameObject, definition.Visual, applyVisualScale);
         }
     }
 
@@ -1502,16 +1538,142 @@ internal static class PieceOverrideManager
         }
     }
 
+    private static void ApplyPieceVisualDefinition(GameObject gameObject, PieceVisualDefinition definition, bool applyVisualScale)
+    {
+        if (applyVisualScale)
+        {
+            ApplyVisualScale(gameObject, definition.Scale);
+        }
+        if (string.IsNullOrWhiteSpace(definition.Material))
+        {
+            return;
+        }
+
+        string prefabName = GetPrefabName(gameObject);
+        string materialName = (definition.Material ?? "").Trim();
+        Material? material = ItemVisualOverrides.ResolveMaterial(materialName);
+        if (material == null)
+        {
+            DataForgeLogContext.Warning($"{prefabName} has unknown visual material '{materialName}'. Check z_materials.reference.txt.");
+            return;
+        }
+
+        List<Renderer> renderers = GetPieceVisualRenderers(gameObject);
+        if (renderers.Count == 0)
+        {
+            DataForgeLogContext.Warning($"{prefabName} has no piece renderers for visual material override.");
+            return;
+        }
+
+        StorePieceMaterialSnapshots(gameObject, renderers);
+        foreach (Renderer renderer in renderers)
+        {
+            Material[] materials = renderer.sharedMaterials;
+            if (materials == null || materials.Length == 0)
+            {
+                continue;
+            }
+
+            Material[] updatedMaterials = materials.ToArray();
+            for (int index = 0; index < updatedMaterials.Length; index++)
+            {
+                if (updatedMaterials[index] != null)
+                {
+                    updatedMaterials[index] = material;
+                }
+            }
+
+            renderer.sharedMaterials = updatedMaterials;
+        }
+    }
+
+    private static void ApplyVisualScale(GameObject gameObject, float? scale)
+    {
+        if (scale == null)
+        {
+            return;
+        }
+
+        float clampedScale = Math.Max(0.001f, scale.Value);
+        gameObject.transform.localScale = new Vector3(clampedScale, clampedScale, clampedScale);
+    }
+
+    private static List<Renderer> GetPieceVisualRenderers(GameObject gameObject)
+    {
+        List<Renderer> renderers = gameObject
+            .GetComponentsInChildren<Renderer>(includeInactive: true)
+            .Where(renderer => renderer != null && renderer.sharedMaterials is { Length: > 0 } && renderer.receiveShadows)
+            .ToList();
+
+        if (renderers.Count > 0)
+        {
+            return renderers;
+        }
+
+        return gameObject
+            .GetComponentsInChildren<Renderer>(includeInactive: true)
+            .Where(renderer => renderer != null && renderer.sharedMaterials is { Length: > 0 })
+            .ToList();
+    }
+
+    private static void StorePieceMaterialSnapshots(GameObject gameObject, List<Renderer> renderers)
+    {
+        int key = gameObject.GetInstanceID();
+        if (PieceMaterialSnapshots.ContainsKey(key))
+        {
+            return;
+        }
+
+        PieceMaterialSnapshots[key] = renderers
+            .Select(renderer => new RendererMaterialSnapshot(renderer, renderer.sharedMaterials.ToArray()))
+            .ToList();
+    }
+
+    private static void RestorePieceVisualMaterials(GameObject gameObject)
+    {
+        int key = gameObject.GetInstanceID();
+        if (!PieceMaterialSnapshots.TryGetValue(key, out List<RendererMaterialSnapshot> snapshots))
+        {
+            return;
+        }
+
+        PieceMaterialSnapshots.Remove(key);
+        foreach (RendererMaterialSnapshot snapshot in snapshots)
+        {
+            if (snapshot.Renderer != null)
+            {
+                snapshot.Renderer.sharedMaterials = snapshot.Materials.ToArray();
+            }
+        }
+    }
+
     private static void ApplyStationExtensionDefinition(GameObject gameObject, string definition)
     {
         string prefabName = GetPrefabName(gameObject);
+        if (IsNone(GetStationExtensionStation(definition)))
+        {
+            RemoveStationExtensions(gameObject);
+            return;
+        }
+
         StationExtension extension = gameObject.GetComponent<StationExtension>();
+        if (extension == null)
+        {
+            RestoreRemovedStationExtensions(gameObject);
+            extension = gameObject.GetComponent<StationExtension>();
+        }
+
         if (extension == null)
         {
             string stationName = GetStationExtensionStation(definition);
             if (string.IsNullOrWhiteSpace(stationName) || IsNone(stationName))
             {
                 DataForgeLogContext.Warning($"{prefabName} stationExtension needs a station when adding a new StationExtension component.");
+                return;
+            }
+
+            if (!CanAddStationExtension(gameObject, prefabName))
+            {
                 return;
             }
 
@@ -1532,7 +1694,7 @@ internal static class PieceOverrideManager
         {
             if (IsNone(parts[0]))
             {
-                DataForgeLogContext.Warning($"{GetPrefabName(extension.gameObject)} stationExtension cannot use None because Valheim requires a non-null crafting station.");
+                RemoveStationExtensions(extension.gameObject);
                 return;
             }
             else
@@ -1545,11 +1707,115 @@ internal static class PieceOverrideManager
                 else
                 {
                     extension.m_craftingStation = station;
+                    EnableStationExtension(extension);
                 }
             }
         }
 
         CopyFloatPart(parts, 1, value => extension.m_maxStationDistance = Math.Max(0f, value));
+    }
+
+    private static void RemoveStationExtensions(GameObject gameObject)
+    {
+        StationExtension[] extensions = gameObject.GetComponents<StationExtension>();
+        if (extensions.Length == 0)
+        {
+            RemoveManagedStationExtensionIfPresent(gameObject);
+            return;
+        }
+
+        int key = gameObject.GetInstanceID();
+        if (!StationExtensionRemovalSnapshots.ContainsKey(key))
+        {
+            StationExtensionRemovalSnapshots[key] = extensions
+                .Where(extension => extension != null)
+                .Select(StationExtensionSnapshot.From)
+                .ToList();
+        }
+
+        foreach (StationExtension extension in extensions)
+        {
+            RemoveStationExtensionComponent(extension);
+        }
+
+        ManagedStationExtensionInstanceIds.Remove(key);
+    }
+
+    private static void RestoreRemovedStationExtensions(GameObject gameObject)
+    {
+        int key = gameObject.GetInstanceID();
+        if (!StationExtensionRemovalSnapshots.TryGetValue(key, out List<StationExtensionSnapshot> snapshots))
+        {
+            return;
+        }
+
+        StationExtensionRemovalSnapshots.Remove(key);
+        foreach (StationExtensionSnapshot snapshot in snapshots)
+        {
+            if (!CanAddStationExtension(gameObject, GetPrefabName(gameObject)))
+            {
+                continue;
+            }
+
+            StationExtension extension = gameObject.AddComponent<StationExtension>();
+            snapshot.Apply(extension);
+            EnableStationExtension(extension);
+        }
+    }
+
+    private static bool CanAddStationExtension(GameObject gameObject, string prefabName)
+    {
+        if (gameObject.GetComponent<Piece>() == null)
+        {
+            DataForgeLogContext.Warning($"{prefabName} cannot add stationExtension because it has no Piece component.");
+            return false;
+        }
+
+        if (gameObject.GetComponent<ZNetView>() == null)
+        {
+            DataForgeLogContext.Warning($"{prefabName} cannot add stationExtension because StationExtension.Awake requires a ZNetView on the same object.");
+            return false;
+        }
+
+        return true;
+    }
+
+    private static void RemoveStationExtensionComponent(StationExtension extension)
+    {
+        if (extension == null)
+        {
+            return;
+        }
+
+        StationExtension.m_allExtensions.Remove(extension);
+        extension.CancelInvoke();
+        extension.StopConnectionEffect();
+        try
+        {
+            UnityEngine.Object.DestroyImmediate(extension);
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogDebug($"Could not immediately remove StationExtension from '{GetPrefabName(extension.gameObject)}': {ex.Message}");
+            UnityEngine.Object.Destroy(extension);
+        }
+    }
+
+    private static void EnableStationExtension(StationExtension extension)
+    {
+        extension.enabled = true;
+        extension.m_piece = extension.GetComponent<Piece>();
+        ZNetView zNetView = extension.GetComponent<ZNetView>();
+        if (zNetView != null && zNetView.GetZDO() != null && !StationExtension.m_allExtensions.Contains(extension))
+        {
+            StationExtension.m_allExtensions.Add(extension);
+        }
+
+        if (extension.m_continousConnection)
+        {
+            extension.CancelInvoke("UpdateConnection");
+            extension.InvokeRepeating("UpdateConnection", 1f, 4f);
+        }
     }
 
     private static void RemoveManagedStationExtensionIfPresent(GameObject gameObject)
@@ -1574,6 +1840,125 @@ internal static class PieceOverrideManager
         {
             DataForgePlugin.Log.LogDebug($"Could not immediately remove managed StationExtension from '{GetPrefabName(gameObject)}': {ex.Message}");
             UnityEngine.Object.Destroy(extension);
+        }
+    }
+
+    private static CraftingStation? AddManagedCraftingStation(GameObject gameObject)
+    {
+        Piece piece = gameObject.GetComponent<Piece>();
+        if (piece == null)
+        {
+            DataForgeLogContext.Warning($"{GetPrefabName(gameObject)} cannot become a craftingStation because it has no Piece component.");
+            return null;
+        }
+
+        CraftingStation craftingStation = gameObject.AddComponent<CraftingStation>();
+        ManagedCraftingStationInstanceIds.Add(gameObject.GetInstanceID());
+        CraftingStationTopologyChanged = true;
+
+        craftingStation.name = GetPrefabName(gameObject);
+        craftingStation.m_name = !string.IsNullOrWhiteSpace(piece.m_name) ? piece.m_name : craftingStation.name;
+        craftingStation.m_icon = piece.m_icon;
+        craftingStation.m_roofCheckPoint = gameObject.transform;
+        craftingStation.m_connectionPoint = gameObject.transform;
+        craftingStation.m_craftRequireRoof = false;
+        craftingStation.m_craftRequireFire = false;
+        craftingStation.m_useDistance = craftingStation.m_useDistance > 0f ? craftingStation.m_useDistance : 2f;
+        craftingStation.m_useAnimation = craftingStation.m_useAnimation != 0 ? craftingStation.m_useAnimation : 2;
+        craftingStation.m_craftingSkill = Skills.SkillType.Crafting;
+        if (craftingStation.m_craftItemEffects == null)
+        {
+            craftingStation.m_craftItemEffects = new EffectList();
+        }
+
+        if (craftingStation.m_craftItemDoneEffects == null)
+        {
+            craftingStation.m_craftItemDoneEffects = new EffectList();
+        }
+
+        if (craftingStation.m_repairItemDoneEffects == null)
+        {
+            craftingStation.m_repairItemDoneEffects = new EffectList();
+        }
+
+        EnsureCraftingStationRuntimeRegistration(craftingStation);
+        return craftingStation;
+    }
+
+    private static void RemoveManagedCraftingStationIfPresent(GameObject gameObject)
+    {
+        int key = gameObject.GetInstanceID();
+        if (!ManagedCraftingStationInstanceIds.Remove(key))
+        {
+            return;
+        }
+
+        CraftingStation craftingStation = gameObject.GetComponent<CraftingStation>();
+        if (craftingStation == null)
+        {
+            CraftingStationTopologyChanged = true;
+            return;
+        }
+
+        CraftingStationTopologyChanged = true;
+        craftingStation.CancelInvoke();
+        craftingStation.m_attachedExtensions?.Clear();
+        CraftingStation.m_allStations.Remove(craftingStation);
+        CraftingStation.Instances.Remove(craftingStation);
+        try
+        {
+            UnityEngine.Object.DestroyImmediate(craftingStation);
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogDebug($"Could not immediately remove managed CraftingStation from '{GetPrefabName(gameObject)}': {ex.Message}");
+            UnityEngine.Object.Destroy(craftingStation);
+        }
+    }
+
+    private static void EnsureCraftingStationRuntimeRegistration(CraftingStation craftingStation)
+    {
+        if (craftingStation == null)
+        {
+            return;
+        }
+
+        bool isManaged = ManagedCraftingStationInstanceIds.Contains(craftingStation.gameObject.GetInstanceID());
+        if (isManaged)
+        {
+            if (craftingStation.m_roofCheckPoint == null)
+            {
+                craftingStation.m_roofCheckPoint = craftingStation.transform;
+            }
+
+            if (craftingStation.m_connectionPoint == null)
+            {
+                craftingStation.m_connectionPoint = craftingStation.transform;
+            }
+        }
+
+        craftingStation.m_updateExtensionTimer = CraftingStation.m_updateExtensionInterval;
+        if (!craftingStation.gameObject.scene.IsValid())
+        {
+            return;
+        }
+
+        craftingStation.m_nview = craftingStation.GetComponent<ZNetView>();
+        if ((craftingStation.m_nview == null || craftingStation.m_nview.GetZDO() != null) &&
+            !CraftingStation.m_allStations.Contains(craftingStation))
+        {
+            CraftingStation.m_allStations.Add(craftingStation);
+        }
+
+        if (!CraftingStation.Instances.Contains(craftingStation))
+        {
+            CraftingStation.Instances.Add(craftingStation);
+        }
+
+        craftingStation.CancelInvoke("CheckFire");
+        if (craftingStation.m_craftRequireFire)
+        {
+            craftingStation.InvokeRepeating("CheckFire", 1f, 1f);
         }
     }
 
@@ -2838,6 +3223,17 @@ internal static class PieceOverrideManager
         Player.m_localPlayer.UpdateAvailablePiecesList();
     }
 
+    private static void ReapplyRecipesIfCraftingStationTopologyChanged()
+    {
+        if (!CraftingStationTopologyChanged)
+        {
+            return;
+        }
+
+        CraftingStationTopologyChanged = false;
+        RecipeOverrideManager.ApplyCurrentConfiguration();
+    }
+
     private static void ApplyHealth(WearNTear wearNTear, float maxHealth, bool adjustHealthZdo)
     {
         float previousMax = wearNTear.m_health;
@@ -3085,6 +3481,7 @@ internal static class PieceOverrideManager
         public string? Container { get; set; }
         public string? StationExtension { get; set; }
         public CraftingStationComponentDefinition? CraftingStation { get; set; }
+        public PieceVisualDefinition? Visual { get; set; }
 
         internal void SetLogContext(string value)
         {
@@ -3106,7 +3503,8 @@ internal static class PieceOverrideManager
             Smelter != null ||
             Container != null ||
             StationExtension != null ||
-            CraftingStation != null;
+            CraftingStation != null ||
+            Visual != null;
 
         private bool HasBaseDefinition =>
             Name != null ||
@@ -3163,7 +3561,8 @@ internal static class PieceOverrideManager
                 Smelter = definition.Smelter,
                 Container = definition.Container,
                 StationExtension = definition.StationExtension,
-                CraftingStation = definition.CraftingStation
+                CraftingStation = definition.CraftingStation,
+                Visual = definition.Visual
             };
         }
     }
@@ -3183,6 +3582,7 @@ internal static class PieceOverrideManager
         public string? Container { get; set; }
         public string? StationExtension { get; set; }
         public CraftingStationReferenceDefinition? CraftingStation { get; set; }
+        public PieceVisualDefinition? Visual { get; set; }
 
         internal static PieceReferenceEntry From(string prefab, PieceDefinition definition)
         {
@@ -3208,7 +3608,8 @@ internal static class PieceOverrideManager
                         CraftRequiresRoof = definition.CraftingStation.CraftRequiresRoof,
                         CraftRequiresFire = definition.CraftingStation.CraftRequiresFire
                     })
-                    : null
+                    : null,
+                Visual = definition.Visual != null ? ReferenceValue.ClonePruned(definition.Visual) : null
             };
             return ReferenceValue.ClonePruned(entry) ?? new PieceReferenceEntry { Piece = prefab };
         }
@@ -3237,6 +3638,7 @@ internal static class PieceOverrideManager
         public string? Container { get; set; }
         public string? StationExtension { get; set; }
         public CraftingStationComponentDefinition? CraftingStation { get; set; }
+        public PieceVisualDefinition? Visual { get; set; }
 
         internal static PieceDefinition From(PieceEntry entry)
         {
@@ -3250,7 +3652,8 @@ internal static class PieceOverrideManager
                 Smelter = entry.Smelter,
                 Container = entry.Container,
                 StationExtension = entry.StationExtension,
-                CraftingStation = entry.CraftingStation
+                CraftingStation = entry.CraftingStation,
+                Visual = entry.Visual
             };
         }
 
@@ -3266,7 +3669,8 @@ internal static class PieceOverrideManager
                 Smelter = SmelterDefinition.From(piece.GetComponent<Smelter>()),
                 Container = FormatContainer(piece.GetComponent<Container>()),
                 StationExtension = FormatStationExtension(piece.GetComponents<StationExtension>()),
-                CraftingStation = CraftingStationComponentDefinition.From(piece.GetComponent<CraftingStation>())
+                CraftingStation = CraftingStationComponentDefinition.From(piece.GetComponent<CraftingStation>()),
+                Visual = PieceVisualDefinition.From(piece)
             };
         }
     }
@@ -3584,6 +3988,13 @@ internal static class PieceOverrideManager
             : FormatTuple(container.m_width, container.m_height);
     }
 
+    private static float FormatUniformScale(Vector3 scale)
+    {
+        return Math.Abs(scale.x - scale.y) <= 0.0001f && Math.Abs(scale.x - scale.z) <= 0.0001f
+            ? scale.x
+            : Math.Max(scale.x, Math.Max(scale.y, scale.z));
+    }
+
     private static string? FormatStationExtension(StationExtension[] extensions)
     {
         if (extensions == null || extensions.Length == 0)
@@ -3597,6 +4008,20 @@ internal static class PieceOverrideManager
             : FormatTuple(
                 extension.m_craftingStation != null ? GetPrefabName(extension.m_craftingStation.gameObject) : "None",
                 extension.m_maxStationDistance);
+    }
+
+    internal sealed class PieceVisualDefinition
+    {
+        public float? Scale { get; set; }
+        public string? Material { get; set; }
+
+        internal static PieceVisualDefinition? From(Piece piece)
+        {
+            return new PieceVisualDefinition
+            {
+                Scale = FormatUniformScale(piece.transform.localScale)
+            };
+        }
     }
 
     internal sealed class CraftingStationReferenceDefinition
@@ -3636,6 +4061,54 @@ internal static class PieceOverrideManager
                     CraftingSkill = craftingStation.m_craftingSkill.ToString()
                 };
         }
+    }
+
+    private sealed class StationExtensionSnapshot
+    {
+        private CraftingStation? CraftingStation { get; set; }
+        private float MaxStationDistance { get; set; }
+        private bool Stack { get; set; }
+        private GameObject? ConnectionPrefab { get; set; }
+        private Vector3 ConnectionOffset { get; set; }
+        private bool ContinuousConnection { get; set; }
+        private Piece? Piece { get; set; }
+
+        internal static StationExtensionSnapshot From(StationExtension extension)
+        {
+            return new StationExtensionSnapshot
+            {
+                CraftingStation = extension.m_craftingStation,
+                MaxStationDistance = extension.m_maxStationDistance,
+                Stack = extension.m_stack,
+                ConnectionPrefab = extension.m_connectionPrefab,
+                ConnectionOffset = extension.m_connectionOffset,
+                ContinuousConnection = extension.m_continousConnection,
+                Piece = extension.m_piece
+            };
+        }
+
+        internal void Apply(StationExtension extension)
+        {
+            extension.m_craftingStation = CraftingStation;
+            extension.m_maxStationDistance = MaxStationDistance;
+            extension.m_stack = Stack;
+            extension.m_connectionPrefab = ConnectionPrefab;
+            extension.m_connectionOffset = ConnectionOffset;
+            extension.m_continousConnection = ContinuousConnection;
+            extension.m_piece = Piece != null ? Piece : extension.GetComponent<Piece>();
+        }
+    }
+
+    private sealed class RendererMaterialSnapshot
+    {
+        internal RendererMaterialSnapshot(Renderer renderer, Material[] materials)
+        {
+            Renderer = renderer;
+            Materials = materials;
+        }
+
+        internal Renderer Renderer { get; }
+        internal Material[] Materials { get; }
     }
 
     private static string FormatCraftingStation(CraftingStation? craftingStation)

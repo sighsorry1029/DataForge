@@ -60,7 +60,7 @@ internal static class VneiPrefabCleanupGuard
         return null;
     }
 
-    private static void RemoveInvalidEntriesBeforeVnei()
+    internal static void RemoveInvalidEntriesBeforeVnei()
     {
         ZNetScene scene = ZNetScene.instance;
         if (!scene)

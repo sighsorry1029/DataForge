@@ -14,7 +14,7 @@ namespace DataForge;
 public class DataForgePlugin : BaseUnityPlugin
 {
     internal const string ModName = "DataForge";
-    internal const string ModVersion = "1.0.3";
+    internal const string ModVersion = "1.0.4";
     internal const string Author = "sighsorry";
     internal const string ModGUID = $"{Author}.{ModName}";
 
@@ -198,6 +198,7 @@ public class DataForgePlugin : BaseUnityPlugin
         ItemOverrideManager.Initialize(ConfigSync);
         RecipeOverrideManager.Initialize(ConfigSync);
         PieceOverrideManager.Initialize(ConfigSync);
+        VneiRefreshManager.Initialize();
         ConfigSync.SourceOfTruthChanged += OnSourceOfTruthChanged;
         DataForgeConsoleCommands.Register();
 
@@ -225,6 +226,7 @@ public class DataForgePlugin : BaseUnityPlugin
         ItemOverrideManager.Dispose();
         RecipeOverrideManager.Dispose();
         PieceOverrideManager.Dispose();
+        VneiRefreshManager.Dispose();
         ConfigSync.SourceOfTruthChanged -= OnSourceOfTruthChanged;
         _harmony.UnpatchSelf();
     }

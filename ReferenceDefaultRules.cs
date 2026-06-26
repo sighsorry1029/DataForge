@@ -98,6 +98,10 @@ internal static class ReferenceDefaultRules
         {
             defaultValue = 2f;
         }
+        else if (propertyName.Equals("Scale", StringComparison.OrdinalIgnoreCase))
+        {
+            defaultValue = 1f;
+        }
 
         return Math.Abs(value - defaultValue) <= FloatEpsilon;
     }
