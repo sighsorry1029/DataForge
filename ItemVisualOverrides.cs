@@ -193,7 +193,11 @@ internal static class ItemVisualOverrides
         Sprite? icon = ResolveIconSprite(iconKey);
         if (icon == null)
         {
-            DataForgeLogContext.Warning($"{prefabName} has unknown visual icon '{iconKey}'. Expected a png under DataForge/icon.");
+            if (!IsHeadlessGraphics())
+            {
+                DataForgeLogContext.Warning($"{prefabName} has unknown visual icon '{iconKey}'. Expected a png under DataForge/icon.");
+            }
+
             return;
         }
 

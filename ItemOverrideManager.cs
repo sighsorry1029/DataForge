@@ -151,7 +151,9 @@ internal static class ItemOverrideManager
         }
 
         ZNetSceneReady = true;
-        if (!ObjectDbReady || ObjectDB.instance == null)
+        if (!ObjectDbReady ||
+            !DataForgeWorldLifecycle.IsGameStarted ||
+            ObjectDB.instance == null)
         {
             return;
         }
@@ -201,7 +203,11 @@ internal static class ItemOverrideManager
 
     internal static void ApplyCurrentConfiguration()
     {
-        if (!ObjectDbReady || ObjectDB.instance == null)
+        if (!ObjectDbReady ||
+            !ZNetSceneReady ||
+            !DataForgeWorldLifecycle.IsGameStarted ||
+            ObjectDB.instance == null ||
+            ZNetScene.instance == null)
         {
             return;
         }
@@ -2433,7 +2439,11 @@ internal static class ItemOverrideManager
         StatusEffect? statusEffect = ResolveStatusEffect(statusEffectName);
         if (statusEffect == null)
         {
-            DataForgeLogContext.Warning($"Could not resolve status effect '{statusEffectName}'.");
+            if (ZNetSceneReady && DataForgeWorldLifecycle.IsGameStarted)
+            {
+                DataForgeLogContext.Warning($"Could not resolve status effect '{statusEffectName}'.");
+            }
+
             return;
         }
 

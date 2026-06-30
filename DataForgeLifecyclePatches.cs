@@ -5,17 +5,32 @@ namespace DataForge;
 internal static class DataForgeWorldLifecycle
 {
     internal static bool IsShuttingDown { get; private set; }
+    internal static bool IsGameStarted { get; private set; }
 
     internal static bool MarkStarting()
     {
         bool wasShuttingDown = IsShuttingDown;
         IsShuttingDown = false;
+        if (wasShuttingDown)
+        {
+            IsGameStarted = false;
+        }
+
         return wasShuttingDown;
+    }
+
+    internal static void MarkGameStarted()
+    {
+        if (!IsShuttingDown)
+        {
+            IsGameStarted = true;
+        }
     }
 
     internal static void MarkShuttingDown()
     {
         IsShuttingDown = true;
+        IsGameStarted = false;
     }
 }
 
@@ -113,6 +128,24 @@ internal static class DataForgePieceDungeonDbStartPatch
         }
 
         DataForgeProfiler.Profile("pieces.OnPieceTablesReady", PieceOverrideManager.OnPieceTablesReady);
+        DataForgeProfiler.Profile("recipes.OnPieceTablesReady", RecipeOverrideManager.ApplyCurrentConfiguration);
+    }
+}
+
+[HarmonyPatch(typeof(Game), nameof(Game.Start))]
+internal static class DataForgeGameStartPatch
+{
+    [HarmonyPriority(Priority.Last)]
+    private static void Postfix()
+    {
+        if (DataForgeWorldLifecycle.IsShuttingDown)
+        {
+            return;
+        }
+
+        DataForgeWorldLifecycle.MarkGameStarted();
+        DataForgeProfiler.Profile("effects.OnGameReady", StatusEffectOverrideManager.ApplyCurrentConfiguration);
+        DataForgeProfiler.Profile("items.OnGameReady", ItemOverrideManager.ApplyCurrentConfiguration);
     }
 }
 

@@ -170,7 +170,11 @@ internal static class RecipeOverrideManager
 
     internal static void ApplyCurrentConfiguration()
     {
-        if (!ObjectDbReady || ObjectDB.instance == null || !ZNetSceneReady || ZNetScene.instance == null)
+        if (!ObjectDbReady ||
+            !ZNetSceneReady ||
+            !DataForgeWorldLifecycle.IsGameStarted ||
+            ObjectDB.instance == null ||
+            ZNetScene.instance == null)
         {
             return;
         }

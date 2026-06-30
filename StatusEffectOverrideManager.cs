@@ -9,6 +9,7 @@ using BepInEx;
 using HarmonyLib;
 using ServerSync;
 using UnityEngine;
+using UnityEngine.Rendering;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 using static DataForge.DataForgeValue;
@@ -59,6 +60,7 @@ internal static class StatusEffectOverrideManager
     private static FileSystemWatcher? Watcher;
     private static DataForgeFileWatcher.DebouncedAction? ReloadDebouncer;
     private static bool ObjectDbReady;
+    private static bool ZNetSceneReady;
     private static bool RuntimeStateWasApplied;
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
@@ -139,12 +141,21 @@ internal static class StatusEffectOverrideManager
 
     internal static void OnZNetSceneReady()
     {
+        if (ZNetScene.instance == null)
+        {
+            return;
+        }
+
+        ZNetSceneReady = true;
         ApplyCurrentConfiguration();
     }
 
     internal static void ApplyCurrentConfiguration()
     {
-        if (!ObjectDbReady || ObjectDB.instance == null)
+        if (!ObjectDbReady ||
+            !ZNetSceneReady ||
+            !DataForgeWorldLifecycle.IsGameStarted ||
+            ObjectDB.instance == null)
         {
             return;
         }
@@ -901,6 +912,7 @@ internal static class StatusEffectOverrideManager
     internal static void OnWorldShutdown()
     {
         ObjectDbReady = false;
+        ZNetSceneReady = false;
         RuntimeStateWasApplied = false;
         RuntimeAppliedEffectKeys.Clear();
         CleanupCreatedClonesForWorldTransition();
@@ -944,15 +956,26 @@ internal static class StatusEffectOverrideManager
 
     private static void EnsureCloneEffect(StatusEffectEntry entry)
     {
-        if (ObjectDB.instance == null || CreatedClones.Contains(entry.Effect))
+        if (ObjectDB.instance == null)
         {
             return;
         }
 
-        if (ResolveStatusEffect(entry.Effect) != null)
+        StatusEffect? existing = ResolveStatusEffect(entry.Effect);
+        if (existing != null)
         {
             CreatedClones.Add(entry.Effect);
             return;
+        }
+
+        if (CreatedClones.Contains(entry.Effect))
+        {
+            CreatedClones.Remove(entry.Effect);
+            Baselines.Remove(entry.Effect);
+            BaselineEffects.Remove(entry.Effect);
+            BaselineIcons.Remove(entry.Effect);
+            BaselineStartEffects.Remove(entry.Effect);
+            BaselineStopEffects.Remove(entry.Effect);
         }
 
         StatusEffect? source = ResolveStatusEffect(entry.CloneFrom);
@@ -1163,11 +1186,20 @@ internal static class StatusEffectOverrideManager
         Sprite? icon = ResolveIconSprite(iconKey);
         if (icon == null)
         {
-            DataForgeLogContext.Warning($"{statusEffect.name} has unknown status effect icon '{iconKey}'. Expected a png under DataForge/icon.");
+            if (!IsHeadlessGraphics())
+            {
+                DataForgeLogContext.Warning($"{statusEffect.name} has unknown status effect icon '{iconKey}'. Expected a png under DataForge/icon.");
+            }
+
             return;
         }
 
         statusEffect.m_icon = icon;
+    }
+
+    private static bool IsHeadlessGraphics()
+    {
+        return SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null;
     }
 
     private static Sprite? ResolveIconSprite(string iconName)
@@ -1385,11 +1417,57 @@ internal static class StatusEffectOverrideManager
             : null;
     }
 
+    private static GameObject? ResolveEffectPrefabFromStatusEffects(string prefabName)
+    {
+        if (ObjectDB.instance == null || string.IsNullOrWhiteSpace(prefabName))
+        {
+            return null;
+        }
+
+        foreach (StatusEffect statusEffect in ObjectDB.instance.m_StatusEffects)
+        {
+            GameObject? prefab = ResolveEffectPrefabFromEffectList(statusEffect?.m_startEffects, prefabName) ??
+                                 ResolveEffectPrefabFromEffectList(statusEffect?.m_stopEffects, prefabName);
+            if (prefab != null)
+            {
+                return prefab;
+            }
+        }
+
+        return null;
+    }
+
+    private static GameObject? ResolveEffectPrefabFromEffectList(EffectList? effectList, string prefabName)
+    {
+        if (effectList?.m_effectPrefabs == null)
+        {
+            return null;
+        }
+
+        foreach (EffectList.EffectData effectData in effectList.m_effectPrefabs)
+        {
+            GameObject? prefab = effectData.m_prefab;
+            if (prefab == null)
+            {
+                continue;
+            }
+
+            string cleanName = Utils.GetPrefabName(prefab.name);
+            if (string.Equals(cleanName, prefabName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(prefab.name, prefabName, StringComparison.OrdinalIgnoreCase))
+            {
+                return prefab;
+            }
+        }
+
+        return null;
+    }
+
     private static GameObject? ResolveEffectPrefab(string prefabName)
     {
         if (ZNetScene.instance == null || string.IsNullOrWhiteSpace(prefabName))
         {
-            return null;
+            return ResolveEffectPrefabFromStatusEffects(prefabName);
         }
 
         GameObject prefab = ZNetScene.instance.GetPrefab(prefabName);
@@ -1399,9 +1477,12 @@ internal static class StatusEffectOverrideManager
         }
 
         int hash = prefabName.GetStableHashCode();
-        return ZNetScene.instance.m_namedPrefabs.TryGetValue(hash, out GameObject namedPrefab)
-            ? namedPrefab
-            : null;
+        if (ZNetScene.instance.m_namedPrefabs.TryGetValue(hash, out GameObject namedPrefab) && namedPrefab != null)
+        {
+            return namedPrefab;
+        }
+
+        return ResolveEffectPrefabFromStatusEffects(prefabName);
     }
 
     private static void ApplyStats(SE_Stats stats, StatsDefinition? definition)

@@ -1,11 +1,17 @@
 # Changelog
 
-## 1.0.4
+## 1.0.5
 
-- Added automatic VNEI reindexing after DataForge item, recipe, and piece changes.
-- Added Korean localization defaults and improved missing localization fallback for status-effect tooltips.
+- Delayed item, recipe, piece, and status-effect override application until the game data is fully ready.
+- Improved status-effect VFX/SFX prefab resolution for effects referenced by other status effects.
+- Suppressed missing custom icon warnings on headless dedicated servers.
+- Improved status-effect clone cleanup and refresh across reloads and world transitions.
+
+## 1.0.4
 - Added tooltip lines for status-effect attack damage and skill experience modifiers.
+- Added localization defaults and improved missing localization fallback for status-effect tooltips.
 - Added piece scale and visual material overrides, plus `stationExtension: None` support.
+- Added automatic VNEI reindexing after DataForge item, recipe, and piece changes.
 - Improved piece crafting-station component overrides for adding and removing DataForge-managed stations.
 
 ## 1.0.3

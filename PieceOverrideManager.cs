@@ -148,7 +148,12 @@ internal static class PieceOverrideManager
 
     internal static void ApplyCurrentConfiguration()
     {
-        if (!GameDataReady || !ObjectDbReady || ZNetScene.instance == null || ObjectDB.instance == null)
+        if (!GameDataReady ||
+            !ObjectDbReady ||
+            !PieceTablesReady ||
+            !DataForgeWorldLifecycle.IsGameStarted ||
+            ZNetScene.instance == null ||
+            ObjectDB.instance == null)
         {
             return;
         }
