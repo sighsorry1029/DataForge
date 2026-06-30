@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.6
+
+- Changed DataForge's VNEI compatibility lookup to resolve only the required VNEI types from the VNEI plugin assembly.
+- Reduced HarmonyX reflection warnings caused by VNEI's optional EpicLoot compatibility type when EpicLoot is not installed.
+
 ## 1.0.5
 
 - Delayed item, recipe, piece, and status-effect override application until the game data is fully ready.

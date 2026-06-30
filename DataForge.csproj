@@ -151,6 +151,7 @@
         <Compile Include="FireplaceFuelOverflow.cs"/>
         <Compile Include="StationExtensionSpacingBypass.cs"/>
         <Compile Include="PieceTableCategoryGuard.cs"/>
+        <Compile Include="DataForgeVneiTypes.cs"/>
         <Compile Include="VneiPrefabCleanupGuard.cs"/>
         <Compile Include="VneiRefreshManager.cs"/>
         <Compile Include="ReferenceDefaultRules.cs"/>

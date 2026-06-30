@@ -53,8 +53,8 @@ internal static class VneiRefreshManager
         IndexBackup? backup = null;
         try
         {
-            Type? indexingType = AccessTools.TypeByName("VNEI.Logic.Indexing");
-            Type? recipeInfoType = AccessTools.TypeByName("VNEI.Logic.RecipeInfo");
+            Type? indexingType = DataForgeVneiTypes.Get("VNEI.Logic.Indexing");
+            Type? recipeInfoType = DataForgeVneiTypes.Get("VNEI.Logic.RecipeInfo");
             if (indexingType == null || recipeInfoType == null)
             {
                 return;

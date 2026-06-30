@@ -27,7 +27,7 @@ internal static class VneiPrefabCleanupGuard
         }
 
         NextPatchAttemptUtc = now.AddSeconds(5);
-        Type? indexingType = FindLoadedType("VNEI.Logic.Indexing");
+        Type? indexingType = DataForgeVneiTypes.Get("VNEI.Logic.Indexing");
         if (indexingType == null)
         {
             return;
@@ -44,20 +44,6 @@ internal static class VneiPrefabCleanupGuard
 
         harmony.Patch(indexAllMethod, prefix: new HarmonyMethod(prefixMethod));
         VneiIndexAllPatchInstalled = true;
-    }
-
-    private static Type? FindLoadedType(string fullName)
-    {
-        foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
-        {
-            Type? type = assembly.GetType(fullName, throwOnError: false);
-            if (type != null)
-            {
-                return type;
-            }
-        }
-
-        return null;
     }
 
     internal static void RemoveInvalidEntriesBeforeVnei()
