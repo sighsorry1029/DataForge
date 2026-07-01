@@ -15,7 +15,7 @@ internal static class ItemVisualOverrides
 {
     internal const string AutoIconValue = "auto";
     internal const string DefaultAutoIconRotationValue = "23, 51, 25.8";
-    private const string AutoIconRenderRevision = "jotunn-prefab-main-renderers-3";
+    private const string AutoIconRenderRevision = "jotunn-prefab-main-renderers-4-clear-fingerprint";
     private const int AutoIconSize = 128;
     private const int AutoIconLayer = 30;
     private static readonly Vector3 DefaultAutoIconRotation = new(23f, 51f, 25.8f);
@@ -230,10 +230,17 @@ internal static class ItemVisualOverrides
         ItemOverrideManager.VisualDefinition visual,
         Vector3 iconRotation)
     {
-        string cachePath = GetAutoIconCachePath(prefabName, visual, iconRotation);
+        string renderFingerprint = BuildAutoIconRenderFingerprint(itemDrop.gameObject);
+        string cachePath = GetAutoIconCachePath(prefabName, visual, iconRotation, renderFingerprint);
         if (File.Exists(cachePath))
         {
-            return LoadSpriteFromPath(cachePath, $"{prefabName} auto icon");
+            Sprite? cachedIcon = LoadSpriteFromPath(cachePath, $"{prefabName} auto icon");
+            if (cachedIcon != null)
+            {
+                return cachedIcon;
+            }
+
+            TryDeleteFile(cachePath);
         }
 
         Sprite? icon = RenderAutoIconSprite(prefabName, itemDrop, iconRotation);
@@ -243,6 +250,7 @@ internal static class ItemVisualOverrides
         }
 
         TryWriteAutoIconCache(cachePath, icon);
+        PruneAutoIconCacheSiblings(prefabName, cachePath);
         return icon;
     }
 
@@ -298,6 +306,7 @@ internal static class ItemVisualOverrides
             renderTexture = RenderTexture.GetTemporary(AutoIconSize, AutoIconSize, 24, RenderTextureFormat.ARGB32);
             camera.targetTexture = renderTexture;
             RenderTexture.active = renderTexture;
+            GL.Clear(clearDepth: true, clearColor: true, Color.clear);
             camera.Render();
 
             Texture2D texture = new(AutoIconSize, AutoIconSize, TextureFormat.RGBA32, mipChain: false)
@@ -323,12 +332,12 @@ internal static class ItemVisualOverrides
             if (camera != null)
             {
                 camera.targetTexture = null;
-                UnityEngine.Object.Destroy(camera.gameObject);
+                DestroyAutoIconTemporaryObject(camera.gameObject);
             }
 
             if (light != null)
             {
-                UnityEngine.Object.Destroy(light.gameObject);
+                DestroyAutoIconTemporaryObject(light.gameObject);
             }
 
             if (renderTexture != null)
@@ -338,7 +347,7 @@ internal static class ItemVisualOverrides
 
             if (renderObject != null)
             {
-                UnityEngine.Object.Destroy(renderObject);
+                DestroyAutoIconTemporaryObject(renderObject);
             }
         }
     }
@@ -371,7 +380,7 @@ internal static class ItemVisualOverrides
             renderers = SelectAutoIconRenderers(renderObject);
             if (renderers.Count == 0)
             {
-                UnityEngine.Object.Destroy(renderObject);
+                DestroyAutoIconTemporaryObject(renderObject);
                 return null;
             }
 
@@ -394,6 +403,25 @@ internal static class ItemVisualOverrides
             }
 
             throw;
+        }
+    }
+
+    private static void DestroyAutoIconTemporaryObject(GameObject? gameObject)
+    {
+        if (gameObject == null)
+        {
+            return;
+        }
+
+        try
+        {
+            gameObject.SetActive(false);
+            UnityEngine.Object.DestroyImmediate(gameObject);
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogDebug($"Could not immediately destroy auto icon object '{gameObject.name}': {ex.Message}");
+            UnityEngine.Object.Destroy(gameObject);
         }
     }
 
@@ -619,7 +647,8 @@ internal static class ItemVisualOverrides
     private static string GetAutoIconCachePath(
         string prefabName,
         ItemOverrideManager.VisualDefinition visual,
-        Vector3 iconRotation)
+        Vector3 iconRotation,
+        string renderFingerprint)
     {
         string fingerprint = string.Join("|", new[]
         {
@@ -630,10 +659,90 @@ internal static class ItemVisualOverrides
             visual.Color?.Trim() ?? "",
             visual.Emission?.ToString(CultureInfo.InvariantCulture) ?? "",
             FormatVector3(iconRotation),
-            AutoIconSize.ToString(CultureInfo.InvariantCulture)
+            AutoIconSize.ToString(CultureInfo.InvariantCulture),
+            renderFingerprint
         });
         string hash = fingerprint.GetStableHashCode().ToString("x8", CultureInfo.InvariantCulture);
         return Path.Combine(AutoIconCacheDirectory, $"{SanitizeFileName(prefabName)}-{hash}.png");
+    }
+
+    private static string BuildAutoIconRenderFingerprint(GameObject itemPrefab)
+    {
+        List<string> parts = new();
+        foreach (Renderer renderer in GetItemVisualRenderers(itemPrefab).OrderBy(renderer => GetTransformPath(renderer.transform), StringComparer.Ordinal))
+        {
+            parts.Add(GetRendererFingerprint(renderer));
+        }
+
+        return string.Join(";", parts);
+    }
+
+    private static string GetRendererFingerprint(Renderer renderer)
+    {
+        string meshName = renderer switch
+        {
+            SkinnedMeshRenderer skinned => skinned.sharedMesh != null ? skinned.sharedMesh.name : "",
+            MeshRenderer => renderer.GetComponent<MeshFilter>()?.sharedMesh?.name ?? "",
+            _ => ""
+        };
+
+        string materialNames = string.Join(
+            ",",
+            renderer.sharedMaterials.Select(material => material != null ? NormalizeMaterialName(material.name) : ""));
+        return string.Join("|", new[]
+        {
+            GetTransformPath(renderer.transform),
+            renderer.GetType().Name,
+            meshName,
+            FormatVector3(renderer.transform.localPosition),
+            FormatVector3(renderer.transform.localEulerAngles),
+            FormatVector3(renderer.transform.localScale),
+            materialNames
+        });
+    }
+
+    private static void PruneAutoIconCacheSiblings(string prefabName, string keepPath)
+    {
+        try
+        {
+            if (!Directory.Exists(AutoIconCacheDirectory))
+            {
+                return;
+            }
+
+            string keepFullPath = Path.GetFullPath(keepPath);
+            string prefix = SanitizeFileName(prefabName) + "-";
+            foreach (string cacheFile in Directory.EnumerateFiles(AutoIconCacheDirectory, prefix + "*.png"))
+            {
+                string cacheFullPath = Path.GetFullPath(cacheFile);
+                if (cacheFullPath.Equals(keepFullPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                TryDeleteFile(cacheFullPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogDebug($"Could not prune auto icon cache for '{prefabName}': {ex.Message}");
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                IconCache.Remove(path);
+                File.Delete(path);
+            }
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogDebug($"Could not delete auto icon cache '{path}': {ex.Message}");
+        }
     }
 
     private static string FormatVector3(Vector3 value)

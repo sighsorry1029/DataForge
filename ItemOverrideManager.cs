@@ -762,6 +762,7 @@ internal static class ItemOverrideManager
             "#     # shown in reference/full scaffold only for InventorySlots-style sword/axe/club/knife/spear/polearm/fists/shield/pickaxe/tool/bow/crossbow/elemental magic/blood magic items.",
             "#     cost: 0, 0, 0, 0                     # stamina, eitr, health, healthPercentage costs.",
             "#     missingHealth: 0, 0, 0               # damage multiplier per missing HP, damage multiplier by total missing health percent, stamina returned per missing HP.",
+            "#     spawnOnTrigger: None                 # prefab spawned when the attack is triggered; None clears it.",
             "#     spawnOnHit: None, 0                  # prefab spawned on hit, chance from 0 to 1; ChainLightning, 0.2 => 20% chance.",
             "#     draw: 0, 0, 0                        # full draw time at skill 0, stamina drain/s while drawing, eitr drain/s while drawing.",
             "#     reload: false, 0, 0, 0               # requires reload, reload time seconds, stamina drain while reloading, eitr drain while reloading.",
@@ -774,6 +775,7 @@ internal static class ItemOverrideManager
             "#     # shown in reference/full scaffold only when primaryAttack is eligible and secondary attack animation is not empty.",
             "#     cost: 0, 0, 0, 0                     # stamina, eitr, health, healthPercentage costs.",
             "#     missingHealth: 0, 0, 0               # same missing-health tuple for secondary attack.",
+            "#     spawnOnTrigger: None                 # same trigger-spawn prefab for secondary attack.",
             "#     spawnOnHit: None, 0                  # same spawn-on-hit tuple for secondary attack.",
             "#   effects:",
             "#     equipStatusEffect: Rested            # status effect applied while equipped.",
@@ -2215,6 +2217,40 @@ internal static class ItemOverrideManager
         }
     }
 
+    private static void ApplySpawnOnTrigger(Attack attack, string? value, string fieldName)
+    {
+        if (attack == null || value == null)
+        {
+            return;
+        }
+
+        string prefabName = value.Trim();
+        if (prefabName.Length == 0)
+        {
+            return;
+        }
+
+        if (IsNone(prefabName))
+        {
+            attack.m_spawnOnTrigger = null;
+            return;
+        }
+
+        GameObject? prefab = ResolvePrefab(prefabName);
+        if (prefab == null)
+        {
+            if (!ZNetSceneReady)
+            {
+                return;
+            }
+
+            DataForgeLogContext.Warning($"Could not resolve item {fieldName} prefab '{prefabName}'.");
+            return;
+        }
+
+        attack.m_spawnOnTrigger = prefab;
+    }
+
     private static void ApplyDamage(ItemDrop.ItemData.SharedData shared, DamageDefinition? damage)
     {
         if (damage == null)
@@ -2268,6 +2304,7 @@ internal static class ItemOverrideManager
 
         ApplyAttackCost(attack, definition.Cost);
         ApplyMissingHealth(attack, definition.MissingHealth);
+        ApplySpawnOnTrigger(attack, definition.SpawnOnTrigger, $"{fieldName}.spawnOnTrigger");
         ApplySpawnOnHit(attack, definition.SpawnOnHit, $"{fieldName}.spawnOnHit");
         ApplyAttackDraw(attack, definition.Draw);
         ApplyAttackReload(attack, definition.Reload);
@@ -2873,6 +2910,7 @@ internal static class ItemOverrideManager
         {
             ["cost"] = attack.Cost,
             ["missingHealth"] = attack.MissingHealth,
+            ["spawnOnTrigger"] = attack.SpawnOnTrigger,
             ["spawnOnHit"] = attack.SpawnOnHit,
             ["damageMultiplier"] = attack.DamageMultiplier,
             ["forceMultiplier"] = attack.ForceMultiplier,
@@ -3105,7 +3143,7 @@ internal static class ItemOverrideManager
 
     private static bool HasAttackSpecial(AttackDefinition? attack) =>
         attack != null &&
-        (HasMissingHealth(attack.MissingHealth) || HasSpawnOnHit(attack.SpawnOnHit));
+        (HasMissingHealth(attack.MissingHealth) || HasSpawnOnTrigger(attack.SpawnOnTrigger) || HasSpawnOnHit(attack.SpawnOnHit));
 
     private static bool HasMissingHealth(string? value)
     {
@@ -3124,6 +3162,12 @@ internal static class ItemOverrideManager
         }
 
         return true;
+    }
+
+    private static bool HasSpawnOnTrigger(string? value)
+    {
+        string? trimmed = value?.Trim();
+        return !string.IsNullOrWhiteSpace(trimmed) && !IsNone(trimmed);
     }
 
     private static bool IsSkillAttack(ItemDefinition definition, params Skills.SkillType[] skillTypes) =>
@@ -3550,6 +3594,7 @@ internal static class ItemOverrideManager
                 ChainLevels = attack.ChainLevels,
                 Cost = FormatReferenceAttackCost(attack.Cost),
                 MissingHealth = attack.MissingHealth,
+                SpawnOnTrigger = attack.SpawnOnTrigger,
                 SpawnOnHit = attack.SpawnOnHit,
                 Draw = ShouldExposeAttackDraw(attack.Draw) ? attack.Draw : null,
                 Reload = ShouldExposeAttackReload(attack.Reload) ? attack.Reload : null,
@@ -3574,6 +3619,7 @@ internal static class ItemOverrideManager
                 ChainLevels = attack.ChainLevels,
                 Cost = FormatReferenceAttackCost(attack.Cost),
                 MissingHealth = attack.MissingHealth,
+                SpawnOnTrigger = attack.SpawnOnTrigger,
                 SpawnOnHit = attack.SpawnOnHit,
                 Draw = ShouldExposeAttackDraw(attack.Draw) ? attack.Draw : null,
                 Reload = ShouldExposeAttackReload(attack.Reload) ? attack.Reload : null,
@@ -3941,12 +3987,25 @@ internal static class ItemOverrideManager
         return $"{prefabName}, {FormatFloat(Mathf.Clamp01(attack.m_spawnOnHitChance))}";
     }
 
+    private static string? FormatSpawnOnTrigger(Attack attack)
+    {
+        if (attack == null)
+        {
+            return null;
+        }
+
+        return attack.m_spawnOnTrigger != null
+            ? GetPrefabName(attack.m_spawnOnTrigger)
+            : "None";
+    }
+
     internal class AttackDefinition
     {
         internal string? Animation { get; set; }
         internal int ChainLevels { get; set; }
         public string? Cost { get; set; }
         public string? MissingHealth { get; set; }
+        public string? SpawnOnTrigger { get; set; }
         public string? SpawnOnHit { get; set; }
         public string? Draw { get; set; }
         public string? Reload { get; set; }
@@ -3968,6 +4027,7 @@ internal static class ItemOverrideManager
                 ChainLevels = attack.m_attackChainLevels,
                 Cost = FormatAttackCost(attack),
                 MissingHealth = FormatMissingHealth(attack),
+                SpawnOnTrigger = FormatSpawnOnTrigger(attack),
                 SpawnOnHit = FormatSpawnOnHit(attack),
                 Draw = FormatAttackDraw(attack),
                 Reload = FormatAttackReload(attack),
@@ -3996,6 +4056,7 @@ internal static class ItemOverrideManager
                 ChainLevels = attack.m_attackChainLevels,
                 Cost = FormatAttackCost(attack),
                 MissingHealth = FormatMissingHealth(attack),
+                SpawnOnTrigger = FormatSpawnOnTrigger(attack),
                 SpawnOnHit = FormatSpawnOnHit(attack),
                 Draw = FormatAttackDraw(attack),
                 Reload = FormatAttackReload(attack),

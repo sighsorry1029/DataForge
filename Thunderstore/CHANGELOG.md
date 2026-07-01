@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.7
+
+- Added `spawnOnTrigger` support for primary and secondary item attacks.
+- Improved auto icon cache invalidation with renderer fingerprints and stale cache pruning.
+- Fixed auto icon snapshots blending together when multiple icons are generated in the same startup pass.
+- Clarified recipe YAML header examples for result amounts and suffixed recipe keys.
+
 ## 1.0.6
 
 - Changed DataForge's VNEI compatibility lookup to resolve only the required VNEI types from the VNEI plugin assembly.

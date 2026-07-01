@@ -242,6 +242,11 @@ internal static class ReferenceDefaultRules
             return IsDefaultSpawnOnHitTuple(value);
         }
 
+        if (propertyName.Equals("SpawnOnTrigger", StringComparison.OrdinalIgnoreCase))
+        {
+            return IsDefaultNoneValue(value);
+        }
+
         if (propertyName.Equals("Reload", StringComparison.OrdinalIgnoreCase))
         {
             return IsDefaultBoolFloatTuple(value, false, 0f, 0f, 0f);
@@ -443,6 +448,14 @@ internal static class ReferenceDefaultRules
                             parts[0].Equals("None", StringComparison.OrdinalIgnoreCase) ||
                             parts[0].Equals("Null", StringComparison.OrdinalIgnoreCase);
         return prefabIsNone && IsDefaultFloatPart(parts, 1, 0f);
+    }
+
+    private static bool IsDefaultNoneValue(string value)
+    {
+        string trimmed = value.Trim();
+        return trimmed.Length == 0 ||
+               trimmed.Equals("None", StringComparison.OrdinalIgnoreCase) ||
+               trimmed.Equals("Null", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsDefaultBoolFloatTuple(string value, bool defaultFirst, float defaultSecond)
