@@ -247,6 +247,11 @@ internal static class ReferenceDefaultRules
             return IsDefaultNoneValue(value);
         }
 
+        if (propertyName.Equals("Projectile", StringComparison.OrdinalIgnoreCase))
+        {
+            return IsDefaultProjectileTuple(value);
+        }
+
         if (propertyName.Equals("Reload", StringComparison.OrdinalIgnoreCase))
         {
             return IsDefaultBoolFloatTuple(value, false, 0f, 0f, 0f);
@@ -448,6 +453,26 @@ internal static class ReferenceDefaultRules
                             parts[0].Equals("None", StringComparison.OrdinalIgnoreCase) ||
                             parts[0].Equals("Null", StringComparison.OrdinalIgnoreCase);
         return prefabIsNone && IsDefaultFloatPart(parts, 1, 0f);
+    }
+
+    private static bool IsDefaultProjectileTuple(string value)
+    {
+        string[] parts = SplitTuple(value);
+        if (parts.Length > 6)
+        {
+            return false;
+        }
+
+        bool prefabIsNone = parts.Length == 0 ||
+                            parts[0].Length == 0 ||
+                            parts[0].Equals("None", StringComparison.OrdinalIgnoreCase) ||
+                            parts[0].Equals("Null", StringComparison.OrdinalIgnoreCase);
+        return prefabIsNone &&
+               IsDefaultFloatPart(parts, 1, 0f) &&
+               IsDefaultFloatPart(parts, 2, 0f) &&
+               IsDefaultIntPart(parts, 3, 1) &&
+               IsDefaultFloatPart(parts, 4, 0f) &&
+               IsDefaultFloatPart(parts, 5, 0f);
     }
 
     private static bool IsDefaultNoneValue(string value)

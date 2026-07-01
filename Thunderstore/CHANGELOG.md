@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.8
+
+- Added item attack projectile overrides for primary and secondary attacks.
+- Added full scaffold and reference output for `projectile: prefab, velocity, velocityMin, count, accuracy, accuracyMin`.
+- Kept default projectile tuples hidden from compact reference files.
+
 ## 1.0.7
 
 - Added `spawnOnTrigger` support for primary and secondary item attacks.

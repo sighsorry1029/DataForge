@@ -764,6 +764,7 @@ internal static class ItemOverrideManager
             "#     missingHealth: 0, 0, 0               # damage multiplier per missing HP, damage multiplier by total missing health percent, stamina returned per missing HP.",
             "#     spawnOnTrigger: None                 # prefab spawned when the attack is triggered; None clears it.",
             "#     spawnOnHit: None, 0                  # prefab spawned on hit, chance from 0 to 1; ChainLightning, 0.2 => 20% chance.",
+            "#     projectile: None, 0, 0, 1, 0, 0      # projectile prefab, max velocity, min velocity, count, accuracy, min accuracy; None clears it.",
             "#     draw: 0, 0, 0                        # full draw time at skill 0, stamina drain/s while drawing, eitr drain/s while drawing.",
             "#     reload: false, 0, 0, 0               # requires reload, reload time seconds, stamina drain while reloading, eitr drain while reloading.",
             "#     damageMultiplier: 1                  # attack damage multiplier.",
@@ -777,6 +778,7 @@ internal static class ItemOverrideManager
             "#     missingHealth: 0, 0, 0               # same missing-health tuple for secondary attack.",
             "#     spawnOnTrigger: None                 # same trigger-spawn prefab for secondary attack.",
             "#     spawnOnHit: None, 0                  # same spawn-on-hit tuple for secondary attack.",
+            "#     projectile: None, 0, 0, 1, 0, 0      # same projectile tuple for secondary attack.",
             "#   effects:",
             "#     equipStatusEffect: Rested            # status effect applied while equipped.",
             "#     set: WolfArmor, 4, SetEffectName     # setName, setSize, setStatusEffect applied when enough matching set items are equipped.",
@@ -2251,6 +2253,55 @@ internal static class ItemOverrideManager
         attack.m_spawnOnTrigger = prefab;
     }
 
+    private static void ApplyProjectile(Attack attack, string? value, string fieldName)
+    {
+        if (attack == null || value == null)
+        {
+            return;
+        }
+
+        string[] parts = SplitTuple(value);
+        if (parts.Length == 0)
+        {
+            return;
+        }
+
+        string prefabName = parts[0];
+        if (prefabName.Length > 0)
+        {
+            if (IsNone(prefabName))
+            {
+                attack.m_attackProjectile = null;
+                attack.m_projectileVel = 0f;
+                attack.m_projectileVelMin = 0f;
+                attack.m_projectiles = 1;
+                attack.m_projectileAccuracy = 0f;
+                attack.m_projectileAccuracyMin = 0f;
+                return;
+            }
+
+            GameObject? prefab = ResolvePrefab(prefabName);
+            if (prefab == null)
+            {
+                if (!ZNetSceneReady)
+                {
+                    return;
+                }
+
+                DataForgeLogContext.Warning($"Could not resolve item {fieldName} prefab '{prefabName}'.");
+                return;
+            }
+
+            attack.m_attackProjectile = prefab;
+        }
+
+        CopyTupleFloat(parts, 1, parsed => attack.m_projectileVel = Math.Max(0f, parsed));
+        CopyTupleFloat(parts, 2, parsed => attack.m_projectileVelMin = Math.Max(0f, parsed));
+        CopyTupleInt(parts, 3, parsed => attack.m_projectiles = Math.Max(1, parsed));
+        CopyTupleFloat(parts, 4, parsed => attack.m_projectileAccuracy = Math.Max(0f, parsed));
+        CopyTupleFloat(parts, 5, parsed => attack.m_projectileAccuracyMin = Math.Max(0f, parsed));
+    }
+
     private static void ApplyDamage(ItemDrop.ItemData.SharedData shared, DamageDefinition? damage)
     {
         if (damage == null)
@@ -2306,6 +2357,7 @@ internal static class ItemOverrideManager
         ApplyMissingHealth(attack, definition.MissingHealth);
         ApplySpawnOnTrigger(attack, definition.SpawnOnTrigger, $"{fieldName}.spawnOnTrigger");
         ApplySpawnOnHit(attack, definition.SpawnOnHit, $"{fieldName}.spawnOnHit");
+        ApplyProjectile(attack, definition.Projectile, $"{fieldName}.projectile");
         ApplyAttackDraw(attack, definition.Draw);
         ApplyAttackReload(attack, definition.Reload);
         Copy(definition.DamageMultiplier, value => attack.m_damageMultiplier = Math.Max(0f, value));
@@ -2370,6 +2422,16 @@ internal static class ItemOverrideManager
         if (parts.Length > index &&
             parts[index].Length > 0 &&
             float.TryParse(parts[index], NumberStyles.Float, CultureInfo.InvariantCulture, out float parsed))
+        {
+            assign(parsed);
+        }
+    }
+
+    private static void CopyTupleInt(string[] parts, int index, Action<int> assign)
+    {
+        if (parts.Length > index &&
+            parts[index].Length > 0 &&
+            int.TryParse(parts[index], NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed))
         {
             assign(parsed);
         }
@@ -2912,6 +2974,7 @@ internal static class ItemOverrideManager
             ["missingHealth"] = attack.MissingHealth,
             ["spawnOnTrigger"] = attack.SpawnOnTrigger,
             ["spawnOnHit"] = attack.SpawnOnHit,
+            ["projectile"] = attack.Projectile,
             ["damageMultiplier"] = attack.DamageMultiplier,
             ["forceMultiplier"] = attack.ForceMultiplier,
             ["staggerMultiplier"] = attack.StaggerMultiplier,
@@ -3143,7 +3206,10 @@ internal static class ItemOverrideManager
 
     private static bool HasAttackSpecial(AttackDefinition? attack) =>
         attack != null &&
-        (HasMissingHealth(attack.MissingHealth) || HasSpawnOnTrigger(attack.SpawnOnTrigger) || HasSpawnOnHit(attack.SpawnOnHit));
+        (HasMissingHealth(attack.MissingHealth) ||
+         HasSpawnOnTrigger(attack.SpawnOnTrigger) ||
+         HasSpawnOnHit(attack.SpawnOnHit) ||
+         HasProjectile(attack.Projectile));
 
     private static bool HasMissingHealth(string? value)
     {
@@ -3168,6 +3234,17 @@ internal static class ItemOverrideManager
     {
         string? trimmed = value?.Trim();
         return !string.IsNullOrWhiteSpace(trimmed) && !IsNone(trimmed);
+    }
+
+    private static bool HasProjectile(string? value)
+    {
+        string[] parts = SplitTuple(value);
+        if (parts.Length == 0 || parts[0].Length == 0 || IsNone(parts[0]))
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private static bool IsSkillAttack(ItemDefinition definition, params Skills.SkillType[] skillTypes) =>
@@ -3596,6 +3673,7 @@ internal static class ItemOverrideManager
                 MissingHealth = attack.MissingHealth,
                 SpawnOnTrigger = attack.SpawnOnTrigger,
                 SpawnOnHit = attack.SpawnOnHit,
+                Projectile = attack.Projectile,
                 Draw = ShouldExposeAttackDraw(attack.Draw) ? attack.Draw : null,
                 Reload = ShouldExposeAttackReload(attack.Reload) ? attack.Reload : null,
                 DamageMultiplier = attack.DamageMultiplier,
@@ -3621,6 +3699,7 @@ internal static class ItemOverrideManager
                 MissingHealth = attack.MissingHealth,
                 SpawnOnTrigger = attack.SpawnOnTrigger,
                 SpawnOnHit = attack.SpawnOnHit,
+                Projectile = attack.Projectile,
                 Draw = ShouldExposeAttackDraw(attack.Draw) ? attack.Draw : null,
                 Reload = ShouldExposeAttackReload(attack.Reload) ? attack.Reload : null,
                 DamageMultiplier = attack.DamageMultiplier,
@@ -3999,6 +4078,27 @@ internal static class ItemOverrideManager
             : "None";
     }
 
+    private static string? FormatProjectile(Attack attack)
+    {
+        if (attack == null)
+        {
+            return null;
+        }
+
+        string prefabName = attack.m_attackProjectile != null
+            ? GetPrefabName(attack.m_attackProjectile)
+            : "None";
+        return string.Join(", ", new[]
+        {
+            prefabName,
+            FormatFloat(attack.m_projectileVel),
+            FormatFloat(attack.m_projectileVelMin),
+            attack.m_projectiles.ToString(CultureInfo.InvariantCulture),
+            FormatFloat(attack.m_projectileAccuracy),
+            FormatFloat(attack.m_projectileAccuracyMin)
+        });
+    }
+
     internal class AttackDefinition
     {
         internal string? Animation { get; set; }
@@ -4007,6 +4107,7 @@ internal static class ItemOverrideManager
         public string? MissingHealth { get; set; }
         public string? SpawnOnTrigger { get; set; }
         public string? SpawnOnHit { get; set; }
+        public string? Projectile { get; set; }
         public string? Draw { get; set; }
         public string? Reload { get; set; }
         public float? DamageMultiplier { get; set; }
@@ -4029,6 +4130,7 @@ internal static class ItemOverrideManager
                 MissingHealth = FormatMissingHealth(attack),
                 SpawnOnTrigger = FormatSpawnOnTrigger(attack),
                 SpawnOnHit = FormatSpawnOnHit(attack),
+                Projectile = FormatProjectile(attack),
                 Draw = FormatAttackDraw(attack),
                 Reload = FormatAttackReload(attack),
                 DamageMultiplier = attack.m_damageMultiplier,
@@ -4058,6 +4160,7 @@ internal static class ItemOverrideManager
                 MissingHealth = FormatMissingHealth(attack),
                 SpawnOnTrigger = FormatSpawnOnTrigger(attack),
                 SpawnOnHit = FormatSpawnOnHit(attack),
+                Projectile = FormatProjectile(attack),
                 Draw = FormatAttackDraw(attack),
                 Reload = FormatAttackReload(attack),
                 DamageMultiplier = attack.m_damageMultiplier,
