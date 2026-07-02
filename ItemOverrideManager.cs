@@ -762,7 +762,7 @@ internal static class ItemOverrideManager
             "#     attackForce: 0                       # knockback force.",
             "#   primaryAttack:",
             "#     # shown in reference/full scaffold only for InventorySlots-style sword/axe/club/knife/spear/polearm/fists/shield/pickaxe/tool/bow/crossbow/elemental magic/blood magic items.",
-            "#     cost: 0, 0, 0, 0                     # stamina, eitr, health, healthPercentage costs.",
+            "#     cost: 0, 0, 0, 0                     # stamina, eitr, flat health, health percent costs; 40 means 40%.",
             "#     missingHealth: 0, 0, 0               # damage multiplier per missing HP, damage multiplier by total missing health percent, stamina returned per missing HP.",
             "#     spawnOnHit: None, 0                  # prefab spawned on hit, chance from 0 to 1; ChainLightning, 0.2 => 20% chance.",
             "#     draw: 0, 0, 0                        # full draw time at skill 0, stamina drain/s while drawing, eitr drain/s while drawing.",
@@ -774,7 +774,7 @@ internal static class ItemOverrideManager
             "#     raiseSkillAmount: 1                  # skill experience raised by a successful attack.",
             "#   secondaryAttack:                       # same fields as primaryAttack, except lastChainDamageMultiplier.",
             "#     # shown in reference/full scaffold only when primaryAttack is eligible and secondary attack animation is not empty.",
-            "#     cost: 0, 0, 0, 0                     # stamina, eitr, health, healthPercentage costs.",
+            "#     cost: 0, 0, 0, 0                     # stamina, eitr, flat health, health percent costs; 40 means 40%.",
             "#     missingHealth: 0, 0, 0               # same missing-health tuple for secondary attack.",
             "#     spawnOnHit: None, 0                  # same spawn-on-hit tuple for secondary attack.",
             "#   effects:",
@@ -2302,7 +2302,7 @@ internal static class ItemOverrideManager
         CopyTupleFloat(parts, 0, parsed => attack.m_attackStamina = Math.Max(0f, parsed));
         CopyTupleFloat(parts, 1, parsed => attack.m_attackEitr = Math.Max(0f, parsed));
         CopyTupleFloat(parts, 2, parsed => attack.m_attackHealth = Math.Max(0f, parsed));
-        CopyTupleFloat(parts, 3, parsed => attack.m_attackHealthPercentage = Mathf.Clamp01(parsed));
+        CopyTupleFloat(parts, 3, parsed => attack.m_attackHealthPercentage = Math.Max(0f, parsed));
     }
 
     private static void ApplyAttackDraw(Attack attack, string? value)

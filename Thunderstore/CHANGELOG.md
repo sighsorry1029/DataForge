@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.10
+
+- Fixed item attack health percentage costs being clamped to 1%, which could make BloodMagic weapons consume far less health than intended when applied through DataForge.
+- Clarified item attack `cost` comments so the fourth value is documented as a percent value, e.g. `40` means 40%.
+
 ## 1.0.9
 
 - Added `visual.scale` for item attach/drop meshes while keeping `icon: auto` snapshots readable.
