@@ -75,6 +75,7 @@ Clone example:
   visual:
     icon: auto
     iconRotation: 23, 51, 25.8
+    scale: 0.85
     material: blackmetal
     color: 0.8, 0.85, 1, 1
     emission: 0.15
@@ -271,6 +272,10 @@ BepInEx/config/DataForge/icon/
 Use 256x256 PNG files when possible. ServerSync synchronizes the YAML value, but each client still needs the same local PNG file.
 
 `z_materials.reference.txt` is generated as a material lookup list for visual overrides.
+
+`visual.scale` changes the item model's attach/drop mesh scale without shrinking `icon: auto` snapshots, so small world models can still keep readable inventory icons.
+
+Status effects can reuse an item icon with `icon: item:ItemPrefabName`, including DataForge-generated `icon: auto` item icons.
 
 ## Github
 https://github.com/sighsorry1029/DataForge

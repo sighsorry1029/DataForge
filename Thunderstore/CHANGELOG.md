@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.9
+
+- Added `visual.scale` for item attach/drop meshes while keeping `icon: auto` snapshots readable.
+- Added status-effect icon reuse with `icon: item:ItemPrefabName`.
+- Removed item attack `projectile` and `spawnOnTrigger` YAML fields to keep attack overrides focused.
+
 ## 1.0.8
 
 - Added item attack projectile overrides for primary and secondary attacks.

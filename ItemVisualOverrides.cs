@@ -22,6 +22,7 @@ internal static class ItemVisualOverrides
 
     private static readonly Dictionary<string, List<RendererMaterialSnapshot>> OriginalMaterials = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, Sprite[]?> OriginalIcons = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, List<TransformScaleSnapshot>> OriginalVisualScales = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, List<Material>> CreatedMaterials = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, IconCacheEntry> IconCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, Material> MaterialLookupCache = new(StringComparer.OrdinalIgnoreCase);
@@ -70,14 +71,21 @@ internal static class ItemVisualOverrides
         bool hasMaterial = !string.IsNullOrWhiteSpace(visual.Material);
         bool hasColor = TryParseColor(visual.Color, out Color color);
         bool hasEmission = visual.Emission.HasValue;
+        bool hasScale = visual.Scale.HasValue;
 
         if (hasExplicitIcon)
         {
             ApplyVisualIcon(prefabName, itemDrop, visual.Icon);
         }
 
-        if (!hasMaterial && !hasColor && !hasEmission)
+        bool hasRendererVisual = hasMaterial || hasColor || hasEmission;
+        if (!hasRendererVisual)
         {
+            if (hasScale)
+            {
+                ApplyVisualScale(prefabName, itemDrop.gameObject, visual.Scale);
+            }
+
             return;
         }
 
@@ -147,6 +155,11 @@ internal static class ItemVisualOverrides
         {
             ApplyAutoVisualIcon(prefabName, itemDrop, visual);
         }
+
+        if (hasScale)
+        {
+            ApplyVisualScale(prefabName, itemDrop.gameObject, visual.Scale);
+        }
     }
 
     internal static void Restore(string prefabName, ItemDrop itemDrop)
@@ -179,6 +192,17 @@ internal static class ItemVisualOverrides
         if (OriginalIcons.TryGetValue(prefabName, out Sprite[]? icons))
         {
             itemDrop.m_itemData.m_shared.m_icons = icons?.ToArray();
+        }
+
+        if (OriginalVisualScales.TryGetValue(prefabName, out List<TransformScaleSnapshot>? scaleSnapshots))
+        {
+            foreach (TransformScaleSnapshot snapshot in scaleSnapshots)
+            {
+                if (snapshot.Transform != null)
+                {
+                    snapshot.Transform.localScale = snapshot.LocalScale;
+                }
+            }
         }
     }
 
@@ -374,6 +398,7 @@ internal static class ItemVisualOverrides
 
             renderObject.transform.position = Vector3.zero;
             renderObject.transform.rotation = Quaternion.Euler(iconRotation);
+            RestoreAutoIconVisualScale(prefabName, renderObject);
             SetLayerRecursive(renderObject, AutoIconLayer);
             renderObject.SetActive(true);
 
@@ -503,6 +528,59 @@ internal static class ItemVisualOverrides
 
         parts.Reverse();
         return string.Join("/", parts);
+    }
+
+    private static string GetRelativeTransformPath(Transform root, Transform transform)
+    {
+        List<string> parts = new();
+        Transform? current = transform;
+        while (current != null && current != root)
+        {
+            parts.Add(current.name);
+            current = current.parent;
+        }
+
+        parts.Reverse();
+        return string.Join("/", parts);
+    }
+
+    private static Transform? FindRelativeTransform(Transform root, string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath))
+        {
+            return root;
+        }
+
+        Transform current = root;
+        foreach (string part in relativePath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
+        {
+            Transform? next = current.Find(part);
+            if (next == null)
+            {
+                return null;
+            }
+
+            current = next;
+        }
+
+        return current;
+    }
+
+    private static void RestoreAutoIconVisualScale(string prefabName, GameObject renderObject)
+    {
+        if (!OriginalVisualScales.TryGetValue(prefabName, out List<TransformScaleSnapshot>? snapshots))
+        {
+            return;
+        }
+
+        foreach (TransformScaleSnapshot snapshot in snapshots)
+        {
+            Transform? target = FindRelativeTransform(renderObject.transform, snapshot.RelativePath);
+            if (target != null)
+            {
+                target.localScale = snapshot.LocalScale;
+            }
+        }
     }
 
     private static Sprite? ResolveIconSprite(string iconName)
@@ -1007,6 +1085,71 @@ internal static class ItemVisualOverrides
         return renderers;
     }
 
+    private static void ApplyVisualScale(string prefabName, GameObject itemPrefab, float? scale)
+    {
+        if (!scale.HasValue)
+        {
+            return;
+        }
+
+        List<Transform> targets = GetItemVisualScaleTargets(itemPrefab);
+        if (targets.Count == 0)
+        {
+            DataForgeLogContext.Warning($"{prefabName} has no item visual transform for visual.scale.");
+            return;
+        }
+
+        StoreOriginalVisualScales(prefabName, itemPrefab.transform, targets);
+        if (!OriginalVisualScales.TryGetValue(prefabName, out List<TransformScaleSnapshot>? snapshots))
+        {
+            return;
+        }
+
+        float clampedScale = Math.Max(0.001f, scale.Value);
+        foreach (TransformScaleSnapshot snapshot in snapshots)
+        {
+            if (snapshot.Transform != null)
+            {
+                snapshot.Transform.localScale = snapshot.LocalScale * clampedScale;
+            }
+        }
+    }
+
+    private static List<Transform> GetItemVisualScaleTargets(GameObject itemPrefab)
+    {
+        List<Transform> targets = new();
+        HashSet<Transform> seen = new();
+        AddScaleTarget(itemPrefab.transform.Find("attach_skin"), targets, seen);
+        AddScaleTarget(itemPrefab.transform.Find("attach"), targets, seen);
+        AddScaleTarget(GetDropChild(itemPrefab), targets, seen);
+
+        if (targets.Count > 0)
+        {
+            return targets;
+        }
+
+        foreach (Renderer renderer in GetItemVisualRenderers(itemPrefab))
+        {
+            Transform transform = renderer.transform;
+            if (transform != itemPrefab.transform)
+            {
+                AddScaleTarget(transform, targets, seen);
+            }
+        }
+
+        return targets;
+    }
+
+    private static void AddScaleTarget(Transform? target, List<Transform> targets, HashSet<Transform> seen)
+    {
+        if (target == null || !seen.Add(target))
+        {
+            return;
+        }
+
+        targets.Add(target);
+    }
+
     private static void AddRenderers(Transform? root, List<Renderer> renderers, HashSet<Renderer> seen)
     {
         if (root == null)
@@ -1062,6 +1205,22 @@ internal static class ItemVisualOverrides
             .ToList();
     }
 
+    private static void StoreOriginalVisualScales(string prefabName, Transform root, List<Transform> targets)
+    {
+        if (OriginalVisualScales.TryGetValue(prefabName, out List<TransformScaleSnapshot>? snapshots) &&
+            snapshots.Any(snapshot => snapshot.Transform != null))
+        {
+            return;
+        }
+
+        OriginalVisualScales[prefabName] = targets
+            .Select(target => new TransformScaleSnapshot(
+                target,
+                GetRelativeTransformPath(root, target),
+                target.localScale))
+            .ToList();
+    }
+
     private static void StoreOriginalIcons(string prefabName, ItemDrop.ItemData.SharedData shared)
     {
         if (OriginalIcons.ContainsKey(prefabName))
@@ -1098,6 +1257,20 @@ internal static class ItemVisualOverrides
 
         public Renderer Renderer { get; }
         public Material[] Materials { get; }
+    }
+
+    private sealed class TransformScaleSnapshot
+    {
+        public TransformScaleSnapshot(Transform transform, string relativePath, Vector3 localScale)
+        {
+            Transform = transform;
+            RelativePath = relativePath;
+            LocalScale = localScale;
+        }
+
+        public Transform Transform { get; }
+        public string RelativePath { get; }
+        public Vector3 LocalScale { get; }
     }
 
     private sealed class IconCacheEntry

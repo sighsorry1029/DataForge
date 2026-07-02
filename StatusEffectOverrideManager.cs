@@ -23,6 +23,7 @@ internal static class StatusEffectOverrideManager
     private const string ReferenceFileName = "effects.reference.yml";
     private const string FullScaffoldFileName = "effects.full.yml";
     private const string SyncedPayloadKey = "effects";
+    private const string ItemIconPrefix = "item:";
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
     private const string ReferenceStateKey = "effects";
     private const string ReferenceLogicVersion = "2026-06-24-effect-reference-state-v2";
@@ -243,6 +244,43 @@ internal static class StatusEffectOverrideManager
         }
     }
 
+    internal static void RefreshItemIconReferences()
+    {
+        if (!DataForgePlugin.StatusEffectOverridesEnabled || ObjectDB.instance == null)
+        {
+            return;
+        }
+
+        List<StatusEffectEntry> entries;
+        lock (StateLock)
+        {
+            entries = ActiveEntries
+                .Where(entry => entry.Override && IsItemIconReference(entry.Icon))
+                .ToList();
+        }
+
+        if (entries.Count == 0)
+        {
+            return;
+        }
+
+        foreach (StatusEffectEntry entry in entries)
+        {
+            using (DataForgeLogContext.Push(entry.LogContext))
+            {
+                StatusEffect? statusEffect = ResolveStatusEffect(entry.Effect);
+                if (statusEffect == null)
+                {
+                    continue;
+                }
+
+                ApplyBaseIcon(statusEffect, entry.Icon, warnMissingItemIcon: true);
+            }
+        }
+
+        RefreshActiveItemIconReferences(entries);
+    }
+
     private static bool ShouldSkipRemoteClientBaselineWork()
     {
         if (!DataForgePlugin.IsRemoteServerClient)
@@ -341,6 +379,54 @@ internal static class StatusEffectOverrideManager
         if (applied > 0)
         {
             DataForgePlugin.Log.LogDebug($"Live-refreshed {applied} active status effect instances.");
+        }
+    }
+
+    private static void RefreshActiveItemIconReferences(List<StatusEffectEntry> entries)
+    {
+        if (Player.s_players == null)
+        {
+            return;
+        }
+
+        Dictionary<string, StatusEffectEntry> entriesByEffect = entries
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.Effect))
+            .GroupBy(entry => NormalizeStatusEffectName(entry.Effect), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
+        if (entriesByEffect.Count == 0)
+        {
+            return;
+        }
+
+        foreach (Player player in Player.s_players)
+        {
+            if (player == null)
+            {
+                continue;
+            }
+
+            SEMan seMan = player.GetSEMan();
+            if (seMan == null)
+            {
+                continue;
+            }
+
+            foreach (StatusEffect statusEffect in seMan.GetStatusEffects())
+            {
+                if (statusEffect == null)
+                {
+                    continue;
+                }
+
+                string statusEffectName = NormalizeStatusEffectName(statusEffect.name);
+                if (entriesByEffect.TryGetValue(statusEffectName, out StatusEffectEntry entry))
+                {
+                    using (DataForgeLogContext.Push(entry.LogContext))
+                    {
+                        ApplyBaseIcon(statusEffect, entry.Icon, warnMissingItemIcon: false);
+                    }
+                }
+            }
         }
     }
 
@@ -683,7 +769,7 @@ internal static class StatusEffectOverrideManager
             "#   cloneFrom: Rested                     # MyRested, cloneFrom: Rested => create a new effect from Rested.",
             "#   displayName: $se_rested_name          # $se_custom_name => use this localization token or literal text.",
             "#   tooltip: $se_rested_tooltip           # $se_custom_tooltip => use this tooltip token or literal text.",
-            "#   icon: MyEffectIcon                    # MyEffectIcon => load DataForge/icon/MyEffectIcon.png as this status effect icon; 256x256 PNG recommended.",
+            "#   icon: MyEffectIcon                    # MyEffectIcon => load DataForge/icon/MyEffectIcon.png; item:MeadHealthMinor => reuse that item icon; 256x256 PNG recommended.",
             "#   startEffects: vfx_A, sfx_A            # vfx_A, sfx_A => replace start EffectList with these prefabs; None => clear.",
             "#   stopEffects: vfx_B, sfx_B             # vfx_B, sfx_B => replace stop EffectList with these prefabs; None => clear.",
             "#   category:                             # food => group/category string shown by game logic.",
@@ -1175,7 +1261,7 @@ internal static class StatusEffectOverrideManager
         statusEffect.m_flashIcon = flashIcon;
     }
 
-    private static void ApplyBaseIcon(StatusEffect statusEffect, string? iconName)
+    private static void ApplyBaseIcon(StatusEffect statusEffect, string? iconName, bool warnMissingItemIcon = false)
     {
         if (string.IsNullOrWhiteSpace(iconName))
         {
@@ -1183,6 +1269,20 @@ internal static class StatusEffectOverrideManager
         }
 
         string iconKey = iconName!.Trim();
+        if (TryResolveItemIconSprite(iconKey, out string itemName, out Sprite? itemIcon))
+        {
+            if (itemIcon != null)
+            {
+                statusEffect.m_icon = itemIcon;
+            }
+            else if (warnMissingItemIcon && !IsHeadlessGraphics())
+            {
+                DataForgeLogContext.Warning($"{statusEffect.name} could not resolve status effect icon item '{itemName}'.");
+            }
+
+            return;
+        }
+
         Sprite? icon = ResolveIconSprite(iconKey);
         if (icon == null)
         {
@@ -1200,6 +1300,64 @@ internal static class StatusEffectOverrideManager
     private static bool IsHeadlessGraphics()
     {
         return SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null;
+    }
+
+    private static bool TryResolveItemIconSprite(string iconKey, out string itemName, out Sprite? icon)
+    {
+        itemName = "";
+        icon = null;
+        if (!TryGetItemIconReference(iconKey, out itemName))
+        {
+            return false;
+        }
+
+        GameObject? itemPrefab = ResolveItemPrefab(itemName);
+        ItemDrop? itemDrop = itemPrefab != null ? itemPrefab.GetComponent<ItemDrop>() : null;
+        Sprite[]? icons = itemDrop?.m_itemData.m_shared.m_icons;
+        icon = icons?.FirstOrDefault(sprite => sprite != null);
+        return true;
+    }
+
+    private static bool IsItemIconReference(string? iconName)
+    {
+        return TryGetItemIconReference(iconName, out _);
+    }
+
+    private static bool TryGetItemIconReference(string? iconName, out string itemName)
+    {
+        itemName = "";
+        if (string.IsNullOrWhiteSpace(iconName))
+        {
+            return false;
+        }
+
+        string trimmed = iconName!.Trim();
+        if (!trimmed.StartsWith(ItemIconPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        itemName = trimmed.Substring(ItemIconPrefix.Length).Trim();
+        return itemName.Length > 0;
+    }
+
+    private static GameObject? ResolveItemPrefab(string itemName)
+    {
+        if (ObjectDB.instance == null || string.IsNullOrWhiteSpace(itemName))
+        {
+            return null;
+        }
+
+        GameObject? prefab = ObjectDB.instance.GetItemPrefab(itemName);
+        if (prefab != null)
+        {
+            return prefab;
+        }
+
+        return ObjectDB.instance.m_items.FirstOrDefault(item =>
+            item != null &&
+            (string.Equals(Utils.GetPrefabName(item.name), itemName, StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(item.name, itemName, StringComparison.OrdinalIgnoreCase)));
     }
 
     private static Sprite? ResolveIconSprite(string iconName)
