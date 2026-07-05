@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.11
+
+- Fixed global item stack and weight multipliers restoring full item baselines on unrelated items.
+- Kept stack and weight multiplier application independent so each option only touches its own field.
+- Improved compatibility with mods that patch item durability or other shared item fields at runtime.
+
 ## 1.0.10
 
 - Fixed item attack health percentage costs being clamped to 1%, which could make BloodMagic weapons consume far less health than intended when applied through DataForge.

@@ -66,6 +66,8 @@ internal static class ItemOverrideManager
     private static bool ZNetSceneReady;
     private static bool RuntimeStateWasApplied;
     private static bool GlobalMultiplierStateWasApplied;
+    private static bool GlobalStackMultiplierStateWasApplied;
+    private static bool GlobalWeightMultiplierStateWasApplied;
     private static bool LiveSafeStateWasApplied;
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
@@ -174,7 +176,8 @@ internal static class ItemOverrideManager
         CleanupCreatedPrefabs(entries, destroy: true);
         EnsureClonePrefabs(entries, warnIfMissingSource: true);
         Dictionary<string, List<ItemEntry>> entriesByItem = BuildEnabledEntriesByItem(entries);
-        bool shouldApplyAllItems = HasGlobalItemMultiplierOverrides() || GlobalMultiplierStateWasApplied;
+        bool globalMultiplierActive = ShouldApplyGlobalItemMultiplierOverrides();
+        bool shouldApplyAllItems = globalMultiplierActive || GlobalMultiplierStateWasApplied;
         HashSet<string>? applyItemKeys = shouldApplyAllItems
             ? null
             : GetRuntimeApplyKeys(entriesByItem, changedItemKeys);
@@ -196,7 +199,7 @@ internal static class ItemOverrideManager
         }
 
         ObjectDB.instance.UpdateRegisters();
-        UpdateRuntimeAppliedItemState(entriesByItem, HasGlobalItemMultiplierOverrides());
+        UpdateRuntimeAppliedItemState(entriesByItem, globalMultiplierActive);
         UpdateLiveSafeItemState(entriesByItem, shouldRefreshExistingItems);
         StatusEffectOverrideManager.RefreshItemIconReferences();
         VneiRefreshManager.RequestRefresh(DomainName);
@@ -234,7 +237,8 @@ internal static class ItemOverrideManager
         CleanupCreatedPrefabs(entries, destroy: true);
         EnsureClonePrefabs(entries, warnIfMissingSource: ZNetSceneReady);
         Dictionary<string, List<ItemEntry>> entriesByItem = BuildEnabledEntriesByItem(entries);
-        bool shouldApplyAllItems = HasGlobalItemMultiplierOverrides() || GlobalMultiplierStateWasApplied;
+        bool globalMultiplierActive = ShouldApplyGlobalItemMultiplierOverrides();
+        bool shouldApplyAllItems = globalMultiplierActive || GlobalMultiplierStateWasApplied;
         HashSet<string>? applyItemKeys = shouldApplyAllItems
             ? null
             : GetRuntimeApplyKeys(entriesByItem, changedItemKeys);
@@ -256,7 +260,7 @@ internal static class ItemOverrideManager
         }
 
         ObjectDB.instance.UpdateRegisters();
-        UpdateRuntimeAppliedItemState(entriesByItem, HasGlobalItemMultiplierOverrides());
+        UpdateRuntimeAppliedItemState(entriesByItem, globalMultiplierActive);
         UpdateLiveSafeItemState(entriesByItem, shouldRefreshExistingItems);
         StatusEffectOverrideManager.RefreshItemIconReferences();
         VneiRefreshManager.RequestRefresh(DomainName);
@@ -597,6 +601,11 @@ internal static class ItemOverrideManager
                Math.Abs(DataForgePlugin.ItemWeightMultiplier - 1f) > 0.0001f;
     }
 
+    private static bool ShouldApplyGlobalItemMultiplierOverrides()
+    {
+        return DataForgePlugin.ItemOverridesEnabled && HasGlobalItemMultiplierOverrides();
+    }
+
     private static HashSet<string> GetRuntimeApplyKeys(
         Dictionary<string, List<ItemEntry>> entriesByItem,
         HashSet<string>? changedItemKeys)
@@ -630,6 +639,9 @@ internal static class ItemOverrideManager
 
         RuntimeStateWasApplied = RuntimeAppliedItemKeys.Count > 0;
         GlobalMultiplierStateWasApplied = globalMultiplierActive;
+        GlobalStackMultiplierStateWasApplied = globalMultiplierActive && DataForgePlugin.StackableStackMultiplier != 1;
+        GlobalWeightMultiplierStateWasApplied =
+            globalMultiplierActive && Math.Abs(DataForgePlugin.ItemWeightMultiplier - 1f) > 0.0001f;
     }
 
     private static bool ShouldRefreshExistingItems(
@@ -1420,24 +1432,36 @@ internal static class ItemOverrideManager
         foreach ((string prefabName, ItemDrop itemDrop) in itemDrops)
         {
             TrackReferenceVisibility(prefabName, itemDrop);
-            ItemVisualOverrides.Restore(prefabName, itemDrop);
+            bool hasEntries = entriesByItem.TryGetValue(prefabName, out List<ItemEntry> entries);
+            bool shouldRestoreRuntimeState = hasEntries || RuntimeAppliedItemKeys.Contains(prefabName);
 
-            if (Baselines.TryGetValue(prefabName, out ItemDefinition? baseline))
+            if (shouldRestoreRuntimeState)
             {
-                ApplyDefinition(itemDrop, baseline);
+                ItemVisualOverrides.Restore(prefabName, itemDrop);
+
+                if (Baselines.TryGetValue(prefabName, out ItemDefinition? baseline))
+                {
+                    ApplyDefinition(itemDrop, baseline);
+                }
             }
 
             if (!DataForgePlugin.ItemOverridesEnabled)
             {
+                if (GlobalMultiplierStateWasApplied &&
+                    Baselines.TryGetValue(prefabName, out ItemDefinition? disabledBaseline))
+                {
+                    RestoreGlobalItemMultiplierFields(itemDrop.m_itemData.m_shared, disabledBaseline);
+                }
+
                 continue;
             }
 
-            if (Baselines.TryGetValue(prefabName, out baseline))
+            if (Baselines.TryGetValue(prefabName, out ItemDefinition? multiplierBaseline))
             {
-                ApplyGlobalItemMultipliers(itemDrop.m_itemData.m_shared, baseline);
+                ApplyGlobalItemMultipliers(itemDrop.m_itemData.m_shared, multiplierBaseline);
             }
 
-            if (!entriesByItem.TryGetValue(prefabName, out List<ItemEntry> entries))
+            if (!hasEntries)
             {
                 continue;
             }
@@ -1652,8 +1676,10 @@ internal static class ItemOverrideManager
         }
 
         bool applied = false;
+        bool hasEntries = entriesByItem.TryGetValue(prefabName, out List<ItemEntry> entries);
+        bool shouldRestoreLiveSafeState = hasEntries || LiveSafeAppliedItemKeys.Contains(prefabName);
 
-        if (Baselines.TryGetValue(prefabName, out ItemDefinition? baseline))
+        if (shouldRestoreLiveSafeState && Baselines.TryGetValue(prefabName, out ItemDefinition? baseline))
         {
             ApplyLiveSafeDefinition(item.m_shared, baseline);
             applied = true;
@@ -1661,16 +1687,23 @@ internal static class ItemOverrideManager
 
         if (!DataForgePlugin.ItemOverridesEnabled)
         {
+            if (GlobalMultiplierStateWasApplied &&
+                Baselines.TryGetValue(prefabName, out ItemDefinition? disabledBaseline))
+            {
+                RestoreGlobalItemMultiplierFields(item.m_shared, disabledBaseline);
+                applied = true;
+            }
+
             return applied;
         }
 
-        if (Baselines.TryGetValue(prefabName, out baseline))
+        if (Baselines.TryGetValue(prefabName, out ItemDefinition? multiplierBaseline))
         {
-            ApplyGlobalItemMultipliers(item.m_shared, baseline);
+            ApplyGlobalItemMultipliers(item.m_shared, multiplierBaseline);
             applied = true;
         }
 
-        if (!entriesByItem.TryGetValue(prefabName, out List<ItemEntry> entries))
+        if (!hasEntries)
         {
             return applied;
         }
@@ -1786,26 +1819,58 @@ internal static class ItemOverrideManager
 
     private static void ApplyGlobalItemMultipliers(ItemDrop.ItemData.SharedData shared, ItemDefinition baseline)
     {
+        bool applyStackMultiplier = DataForgePlugin.StackableStackMultiplier != 1;
+        bool applyWeightMultiplier = Math.Abs(DataForgePlugin.ItemWeightMultiplier - 1f) > 0.0001f;
+        ApplyGlobalItemMultiplierFields(
+            shared,
+            baseline,
+            applyStackMultiplier || GlobalStackMultiplierStateWasApplied,
+            DataForgePlugin.StackableStackMultiplier,
+            applyWeightMultiplier || GlobalWeightMultiplierStateWasApplied,
+            DataForgePlugin.ItemWeightMultiplier);
+    }
+
+    private static void RestoreGlobalItemMultiplierFields(ItemDrop.ItemData.SharedData shared, ItemDefinition baseline)
+    {
+        ApplyGlobalItemMultiplierFields(
+            shared,
+            baseline,
+            GlobalStackMultiplierStateWasApplied,
+            1,
+            GlobalWeightMultiplierStateWasApplied,
+            1f);
+    }
+
+    private static void ApplyGlobalItemMultiplierFields(
+        ItemDrop.ItemData.SharedData shared,
+        ItemDefinition baseline,
+        bool applyStack,
+        int stackMultiplier,
+        bool applyWeight,
+        float weightMultiplier)
+    {
         BasicsDefinition? basics = baseline.Basics;
         if (basics == null)
         {
             return;
         }
 
-        int stackMultiplier = DataForgePlugin.StackableStackMultiplier;
-        if (stackMultiplier != 1 && basics.MaxStackSize.HasValue && basics.MaxStackSize.Value > 1)
+        if (applyStack && basics.MaxStackSize.HasValue)
         {
-            long multipliedStack = (long)basics.MaxStackSize.Value * stackMultiplier;
-            shared.m_maxStackSize = (int)Math.Min(int.MaxValue, Math.Max(1L, multipliedStack));
+            int baselineStack = Math.Max(1, basics.MaxStackSize.Value);
+            if (stackMultiplier != 1 && baselineStack > 1)
+            {
+                long multipliedStack = (long)baselineStack * stackMultiplier;
+                shared.m_maxStackSize = (int)Math.Min(int.MaxValue, Math.Max(1L, multipliedStack));
+            }
+            else
+            {
+                shared.m_maxStackSize = baselineStack;
+            }
         }
 
-        float weightMultiplier = DataForgePlugin.ItemWeightMultiplier;
-        if (Math.Abs(weightMultiplier - 1f) <= 0.0001f)
-        {
-            return;
-        }
-
-        if (float.TryParse(basics.Weight, NumberStyles.Float, CultureInfo.InvariantCulture, out float baselineWeight))
+        if (applyWeight &&
+            float.TryParse(basics.Weight, NumberStyles.Float, CultureInfo.InvariantCulture, out float baselineWeight))
         {
             shared.m_weight = Math.Max(0f, baselineWeight * weightMultiplier);
         }
