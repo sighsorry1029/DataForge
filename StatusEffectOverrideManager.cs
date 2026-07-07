@@ -26,7 +26,7 @@ internal static class StatusEffectOverrideManager
     private const string ItemIconPrefix = "item:";
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
     private const string ReferenceStateKey = "effects";
-    private const string ReferenceLogicVersion = "2026-06-24-effect-reference-state-v2";
+    private const string ReferenceLogicVersion = "2026-07-07-effect-reference-state-v3";
 
     private static readonly object StateLock = new();
     private static readonly Dictionary<string, StatusEffectDefinition> Baselines = new(StringComparer.OrdinalIgnoreCase);

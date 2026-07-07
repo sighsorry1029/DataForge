@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.0
+
+- Added automatic custom hammer category creation for piece overrides, so entries like `category: Storage` can create usable hammer tabs.
+- Reduced effect reference noise by hiding no-op `healthOverTime` and `attackDamage: None` entries.
+- Optimized hammer category normalization and consolidated ZNetScene startup handling.
+
 ## 1.0.11
 
 - Fixed global item stack and weight multipliers restoring full item baselines on unrelated items.

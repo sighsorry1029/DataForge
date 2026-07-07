@@ -170,14 +170,7 @@ internal static class ReferenceDefaultRules
             return false;
         }
 
-        float expectedValue = propertyName.Equals("AttackDamage", StringComparison.OrdinalIgnoreCase) ? 1f : 0f;
-        if (parts.Length == 1)
-        {
-            return Math.Abs(expectedValue) <= FloatEpsilon;
-        }
-
-        return float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float parsedValue) &&
-               Math.Abs(parsedValue - expectedValue) <= FloatEpsilon;
+        return true;
     }
 
     private static bool IsDefaultOverTimeTuple(string value, string propertyName)
@@ -204,7 +197,7 @@ internal static class ReferenceDefaultRules
 
         if (propertyName.Equals("HealthOverTime", StringComparison.OrdinalIgnoreCase))
         {
-            return IsDefaultFloatTuple(value, 0f, 0f, 5f);
+            return IsDefaultHealthOverTimeTuple(value);
         }
 
         if (propertyName.Equals("Time", StringComparison.OrdinalIgnoreCase))
@@ -328,6 +321,18 @@ internal static class ReferenceDefaultRules
                IsDefaultBoolPart(parts, 1, false) &&
                IsDefaultIntPart(parts, 2, 0) &&
                IsDefaultIntPart(parts, 3, 0);
+    }
+
+    private static bool IsDefaultHealthOverTimeTuple(string value)
+    {
+        string[] parts = SplitTuple(value);
+        if (parts.Length > 3)
+        {
+            return false;
+        }
+
+        return IsDefaultFloatPart(parts, 0, 0f) &&
+               IsDefaultFloatPart(parts, 1, 0f);
     }
 
     private static bool IsDefaultFoodTuple(string value)

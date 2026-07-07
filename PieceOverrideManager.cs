@@ -601,7 +601,7 @@ internal static class PieceOverrideManager
             "#   name: $piece_woodwall               # Piece.m_name localization token or text.",
             "#   description: $piece_woodwall_desc   # Piece.m_description localization token or text.",
             "#   pieceTable: Hammer                  # build tool/table to show this piece in. Hammer is the reference default and is omitted there.",
-            "#   category: Building                  # Piece.PieceCategory enum; Feasts, Food, and Meads are ignored by DataForge.",
+            "#   category: Building                  # Piece.PieceCategory enum or custom hammer tab name; unknown names are created automatically. Feasts, Food, and Meads are ignored by DataForge.",
             "#   sortOrder: 100                      # lower appears earlier in the same build tab; omitted keeps original order.",
             "#   needStation: None                   # station prefab/name needed to build; None clears the station requirement.",
             "#   canBeRemoved: true                  # false prevents removing the placed piece with a hammer.",
@@ -1023,11 +1023,9 @@ internal static class PieceOverrideManager
             return;
         }
 
-        if (!TryResolvePieceCategory(trimmedCategoryName, out Piece.PieceCategory category))
-        {
-            DataForgeLogContext.Warning($"{GetPrefabName(piece.gameObject)} has unknown piece category '{trimmedCategoryName}'.");
-            return;
-        }
+        Piece.PieceCategory category = TryResolvePieceCategory(trimmedCategoryName, out Piece.PieceCategory resolvedCategory)
+            ? resolvedCategory
+            : PieceTableCategoryGuard.GetOrCreateCustomCategory(trimmedCategoryName);
 
         piece.m_category = category;
         foreach (PieceTable pieceTable in GetPieceTablesContaining(piece.gameObject))
@@ -2617,6 +2615,11 @@ internal static class PieceOverrideManager
             return displayName;
         }
 
+        if (PieceTableCategoryGuard.TryGetCustomCategoryName(category, out displayName))
+        {
+            return displayName;
+        }
+
         return fallback;
     }
 
@@ -2633,6 +2636,11 @@ internal static class PieceOverrideManager
         }
 
         string normalized = categoryName.Trim();
+        if (PieceTableCategoryGuard.TryResolveCustomCategory(normalized, out category))
+        {
+            return true;
+        }
+
         foreach (PieceTable pieceTable in GetAllPieceTables())
         {
             List<Piece.PieceCategory>? categories = pieceTable ? pieceTable.m_categories : null;

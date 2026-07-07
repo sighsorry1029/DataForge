@@ -74,7 +74,7 @@ internal static class DataForgeObjectDBCopyOtherDBPatch
 }
 
 [HarmonyPatch(typeof(ZNetScene), nameof(ZNetScene.Awake))]
-internal static class DataForgeRecipeZNetSceneAwakePatch
+internal static class DataForgeZNetSceneAwakePatch
 {
     private static void Postfix()
     {
@@ -83,18 +83,8 @@ internal static class DataForgeRecipeZNetSceneAwakePatch
             DataForgeObjectDBAwakePatch.NotifyObjectDBReady();
         }
 
-        DataForgeProfiler.Profile("EnsureSourceOfTruthFileMode/ZNetScene(recipes)", DataForgePlugin.EnsureSourceOfTruthFileMode);
+        DataForgeProfiler.Profile("EnsureSourceOfTruthFileMode/ZNetScene", DataForgePlugin.EnsureSourceOfTruthFileMode);
         DataForgeProfiler.Profile("recipes.OnZNetSceneReady", RecipeOverrideManager.OnZNetSceneReady);
-    }
-}
-
-[HarmonyPatch(typeof(ZNetScene), nameof(ZNetScene.Awake))]
-internal static class DataForgePieceZNetSceneAwakePatch
-{
-    private static void Postfix()
-    {
-        DataForgeWorldLifecycle.MarkStarting();
-        DataForgeProfiler.Profile("EnsureSourceOfTruthFileMode/ZNetScene(domains)", DataForgePlugin.EnsureSourceOfTruthFileMode);
         DataForgeProfiler.Profile("effects.OnZNetSceneReady", StatusEffectOverrideManager.OnZNetSceneReady);
         DataForgeProfiler.Profile("items.OnZNetSceneReady", ItemOverrideManager.OnZNetSceneReady);
         DataForgeProfiler.Profile("pieces.OnGameDataReady", PieceOverrideManager.OnGameDataReady);
