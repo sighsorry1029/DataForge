@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.1
+
+- Improved incremental override reloads so only changed entries are reapplied while invalid YAML and localization payloads keep the last-known-good configuration.
+- Restored item, recipe, status effect, piece, PieceTable category, visual, and localization state cleanly across world and dedicated-server transitions.
+- Hardened DataForge-created item, recipe, and status-effect ownership so same-name objects supplied by other mods are not removed during cleanup.
+- Improved auto-icon cache invalidation, config reload coalescing, component topology refreshes, and first-apply consistency after reconnecting.
+
 ## 1.1.0
 
 - Added automatic custom hammer category creation for piece overrides, so entries like `category: Storage` can create usable hammer tabs.

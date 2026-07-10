@@ -29,6 +29,7 @@ internal static class ItemOverrideManager
 
     private static readonly object StateLock = new();
     private static readonly Dictionary<string, ItemDefinition> Baselines = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, ItemDrop> BaselineItems = new(StringComparer.OrdinalIgnoreCase);
     private static readonly MethodInfo? MemberwiseCloneMethod =
         typeof(object).GetMethod("MemberwiseClone", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly MethodInfo? SetupEquipmentMethod =
@@ -54,10 +55,9 @@ internal static class ItemOverrideManager
 
     private static List<ItemEntry> ActiveEntries = new();
     private static Dictionary<string, float> ActiveAmountMultipliers = new(StringComparer.OrdinalIgnoreCase);
-    private static Dictionary<string, string> ActiveEntrySignaturesByItem = new(StringComparer.OrdinalIgnoreCase);
-    private static HashSet<string>? PendingChangedItemKeys;
-    private static bool HasPendingScopedApply;
-    private static bool ForceNextFullApply = true;
+    private static readonly DomainEntryChangeTracker<ItemEntry> EntryChanges = new(
+        entry => entry.Item,
+        entries => SparseSerializer.Serialize(entries));
     private static CustomSyncedValue<string>? SyncedPayload;
     private static string? LastAppliedSyncedPayload;
     private static FileSystemWatcher? Watcher;
@@ -118,7 +118,10 @@ internal static class ItemOverrideManager
         }
 
         EnsureConfigDirectoryAndDefaultOverride();
-        List<ItemEntry> entries = LoadEntriesFromDisk();
+        if (!TryLoadEntriesFromDisk(out List<ItemEntry> entries))
+        {
+            return;
+        }
         lock (StateLock)
         {
             SetActiveEntries(entries);
@@ -165,7 +168,7 @@ internal static class ItemOverrideManager
         lock (StateLock)
         {
             entries = ActiveEntries.ToList();
-            changedItemKeys = ConsumePendingChangedItemKeys();
+            changedItemKeys = EntryChanges.ConsumeChangedKeys();
         }
 
         if (changedItemKeys is { Count: 0 })
@@ -226,7 +229,7 @@ internal static class ItemOverrideManager
         lock (StateLock)
         {
             entries = ActiveEntries.ToList();
-            changedItemKeys = ConsumePendingChangedItemKeys();
+            changedItemKeys = EntryChanges.ConsumeChangedKeys();
         }
 
         if (changedItemKeys is { Count: 0 })
@@ -344,8 +347,12 @@ internal static class ItemOverrideManager
             return;
         }
 
+        if (!DataForgeOverrideFiles.TryDeserializeEntries(payload, "synced item payload", DeserializeEntries, out List<ItemEntry> entries))
+        {
+            return;
+        }
+
         LastAppliedSyncedPayload = payload;
-        List<ItemEntry> entries = DeserializeEntries(payload, "synced item payload");
         lock (StateLock)
         {
             SetActiveEntries(entries);
@@ -363,14 +370,69 @@ internal static class ItemOverrideManager
 
     internal static void OnWorldShutdown()
     {
-        ObjectDbReady = false;
-        ZNetSceneReady = false;
-        RuntimeStateWasApplied = false;
-        GlobalMultiplierStateWasApplied = false;
-        LiveSafeStateWasApplied = false;
-        RuntimeAppliedItemKeys.Clear();
-        LiveSafeAppliedItemKeys.Clear();
-        CleanupCreatedClonesForWorldTransition();
+        try
+        {
+            RestoreRuntimeStateForWorldShutdown();
+        }
+        finally
+        {
+            try
+            {
+                CleanupCreatedClonesForWorldTransition();
+            }
+            finally
+            {
+                ObjectDbReady = false;
+                ZNetSceneReady = false;
+                RuntimeStateWasApplied = false;
+                GlobalMultiplierStateWasApplied = false;
+                LiveSafeStateWasApplied = false;
+                RuntimeAppliedItemKeys.Clear();
+                LiveSafeAppliedItemKeys.Clear();
+                lock (StateLock)
+                {
+                    if (DataForgePlugin.IsRemoteServerClient)
+                    {
+                        SetActiveEntries(new List<ItemEntry>());
+                        LastAppliedSyncedPayload = null;
+                    }
+
+                    EntryChanges.RequireFullApply();
+                }
+            }
+        }
+    }
+
+    private static void RestoreRuntimeStateForWorldShutdown()
+    {
+        if (ObjectDB.instance == null)
+        {
+            return;
+        }
+
+        HashSet<string> itemKeys = new(RuntimeAppliedItemKeys, StringComparer.OrdinalIgnoreCase);
+        itemKeys.UnionWith(LiveSafeAppliedItemKeys);
+        foreach ((string prefabName, ItemDrop itemDrop) in GetItemDrops(itemKeys))
+        {
+            ItemVisualOverrides.Restore(prefabName, itemDrop);
+            if (Baselines.TryGetValue(prefabName, out ItemDefinition? baseline))
+            {
+                ApplyDefinition(itemDrop, baseline);
+            }
+        }
+
+        if (GlobalMultiplierStateWasApplied)
+        {
+            foreach ((string prefabName, ItemDrop itemDrop) in GetItemDrops())
+            {
+                if (Baselines.TryGetValue(prefabName, out ItemDefinition? baseline))
+                {
+                    RestoreGlobalItemMultiplierFields(itemDrop.m_itemData.m_shared, baseline);
+                }
+            }
+        }
+
+        ObjectDB.instance.UpdateRegisters();
     }
 
     private static void PublishPayload(string payload)
@@ -378,9 +440,9 @@ internal static class ItemOverrideManager
         DataForgeSync.PublishPayload(SyncedPayload, DomainName, payload);
     }
 
-    private static List<ItemEntry> LoadEntriesFromDisk()
+    private static bool TryLoadEntriesFromDisk(out List<ItemEntry> entries)
     {
-        return DataForgeOverrideFiles.LoadEntries(GetOverrideFiles(), DeserializeEntries);
+        return DataForgeOverrideFiles.TryLoadEntries(GetOverrideFiles(), DeserializeEntries, out entries);
     }
 
     private static List<ItemEntry> DeserializeEntries(string yaml, string source)
@@ -397,8 +459,7 @@ internal static class ItemOverrideManager
         }
         catch (Exception ex)
         {
-            DataForgePlugin.Log.LogError($"Failed to parse {source}: {ex.Message}");
-            return new List<ItemEntry>();
+            throw new InvalidDataException($"Failed to parse {source}: {ex.Message}", ex);
         }
     }
 
@@ -464,89 +525,9 @@ internal static class ItemOverrideManager
 
     private static void SetActiveEntries(List<ItemEntry> entries)
     {
-        Dictionary<string, string> signatures = BuildEntrySignaturesByItem(entries);
-        if (!ForceNextFullApply)
-        {
-            PendingChangedItemKeys = GetChangedKeys(ActiveEntrySignaturesByItem, signatures);
-            HasPendingScopedApply = true;
-        }
-
+        EntryChanges.SetEntries(entries);
         ActiveEntries = entries;
         ActiveAmountMultipliers = BuildAmountMultiplierMap(entries);
-        ActiveEntrySignaturesByItem = signatures;
-    }
-
-    private static HashSet<string>? ConsumePendingChangedItemKeys()
-    {
-        if (ForceNextFullApply)
-        {
-            ForceNextFullApply = false;
-            PendingChangedItemKeys = null;
-            HasPendingScopedApply = false;
-            return null;
-        }
-
-        if (!HasPendingScopedApply)
-        {
-            return null;
-        }
-
-        HashSet<string> changedKeys = PendingChangedItemKeys ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        PendingChangedItemKeys = null;
-        HasPendingScopedApply = false;
-        return changedKeys;
-    }
-
-    private static Dictionary<string, string> BuildEntrySignaturesByItem(List<ItemEntry> entries)
-    {
-        Dictionary<string, List<ItemEntry>> entriesByItem = new(StringComparer.OrdinalIgnoreCase);
-        foreach (ItemEntry entry in entries)
-        {
-            if (string.IsNullOrWhiteSpace(entry.Item))
-            {
-                continue;
-            }
-
-            if (!entriesByItem.TryGetValue(entry.Item, out List<ItemEntry> itemEntries))
-            {
-                itemEntries = new List<ItemEntry>();
-                entriesByItem[entry.Item] = itemEntries;
-            }
-
-            itemEntries.Add(entry);
-        }
-
-        Dictionary<string, string> signatures = new(StringComparer.OrdinalIgnoreCase);
-        foreach (KeyValuePair<string, List<ItemEntry>> pair in entriesByItem)
-        {
-            signatures[pair.Key] = SparseSerializer.Serialize(pair.Value);
-        }
-
-        return signatures;
-    }
-
-    private static HashSet<string> GetChangedKeys(Dictionary<string, string> oldSignatures, Dictionary<string, string> newSignatures)
-    {
-        HashSet<string> changedKeys = new(StringComparer.OrdinalIgnoreCase);
-        foreach (KeyValuePair<string, string> pair in oldSignatures)
-        {
-            if (!newSignatures.TryGetValue(pair.Key, out string newSignature) ||
-                !string.Equals(pair.Value, newSignature, StringComparison.Ordinal))
-            {
-                changedKeys.Add(pair.Key);
-            }
-        }
-
-        foreach (KeyValuePair<string, string> pair in newSignatures)
-        {
-            if (!oldSignatures.TryGetValue(pair.Key, out string oldSignature) ||
-                !string.Equals(oldSignature, pair.Value, StringComparison.Ordinal))
-            {
-                changedKeys.Add(pair.Key);
-            }
-        }
-
-        return changedKeys;
     }
 
     private static Dictionary<string, float> BuildAmountMultiplierMap(List<ItemEntry> entries)
@@ -880,13 +861,17 @@ internal static class ItemOverrideManager
     private static bool CaptureBaseline(string prefabName, ItemDrop itemDrop)
     {
         TrackReferenceVisibility(prefabName, itemDrop);
-        if (Baselines.ContainsKey(prefabName))
+        bool hasBaseline = Baselines.ContainsKey(prefabName);
+        if (hasBaseline &&
+            BaselineItems.TryGetValue(prefabName, out ItemDrop? baselineItem) &&
+            ReferenceEquals(baselineItem, itemDrop))
         {
             return false;
         }
 
         Baselines[prefabName] = ItemDefinition.From(itemDrop);
-        return true;
+        BaselineItems[prefabName] = itemDrop;
+        return !hasBaseline;
     }
 
     private static IEnumerable<(string PrefabName, ItemDrop ItemDrop)> GetItemDrops()
@@ -960,12 +945,33 @@ internal static class ItemOverrideManager
             return;
         }
 
+        CreatedClonePrefabs.TryGetValue(entry.Item, out GameObject? ownedClonePrefab);
+        if (CreatedClonePrefabs.ContainsKey(entry.Item) && ownedClonePrefab == null)
+        {
+            RemoveCreatedClonePrefab(entry.Item, destroy: false);
+            ownedClonePrefab = null;
+        }
+
         GameObject? existingPrefab = ResolveItemPrefab(entry.Item);
+        bool ownsExistingPrefab = existingPrefab != null &&
+                                  ownedClonePrefab != null &&
+                                  ReferenceEquals(existingPrefab, ownedClonePrefab);
+        if (existingPrefab != null && ownedClonePrefab != null && !ownsExistingPrefab)
+        {
+            RemoveCreatedClonePrefab(entry.Item, destroy: true);
+            ownedClonePrefab = null;
+        }
+        else if (existingPrefab == null && ownedClonePrefab != null)
+        {
+            existingPrefab = ownedClonePrefab;
+            ownsExistingPrefab = true;
+        }
+
         if (existingPrefab != null)
         {
-            if (CreatedClones.Contains(entry.Item))
+            if (ownsExistingPrefab)
             {
-                CreatedClonePrefabs[entry.Item] = existingPrefab;
+                CreatedClones.Add(entry.Item);
                 EnsureStoredClonePrefab(existingPrefab);
                 string? cloneSourceName = entry.CloneFrom;
                 GameObject? existingCloneSource = !string.IsNullOrWhiteSpace(cloneSourceName)
@@ -973,18 +979,21 @@ internal static class ItemOverrideManager
                     : null;
                 PrepareClonedItemData(existingPrefab, existingCloneSource, entry.Item, entry.Name);
             }
+            else if (CreatedClones.Remove(entry.Item))
+            {
+                Baselines.Remove(entry.Item);
+                BaselineItems.Remove(entry.Item);
+                ReferenceVisiblePrefabs.Remove(entry.Item);
+            }
 
             RegisterObjectDbItemPrefab(existingPrefab);
             ItemDrop existingItemDrop = existingPrefab.GetComponent<ItemDrop>();
-            TrackReferenceVisibility(entry.Item, existingItemDrop);
-            if (!Baselines.ContainsKey(entry.Item))
-            {
-                Baselines[entry.Item] = ItemDefinition.From(existingItemDrop);
-            }
+            CaptureBaseline(entry.Item, existingItemDrop);
             return;
         }
 
         CreatedClones.Remove(entry.Item);
+        CreatedClonePrefabs.Remove(entry.Item);
 
         GameObject sourcePrefab = ObjectDB.instance.GetItemPrefab(entry.CloneFrom);
         if (sourcePrefab == null)
@@ -1002,8 +1011,7 @@ internal static class ItemOverrideManager
 
         RegisterObjectDbItemPrefab(clone, addToItems: true);
         ItemDrop itemDrop = clone.GetComponent<ItemDrop>();
-        TrackReferenceVisibility(entry.Item, itemDrop);
-        Baselines[entry.Item] = ItemDefinition.From(itemDrop);
+        CaptureBaseline(entry.Item, itemDrop);
         CreatedClones.Add(entry.Item);
         CreatedClonePrefabs[entry.Item] = clone;
         DataForgePlugin.Log.LogInfo($"Cloned item '{entry.CloneFrom}' as '{entry.Item}'.");
@@ -1016,6 +1024,7 @@ internal static class ItemOverrideManager
             CreatedClonePrefabs.Remove(cloneName);
             CreatedClones.Remove(cloneName);
             Baselines.Remove(cloneName);
+            BaselineItems.Remove(cloneName);
             ReferenceVisiblePrefabs.Remove(cloneName);
             return;
         }
@@ -1027,6 +1036,7 @@ internal static class ItemOverrideManager
         CreatedClonePrefabs.Remove(cloneName);
         CreatedClones.Remove(cloneName);
         Baselines.Remove(cloneName);
+        BaselineItems.Remove(cloneName);
         ReferenceVisiblePrefabs.Remove(cloneName);
 
         if (destroy)
@@ -2675,7 +2685,7 @@ internal static class ItemOverrideManager
         CaptureAllBaselinesIfNeeded();
         string sourceSignature = ComputeReferenceSourceSignature();
         string referencePath = Path.Combine(ConfigDirectory, ReferenceFileName);
-        if (ShouldSkipReferenceUpdate(referencePath, sourceSignature))
+        if (DataForgeReferenceState.ShouldSkip(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion))
         {
             return;
         }
@@ -2689,7 +2699,7 @@ internal static class ItemOverrideManager
             BuildReferenceArtifactContent);
         if (wrote || File.Exists(referencePath))
         {
-            RecordReferenceUpdateState(referencePath, sourceSignature);
+            DataForgeReferenceState.Record(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
         }
     }
 
@@ -2724,34 +2734,14 @@ internal static class ItemOverrideManager
     {
         StringBuilder builder = new();
         builder.AppendLine(ReferenceLogicVersion);
-        builder.AppendLine(BuildFileStamp(Path.Combine(ConfigDirectory, "z_resourcemap.txt")));
+        builder.AppendLine(DataForgeReferenceState.BuildFileStamp(Path.Combine(ConfigDirectory, "z_resourcemap.txt")));
         foreach ((string prefabName, _) in GetItemDrops()
                      .OrderBy(pair => pair.PrefabName, StringComparer.OrdinalIgnoreCase))
         {
             builder.AppendLine(prefabName);
         }
 
-        return ComputeStableHash(builder.ToString());
-    }
-
-    private static bool ShouldSkipReferenceUpdate(string referencePath, string sourceSignature)
-    {
-        return DataForgeReferenceState.ShouldSkip(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
-    }
-
-    private static void RecordReferenceUpdateState(string referencePath, string sourceSignature)
-    {
-        DataForgeReferenceState.Record(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
-    }
-
-    private static string BuildFileStamp(string path)
-    {
-        return DataForgeReferenceState.BuildFileStamp(path);
-    }
-
-    private static string ComputeStableHash(string value)
-    {
-        return DataForgeReferenceState.ComputeStableHash(value);
+        return DataForgeReferenceState.ComputeStableHash(builder.ToString());
     }
 
     private static string GetPrefabName(GameObject gameObject)

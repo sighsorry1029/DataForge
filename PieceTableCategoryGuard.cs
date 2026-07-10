@@ -17,10 +17,47 @@ internal static class PieceTableCategoryGuard
     private static readonly Dictionary<string, Piece.PieceCategory> CustomCategoriesByName = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<Piece.PieceCategory, string> CustomCategoryNames = new();
     private static readonly Dictionary<PieceTable, NormalizationStamp> NormalizationStamps = new(ReferenceComparer<PieceTable>.Instance);
+    private static readonly Dictionary<PieceTable, PieceTableCategorySnapshot> CategorySnapshots = new(ReferenceComparer<PieceTable>.Instance);
+    private static readonly HashSet<GameObject> CreatedHudCategoryTabs = new(ReferenceComparer<GameObject>.Instance);
     private static readonly FieldInfo? SelectedCategoryField = AccessTools.Field(typeof(PieceTable), "m_selectedCategory");
     private static readonly FieldInfo? AvailablePiecesField = AccessTools.Field(typeof(PieceTable), "m_availablePieces");
     private static readonly FieldInfo? HudCategoryClickField = AccessTools.Field(typeof(UIInputHandler), "m_onLeftDown");
     private static int CustomCategoryVersion;
+
+    internal static void ResetWorldState()
+    {
+        foreach (KeyValuePair<PieceTable, PieceTableCategorySnapshot> pair in CategorySnapshots.ToArray())
+        {
+            try
+            {
+                if (pair.Key)
+                {
+                    pair.Value.Restore(pair.Key);
+                }
+            }
+            catch (Exception ex)
+            {
+                string pieceTableName = pair.Key ? pair.Key.name : "<destroyed>";
+                DataForgePlugin.Log.LogWarning($"Failed to restore piece categories for '{pieceTableName}': {ex.Message}");
+            }
+        }
+
+        CategorySnapshots.Clear();
+        try
+        {
+            RemoveCreatedHudCategoryTabs();
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogWarning($"Failed to remove DataForge piece category tabs: {ex.Message}");
+            CreatedHudCategoryTabs.Clear();
+        }
+        CategoryLabels.Clear();
+        CustomCategoriesByName.Clear();
+        CustomCategoryNames.Clear();
+        NormalizationStamps.Clear();
+        CustomCategoryVersion++;
+    }
 
     internal static void Normalize(PieceTable? pieceTable)
     {
@@ -28,6 +65,8 @@ internal static class PieceTableCategoryGuard
         {
             return;
         }
+
+        CaptureCategorySnapshotIfNeeded(pieceTable);
 
         if (IsNormalizationCurrent(pieceTable))
         {
@@ -69,6 +108,8 @@ internal static class PieceTableCategoryGuard
         {
             return;
         }
+
+        CaptureCategorySnapshotIfNeeded(pieceTable);
 
         if (IsNormalizationCurrent(pieceTable))
         {
@@ -196,6 +237,7 @@ internal static class PieceTableCategoryGuard
             return;
         }
 
+        CaptureCategorySnapshotIfNeeded(pieceTable);
         EnsureCategoryStorage(pieceTable, category);
         if (!IsSelectableCategory(pieceTable, category))
         {
@@ -475,10 +517,42 @@ internal static class PieceTableCategoryGuard
             tab.name = $"DataForgeCategoryTab{index}";
             tab.SetActive(false);
             AddHudCategoryClickHandler(hud, tab);
+            CreatedHudCategoryTabs.Add(tab);
             tabs.Add(tab);
         }
 
         hud.m_pieceCategoryTabs = tabs.ToArray();
+    }
+
+    private static void CaptureCategorySnapshotIfNeeded(PieceTable pieceTable)
+    {
+        if (CustomCategoryNames.Count == 0 || CategorySnapshots.ContainsKey(pieceTable))
+        {
+            return;
+        }
+
+        CategorySnapshots[pieceTable] = PieceTableCategorySnapshot.From(pieceTable);
+    }
+
+    private static void RemoveCreatedHudCategoryTabs()
+    {
+        Hud hud = Hud.instance;
+        if (hud && hud.m_pieceCategoryTabs != null)
+        {
+            hud.m_pieceCategoryTabs = hud.m_pieceCategoryTabs
+                .Where(tab => tab && !CreatedHudCategoryTabs.Contains(tab))
+                .ToArray();
+        }
+
+        foreach (GameObject tab in CreatedHudCategoryTabs.ToArray())
+        {
+            if (tab)
+            {
+                UnityEngine.Object.Destroy(tab);
+            }
+        }
+
+        CreatedHudCategoryTabs.Clear();
     }
 
     private static void AddHudCategoryClickHandler(Hud hud, GameObject tab)
@@ -497,6 +571,71 @@ internal static class PieceTableCategoryGuard
         }
 
         HudCategoryClickField.SetValue(inputHandler, Delegate.Combine(current, callback));
+    }
+
+    private sealed class PieceTableCategorySnapshot
+    {
+        private readonly List<Piece.PieceCategory> _categories;
+        private readonly List<string> _labels;
+        private readonly int _availablePieceSlots;
+        private readonly int _selectedPieceSlots;
+        private readonly int _lastSelectedPieceSlots;
+        private readonly Piece.PieceCategory? _selectedCategory;
+
+        private PieceTableCategorySnapshot(
+            List<Piece.PieceCategory> categories,
+            List<string> labels,
+            int availablePieceSlots,
+            int selectedPieceSlots,
+            int lastSelectedPieceSlots,
+            Piece.PieceCategory? selectedCategory)
+        {
+            _categories = categories;
+            _labels = labels;
+            _availablePieceSlots = availablePieceSlots;
+            _selectedPieceSlots = selectedPieceSlots;
+            _lastSelectedPieceSlots = lastSelectedPieceSlots;
+            _selectedCategory = selectedCategory;
+        }
+
+        internal static PieceTableCategorySnapshot From(PieceTable pieceTable)
+        {
+            int availablePieceSlots = AvailablePiecesField?.GetValue(pieceTable) is ICollection availablePieces
+                ? availablePieces.Count
+                : -1;
+            Piece.PieceCategory? selectedCategory = SelectedCategoryField?.GetValue(pieceTable) is Piece.PieceCategory category
+                ? category
+                : null;
+            return new PieceTableCategorySnapshot(
+                pieceTable.m_categories?.ToList() ?? new List<Piece.PieceCategory>(),
+                pieceTable.m_categoryLabels?.ToList() ?? new List<string>(),
+                availablePieceSlots,
+                pieceTable.m_selectedPiece?.Length ?? 0,
+                pieceTable.m_lastSelectedPiece?.Length ?? 0,
+                selectedCategory);
+        }
+
+        internal void Restore(PieceTable pieceTable)
+        {
+            pieceTable.m_categories = _categories.ToList();
+            pieceTable.m_categoryLabels = _labels.ToList();
+            if (_availablePieceSlots >= 0 &&
+                AvailablePiecesField?.GetValue(pieceTable) is IList availablePieces &&
+                !availablePieces.IsFixedSize)
+            {
+                while (availablePieces.Count > _availablePieceSlots)
+                {
+                    availablePieces.RemoveAt(availablePieces.Count - 1);
+                }
+            }
+
+            Array.Resize(ref pieceTable.m_selectedPiece, _selectedPieceSlots);
+            Array.Resize(ref pieceTable.m_lastSelectedPiece, _lastSelectedPieceSlots);
+            if (_selectedCategory.HasValue)
+            {
+                SelectedCategoryField?.SetValue(pieceTable, _selectedCategory.Value);
+            }
+        }
     }
 
     private readonly struct NormalizationStamp : IEquatable<NormalizationStamp>

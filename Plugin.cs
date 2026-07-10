@@ -14,7 +14,7 @@ namespace DataForge;
 public class DataForgePlugin : BaseUnityPlugin
 {
     internal const string ModName = "DataForge";
-    internal const string ModVersion = "1.1.0";
+    internal const string ModVersion = "1.1.1";
     internal const string Author = "sighsorry";
     internal const string ModGUID = $"{Author}.{ModName}";
 
@@ -24,7 +24,8 @@ public class DataForgePlugin : BaseUnityPlugin
     {
         DisplayName = ModName,
         CurrentVersion = ModVersion,
-        MinimumRequiredVersion = ModVersion
+        MinimumRequiredVersion = ModVersion,
+        ModRequired = true
     };
 
     private readonly Harmony _harmony = new(ModGUID);
@@ -32,9 +33,9 @@ public class DataForgePlugin : BaseUnityPlugin
     private FileSystemWatcher? _watcher;
     private DataForgeFileWatcher.DebouncedAction? _configReloadDebouncer;
     private string? _lastConfigFileText;
+    private bool _configReloadInProgress;
     private static bool _sourceOfTruthFileModeReady;
 
-    internal static string ConnectionError = "";
     internal static readonly ManualLogSource Log = BepInEx.Logging.Logger.CreateLogSource(ModName);
 
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
@@ -105,7 +106,7 @@ public class DataForgePlugin : BaseUnityPlugin
             Toggle.On,
             "If on, item YAML overrides are applied to matching ObjectDB item prefabs.",
             order: 900);
-        _enableItemOverrides.SettingChanged += (_, _) => ItemOverrideManager.ApplyCurrentConfiguration();
+        _enableItemOverrides.SettingChanged += (_, _) => ApplyConfigChange(ItemOverrideManager.ApplyCurrentConfiguration);
 
         _enableRecipeOverrides = ConfigEntry(
             "1 - General",
@@ -113,7 +114,7 @@ public class DataForgePlugin : BaseUnityPlugin
             Toggle.On,
             "If on, recipe YAML overrides are applied to ObjectDB recipes.",
             order: 800);
-        _enableRecipeOverrides.SettingChanged += (_, _) => RecipeOverrideManager.ApplyCurrentConfiguration();
+        _enableRecipeOverrides.SettingChanged += (_, _) => ApplyConfigChange(RecipeOverrideManager.ApplyCurrentConfiguration);
 
         _enableStatusEffectOverrides = ConfigEntry(
             "1 - General",
@@ -121,7 +122,7 @@ public class DataForgePlugin : BaseUnityPlugin
             Toggle.On,
             "If on, status effect YAML overrides are applied to ObjectDB status effects.",
             order: 700);
-        _enableStatusEffectOverrides.SettingChanged += (_, _) => StatusEffectOverrideManager.ApplyCurrentConfiguration();
+        _enableStatusEffectOverrides.SettingChanged += (_, _) => ApplyConfigChange(StatusEffectOverrideManager.ApplyCurrentConfiguration);
 
         _enablePieceOverrides = ConfigEntry(
             "1 - General",
@@ -129,7 +130,7 @@ public class DataForgePlugin : BaseUnityPlugin
             Toggle.On,
             "If on, piece YAML overrides are applied to matching prefabs and loaded pieces.",
             order: 600);
-        _enablePieceOverrides.SettingChanged += (_, _) => PieceOverrideManager.ApplyCurrentConfiguration();
+        _enablePieceOverrides.SettingChanged += (_, _) => ApplyConfigChange(PieceOverrideManager.ApplyCurrentConfiguration);
 
         _stackableStackMultiplier = ConfigEntry(
             "2 - Misc",
@@ -139,7 +140,7 @@ public class DataForgePlugin : BaseUnityPlugin
                 "Integer multiplier applied to baseline max stack size for stackable items unless maxStackSize is explicitly set in item YAML. 1 disables this feature.",
                 new AcceptableValueRange<int>(1, 10)),
             order: 500);
-        _stackableStackMultiplier.SettingChanged += (_, _) => ItemOverrideManager.ApplyCurrentConfiguration();
+        _stackableStackMultiplier.SettingChanged += (_, _) => ApplyConfigChange(ItemOverrideManager.ApplyCurrentConfiguration);
 
         _itemWeightMultiplier = ConfigEntry(
             "2 - Misc",
@@ -149,7 +150,7 @@ public class DataForgePlugin : BaseUnityPlugin
                 "Multiplier applied to baseline item weight for all items unless weight is explicitly set in item YAML. 1 disables this feature; 0 makes affected items weightless.",
                 new AcceptableValueRange<float>(0f, 2f)),
             order: 400);
-        _itemWeightMultiplier.SettingChanged += (_, _) => ItemOverrideManager.ApplyCurrentConfiguration();
+        _itemWeightMultiplier.SettingChanged += (_, _) => ApplyConfigChange(ItemOverrideManager.ApplyCurrentConfiguration);
 
         _showPieceComfortInHammer = ConfigEntry(
             "2 - Misc",
@@ -314,18 +315,60 @@ public class DataForgePlugin : BaseUnityPlugin
                 }
 
                 Log.LogDebug("Reloading configuration...");
-                SaveWithRespectToConfigSet(reload: true);
+                bool itemOverridesEnabled = ItemOverridesEnabled;
+                bool recipeOverridesEnabled = RecipeOverridesEnabled;
+                bool statusEffectOverridesEnabled = StatusEffectOverridesEnabled;
+                bool pieceOverridesEnabled = PieceOverridesEnabled;
+                int stackMultiplier = StackableStackMultiplier;
+                float weightMultiplier = ItemWeightMultiplier;
+
+                _configReloadInProgress = true;
+                try
+                {
+                    SaveWithRespectToConfigSet(reload: true);
+                }
+                finally
+                {
+                    _configReloadInProgress = false;
+                }
+
                 _lastConfigFileText = ReadFileTextIfExists(ConfigFileFullPath);
-                StatusEffectOverrideManager.ApplyCurrentConfiguration();
-                ItemOverrideManager.ApplyCurrentConfiguration();
-                RecipeOverrideManager.ApplyCurrentConfiguration();
-                PieceOverrideManager.ApplyCurrentConfiguration();
+                if (statusEffectOverridesEnabled != StatusEffectOverridesEnabled)
+                {
+                    StatusEffectOverrideManager.ApplyCurrentConfiguration();
+                }
+
+                if (itemOverridesEnabled != ItemOverridesEnabled ||
+                    stackMultiplier != StackableStackMultiplier ||
+                    Math.Abs(weightMultiplier - ItemWeightMultiplier) > 0.0001f)
+                {
+                    ItemOverrideManager.ApplyCurrentConfiguration();
+                }
+
+                if (recipeOverridesEnabled != RecipeOverridesEnabled)
+                {
+                    RecipeOverrideManager.ApplyCurrentConfiguration();
+                }
+
+                if (pieceOverridesEnabled != PieceOverridesEnabled)
+                {
+                    PieceOverrideManager.ApplyCurrentConfiguration();
+                }
+
                 Log.LogInfo("Configuration reload complete.");
             }
             catch (Exception ex)
             {
                 Log.LogError($"Error reloading configuration: {ex}");
             }
+        }
+    }
+
+    private void ApplyConfigChange(Action apply)
+    {
+        if (!_configReloadInProgress)
+        {
+            apply();
         }
     }
 

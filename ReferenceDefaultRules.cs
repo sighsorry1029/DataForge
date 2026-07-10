@@ -49,6 +49,17 @@ internal static class ReferenceDefaultRules
             return true;
         }
 
+        if (propertyName.Equals("Icon", StringComparison.OrdinalIgnoreCase) &&
+            trimmed.Equals("auto", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (propertyName.Equals("IconRotation", StringComparison.OrdinalIgnoreCase))
+        {
+            return IsDefaultFloatTuple(trimmed, 23f, 51f, 25.8f);
+        }
+
         if (propertyName.Equals("Category", StringComparison.OrdinalIgnoreCase) &&
             trimmed.Equals("Misc", StringComparison.OrdinalIgnoreCase))
         {

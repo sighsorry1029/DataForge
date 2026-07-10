@@ -134,6 +134,7 @@ internal static class DataForgeGameStartPatch
         }
 
         DataForgeWorldLifecycle.MarkGameStarted();
+        DataForgeProfiler.Profile("localization.OnGameReady", LocalizationOverrideManager.ApplyCurrentLocalization);
         DataForgeProfiler.Profile("effects.OnGameReady", StatusEffectOverrideManager.ApplyCurrentConfiguration);
         DataForgeProfiler.Profile("items.OnGameReady", ItemOverrideManager.ApplyCurrentConfiguration);
     }
@@ -145,17 +146,24 @@ internal static class DataForgeZNetShutdownCleanupPatch
     [HarmonyPriority(Priority.First)]
     private static void Prefix()
     {
+        DataForgeWorldLifecycle.MarkShuttingDown();
+        RunCleanup("recipes", RecipeOverrideManager.OnWorldShutdown);
+        RunCleanup("status effects", StatusEffectOverrideManager.OnWorldShutdown);
+        RunCleanup("items", ItemOverrideManager.OnWorldShutdown);
+        RunCleanup("pieces", PieceOverrideManager.OnWorldShutdown);
+        RunCleanup("localization", LocalizationOverrideManager.OnWorldShutdown);
+        RunCleanup("item visuals", ItemVisualOverrides.ResetWorldState);
+    }
+
+    private static void RunCleanup(string name, System.Action cleanup)
+    {
         try
         {
-            DataForgeWorldLifecycle.MarkShuttingDown();
-            RecipeOverrideManager.OnWorldShutdown();
-            StatusEffectOverrideManager.OnWorldShutdown();
-            ItemOverrideManager.OnWorldShutdown();
-            PieceOverrideManager.OnWorldShutdown();
+            cleanup();
         }
         catch (System.Exception ex)
         {
-            DataForgePlugin.Log.LogWarning($"Failed to clean up DataForge-created clones during world shutdown: {ex}");
+            DataForgePlugin.Log.LogWarning($"Failed to clean up DataForge {name} during world shutdown: {ex}");
         }
     }
 }

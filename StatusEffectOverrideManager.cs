@@ -36,6 +36,7 @@ internal static class StatusEffectOverrideManager
     private static readonly Dictionary<string, EffectList> BaselineStopEffects = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, IconCacheEntry> IconCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> CreatedClones = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, StatusEffect> CreatedCloneEffects = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> RuntimeAppliedEffectKeys = new(StringComparer.OrdinalIgnoreCase);
     private static readonly MethodInfo? LoadImageMethod = ResolveLoadImageMethod();
     private static readonly IDeserializer Deserializer = new DeserializerBuilder()
@@ -52,10 +53,9 @@ internal static class StatusEffectOverrideManager
         .Build();
 
     private static List<StatusEffectEntry> ActiveEntries = new();
-    private static Dictionary<string, string> ActiveEntrySignaturesByEffect = new(StringComparer.OrdinalIgnoreCase);
-    private static HashSet<string>? PendingChangedEffectKeys;
-    private static bool HasPendingScopedApply;
-    private static bool ForceNextFullApply = true;
+    private static readonly DomainEntryChangeTracker<StatusEffectEntry> EntryChanges = new(
+        entry => entry.Effect,
+        entries => SparseSerializer.Serialize(entries));
     private static CustomSyncedValue<string>? SyncedPayload;
     private static string? LastAppliedSyncedPayload;
     private static FileSystemWatcher? Watcher;
@@ -113,7 +113,10 @@ internal static class StatusEffectOverrideManager
         }
 
         EnsureConfigDirectoryAndDefaultOverride();
-        List<StatusEffectEntry> entries = LoadEntriesFromDisk();
+        if (!TryLoadEntriesFromDisk(out List<StatusEffectEntry> entries))
+        {
+            return;
+        }
         lock (StateLock)
         {
             SetActiveEntries(entries);
@@ -171,7 +174,7 @@ internal static class StatusEffectOverrideManager
         lock (StateLock)
         {
             entries = ActiveEntries.ToList();
-            changedEffectKeys = ConsumePendingChangedEffectKeys();
+            changedEffectKeys = EntryChanges.ConsumeChangedKeys();
         }
 
         if (changedEffectKeys is { Count: 0 })
@@ -180,46 +183,54 @@ internal static class StatusEffectOverrideManager
         }
 
         List<StatusEffectEntry> entriesToApply = FilterEntries(entries, changedEffectKeys);
-        Dictionary<string, List<StatusEffectEntry>> entriesByEffect = BuildEnabledDefinitionEntriesByEffect(entriesToApply);
-        HashSet<string> runtimeEffectKeys = GetRuntimeApplyEffectKeys(entriesByEffect);
+        Dictionary<string, List<StatusEffectEntry>> entriesToApplyByEffect = BuildEnabledDefinitionEntriesByEffect(entriesToApply);
+        Dictionary<string, List<StatusEffectEntry>> activeEntriesByEffect = changedEffectKeys == null
+            ? entriesToApplyByEffect
+            : BuildEnabledDefinitionEntriesByEffect(entries);
+        HashSet<string> runtimeEffectKeys = GetRuntimeApplyEffectKeys(activeEntriesByEffect, changedEffectKeys);
 
         DataForgeStatusEffectOwnership.NotifyStatusEffectOverridesWillApply();
-        CaptureBaselinesForEntriesIfNeeded(entriesToApply);
-        CleanupCreatedEffects(entries);
-        EnsureCloneEffects(entries);
-        RestoreBaselineEffects(runtimeEffectKeys);
-
-        if (!DataForgePlugin.StatusEffectOverridesEnabled)
+        try
         {
-            ApplyLiveSafeToActiveStatusEffects(entriesByEffect);
-            UpdateRuntimeAppliedEffectState(new Dictionary<string, List<StatusEffectEntry>>(StringComparer.OrdinalIgnoreCase));
-            DataForgeStatusEffectOwnership.NotifyStatusEffectOverridesApplied();
-            return;
-        }
+            CaptureBaselinesForEntriesIfNeeded(entriesToApply);
+            CleanupCreatedEffects(entries);
+            EnsureCloneEffects(entries);
+            RestoreBaselineEffects(runtimeEffectKeys);
 
-        foreach (StatusEffectEntry entry in entriesToApply)
-        {
-            using (DataForgeLogContext.Push(entry.LogContext))
+            if (!DataForgePlugin.StatusEffectOverridesEnabled)
             {
-                if (!entry.Override || !entry.HasDefinition)
-                {
-                    continue;
-                }
-
-                StatusEffect? statusEffect = ResolveStatusEffect(entry.Effect);
-                if (statusEffect == null)
-                {
-                    DataForgeLogContext.Warning($"Could not find status effect '{entry.Effect}'.");
-                    continue;
-                }
-
-                ApplyDefinition(statusEffect, entry.ToDefinition());
+                ApplyLiveSafeToActiveStatusEffects(entriesToApplyByEffect, changedEffectKeys);
+                UpdateRuntimeAppliedEffectState(new Dictionary<string, List<StatusEffectEntry>>(StringComparer.OrdinalIgnoreCase));
+                return;
             }
-        }
 
-        ApplyLiveSafeToActiveStatusEffects(entriesByEffect);
-        UpdateRuntimeAppliedEffectState(entriesByEffect);
-        DataForgeStatusEffectOwnership.NotifyStatusEffectOverridesApplied();
+            foreach (StatusEffectEntry entry in entriesToApply)
+            {
+                using (DataForgeLogContext.Push(entry.LogContext))
+                {
+                    if (!entry.Override || !entry.HasDefinition)
+                    {
+                        continue;
+                    }
+
+                    StatusEffect? statusEffect = ResolveStatusEffect(entry.Effect);
+                    if (statusEffect == null)
+                    {
+                        DataForgeLogContext.Warning($"Could not find status effect '{entry.Effect}'.");
+                        continue;
+                    }
+
+                    ApplyDefinition(statusEffect, entry.ToDefinition());
+                }
+            }
+
+            ApplyLiveSafeToActiveStatusEffects(entriesToApplyByEffect, changedEffectKeys);
+            UpdateRuntimeAppliedEffectState(activeEntriesByEffect);
+        }
+        finally
+        {
+            DataForgeStatusEffectOwnership.NotifyStatusEffectOverridesApplied();
+        }
     }
 
     internal static bool HasActiveStatusEffectOverride(string? effectName)
@@ -316,8 +327,15 @@ internal static class StatusEffectOverrideManager
         return entriesByEffect;
     }
 
-    private static HashSet<string> GetRuntimeApplyEffectKeys(Dictionary<string, List<StatusEffectEntry>> entriesByEffect)
+    private static HashSet<string> GetRuntimeApplyEffectKeys(
+        Dictionary<string, List<StatusEffectEntry>> entriesByEffect,
+        HashSet<string>? changedEffectKeys)
     {
+        if (changedEffectKeys != null)
+        {
+            return new HashSet<string>(changedEffectKeys, StringComparer.OrdinalIgnoreCase);
+        }
+
         HashSet<string> keys = new(entriesByEffect.Keys, StringComparer.OrdinalIgnoreCase);
         if (RuntimeStateWasApplied)
         {
@@ -341,7 +359,9 @@ internal static class StatusEffectOverrideManager
         RuntimeStateWasApplied = RuntimeAppliedEffectKeys.Count > 0;
     }
 
-    private static void ApplyLiveSafeToActiveStatusEffects(Dictionary<string, List<StatusEffectEntry>> entriesByEffect)
+    private static void ApplyLiveSafeToActiveStatusEffects(
+        Dictionary<string, List<StatusEffectEntry>> entriesByEffect,
+        HashSet<string>? affectedEffectKeys = null)
     {
         if (Player.s_players == null)
         {
@@ -369,7 +389,7 @@ internal static class StatusEffectOverrideManager
                     continue;
                 }
 
-                if (ApplyLiveSafeToActiveStatusEffect(statusEffect, entriesByEffect))
+                if (ApplyLiveSafeToActiveStatusEffect(statusEffect, entriesByEffect, affectedEffectKeys))
                 {
                     applied++;
                 }
@@ -430,10 +450,18 @@ internal static class StatusEffectOverrideManager
         }
     }
 
-    private static bool ApplyLiveSafeToActiveStatusEffect(StatusEffect statusEffect, Dictionary<string, List<StatusEffectEntry>> entriesByEffect)
+    private static bool ApplyLiveSafeToActiveStatusEffect(
+        StatusEffect statusEffect,
+        Dictionary<string, List<StatusEffectEntry>> entriesByEffect,
+        HashSet<string>? affectedEffectKeys)
     {
         string statusEffectName = NormalizeStatusEffectName(statusEffect.name);
         if (statusEffectName.Length == 0)
+        {
+            return false;
+        }
+
+        if (affectedEffectKeys != null && !affectedEffectKeys.Contains(statusEffectName))
         {
             return false;
         }
@@ -540,8 +568,12 @@ internal static class StatusEffectOverrideManager
             return;
         }
 
+        if (!DataForgeOverrideFiles.TryDeserializeEntries(payload, "synced status effect payload", DeserializeEntries, out List<StatusEffectEntry> entries))
+        {
+            return;
+        }
+
         LastAppliedSyncedPayload = payload;
-        List<StatusEffectEntry> entries = DeserializeEntries(payload, "synced status effect payload");
         lock (StateLock)
         {
             SetActiveEntries(entries);
@@ -552,88 +584,8 @@ internal static class StatusEffectOverrideManager
 
     private static void SetActiveEntries(List<StatusEffectEntry> entries)
     {
-        Dictionary<string, string> signatures = BuildEntrySignaturesByEffect(entries);
-        if (!ForceNextFullApply)
-        {
-            PendingChangedEffectKeys = GetChangedKeys(ActiveEntrySignaturesByEffect, signatures);
-            HasPendingScopedApply = true;
-        }
-
+        EntryChanges.SetEntries(entries);
         ActiveEntries = entries;
-        ActiveEntrySignaturesByEffect = signatures;
-    }
-
-    private static HashSet<string>? ConsumePendingChangedEffectKeys()
-    {
-        if (ForceNextFullApply)
-        {
-            ForceNextFullApply = false;
-            PendingChangedEffectKeys = null;
-            HasPendingScopedApply = false;
-            return null;
-        }
-
-        if (!HasPendingScopedApply)
-        {
-            return null;
-        }
-
-        HashSet<string> changedKeys = PendingChangedEffectKeys ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        PendingChangedEffectKeys = null;
-        HasPendingScopedApply = false;
-        return changedKeys;
-    }
-
-    private static Dictionary<string, string> BuildEntrySignaturesByEffect(List<StatusEffectEntry> entries)
-    {
-        Dictionary<string, List<StatusEffectEntry>> entriesByEffect = new(StringComparer.OrdinalIgnoreCase);
-        foreach (StatusEffectEntry entry in entries)
-        {
-            if (string.IsNullOrWhiteSpace(entry.Effect))
-            {
-                continue;
-            }
-
-            if (!entriesByEffect.TryGetValue(entry.Effect, out List<StatusEffectEntry> effectEntries))
-            {
-                effectEntries = new List<StatusEffectEntry>();
-                entriesByEffect[entry.Effect] = effectEntries;
-            }
-
-            effectEntries.Add(entry);
-        }
-
-        Dictionary<string, string> signatures = new(StringComparer.OrdinalIgnoreCase);
-        foreach (KeyValuePair<string, List<StatusEffectEntry>> pair in entriesByEffect)
-        {
-            signatures[pair.Key] = SparseSerializer.Serialize(pair.Value);
-        }
-
-        return signatures;
-    }
-
-    private static HashSet<string> GetChangedKeys(Dictionary<string, string> oldSignatures, Dictionary<string, string> newSignatures)
-    {
-        HashSet<string> changedKeys = new(StringComparer.OrdinalIgnoreCase);
-        foreach (KeyValuePair<string, string> pair in oldSignatures)
-        {
-            if (!newSignatures.TryGetValue(pair.Key, out string newSignature) ||
-                !string.Equals(pair.Value, newSignature, StringComparison.Ordinal))
-            {
-                changedKeys.Add(pair.Key);
-            }
-        }
-
-        foreach (KeyValuePair<string, string> pair in newSignatures)
-        {
-            if (!oldSignatures.TryGetValue(pair.Key, out string oldSignature) ||
-                !string.Equals(oldSignature, pair.Value, StringComparison.Ordinal))
-            {
-                changedKeys.Add(pair.Key);
-            }
-        }
-
-        return changedKeys;
     }
 
     private static List<StatusEffectEntry> FilterEntries(List<StatusEffectEntry> entries, HashSet<string>? effectKeys)
@@ -648,9 +600,9 @@ internal static class StatusEffectOverrideManager
         DataForgeSync.PublishPayload(SyncedPayload, DomainName, payload);
     }
 
-    private static List<StatusEffectEntry> LoadEntriesFromDisk()
+    private static bool TryLoadEntriesFromDisk(out List<StatusEffectEntry> entries)
     {
-        return DataForgeOverrideFiles.LoadEntries(GetOverrideFiles(), DeserializeEntries);
+        return DataForgeOverrideFiles.TryLoadEntries(GetOverrideFiles(), DeserializeEntries, out entries);
     }
 
     private static List<StatusEffectEntry> DeserializeEntries(string yaml, string source)
@@ -667,8 +619,7 @@ internal static class StatusEffectOverrideManager
         }
         catch (Exception ex)
         {
-            DataForgePlugin.Log.LogError($"Failed to parse {source}: {ex.Message}");
-            return new List<StatusEffectEntry>();
+            throw new InvalidDataException($"Failed to parse {source}: {ex.Message}", ex);
         }
     }
 
@@ -938,22 +889,18 @@ internal static class StatusEffectOverrideManager
         }
 
         string statusEffectName = statusEffect.name.Trim();
-        if (!Baselines.ContainsKey(statusEffectName))
+        bool hasBaseline = Baselines.ContainsKey(statusEffectName);
+        bool objectChanged = !BaselineEffects.TryGetValue(statusEffectName, out StatusEffect? existing) ||
+                             !ReferenceEquals(existing, statusEffect);
+        if (!hasBaseline || objectChanged)
         {
             Baselines[statusEffectName] = StatusEffectDefinition.From(statusEffect);
             BaselineIcons[statusEffectName] = statusEffect.m_icon;
             BaselineStartEffects[statusEffectName] = CloneEffectList(statusEffect.m_startEffects);
             BaselineStopEffects[statusEffectName] = CloneEffectList(statusEffect.m_stopEffects);
-            added = true;
-        }
-
-        if (!BaselineEffects.TryGetValue(statusEffectName, out StatusEffect? existing) ||
-            !ReferenceEquals(existing, statusEffect))
-        {
             BaselineEffects[statusEffectName] = statusEffect;
-            BaselineStartEffects[statusEffectName] = CloneEffectList(statusEffect.m_startEffects);
-            BaselineStopEffects[statusEffectName] = CloneEffectList(statusEffect.m_stopEffects);
-            refreshed = true;
+            added = !hasBaseline;
+            refreshed = hasBaseline;
         }
     }
 
@@ -986,6 +933,7 @@ internal static class StatusEffectOverrideManager
         if (ObjectDB.instance == null)
         {
             CreatedClones.Clear();
+            CreatedCloneEffects.Clear();
             return;
         }
 
@@ -997,16 +945,39 @@ internal static class StatusEffectOverrideManager
 
     internal static void OnWorldShutdown()
     {
-        ObjectDbReady = false;
-        ZNetSceneReady = false;
-        RuntimeStateWasApplied = false;
-        RuntimeAppliedEffectKeys.Clear();
-        CleanupCreatedClonesForWorldTransition();
+        try
+        {
+            RestoreBaselineEffects(RuntimeAppliedEffectKeys.ToArray());
+        }
+        finally
+        {
+            try
+            {
+                CleanupCreatedClonesForWorldTransition();
+            }
+            finally
+            {
+                ObjectDbReady = false;
+                ZNetSceneReady = false;
+                RuntimeStateWasApplied = false;
+                RuntimeAppliedEffectKeys.Clear();
+                lock (StateLock)
+                {
+                    if (DataForgePlugin.IsRemoteServerClient)
+                    {
+                        SetActiveEntries(new List<StatusEffectEntry>());
+                        LastAppliedSyncedPayload = null;
+                    }
+
+                    EntryChanges.RequireFullApply();
+                }
+            }
+        }
     }
 
     private static void RemoveCreatedEffectClone(string cloneName, bool destroy)
     {
-        StatusEffect? clone = ResolveStatusEffect(cloneName);
+        CreatedCloneEffects.TryGetValue(cloneName, out StatusEffect? clone);
         if (clone != null && ObjectDB.instance != null)
         {
             ObjectDB.instance.m_StatusEffects.Remove(clone);
@@ -1017,6 +988,7 @@ internal static class StatusEffectOverrideManager
         }
 
         CreatedClones.Remove(cloneName);
+        CreatedCloneEffects.Remove(cloneName);
         Baselines.Remove(cloneName);
         BaselineEffects.Remove(cloneName);
         BaselineIcons.Remove(cloneName);
@@ -1050,13 +1022,27 @@ internal static class StatusEffectOverrideManager
         StatusEffect? existing = ResolveStatusEffect(entry.Effect);
         if (existing != null)
         {
-            CreatedClones.Add(entry.Effect);
+            if (CreatedCloneEffects.TryGetValue(entry.Effect, out StatusEffect? ownedClone) &&
+                ReferenceEquals(existing, ownedClone))
+            {
+                return;
+            }
+
+            if (ownedClone != null)
+            {
+                ObjectDB.instance.m_StatusEffects.Remove(ownedClone);
+                UnityEngine.Object.Destroy(ownedClone);
+            }
+
+            CreatedClones.Remove(entry.Effect);
+            CreatedCloneEffects.Remove(entry.Effect);
             return;
         }
 
         if (CreatedClones.Contains(entry.Effect))
         {
             CreatedClones.Remove(entry.Effect);
+            CreatedCloneEffects.Remove(entry.Effect);
             Baselines.Remove(entry.Effect);
             BaselineEffects.Remove(entry.Effect);
             BaselineIcons.Remove(entry.Effect);
@@ -1083,6 +1069,7 @@ internal static class StatusEffectOverrideManager
         BaselineStartEffects[entry.Effect] = CloneEffectList(clone.m_startEffects);
         BaselineStopEffects[entry.Effect] = CloneEffectList(clone.m_stopEffects);
         CreatedClones.Add(entry.Effect);
+        CreatedCloneEffects[entry.Effect] = clone;
         DataForgePlugin.Log.LogInfo($"Cloned status effect '{entry.CloneFrom}' as '{entry.Effect}'.");
     }
 
@@ -2301,7 +2288,7 @@ internal static class StatusEffectOverrideManager
         CaptureAllBaselinesIfNeeded();
         string sourceSignature = ComputeReferenceSourceSignature();
         string referencePath = Path.Combine(ConfigDirectory, ReferenceFileName);
-        if (ShouldSkipReferenceUpdate(referencePath, sourceSignature))
+        if (DataForgeReferenceState.ShouldSkip(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion))
         {
             return;
         }
@@ -2315,7 +2302,7 @@ internal static class StatusEffectOverrideManager
             BuildReferenceArtifactContent);
         if (wrote || File.Exists(referencePath))
         {
-            RecordReferenceUpdateState(referencePath, sourceSignature);
+            DataForgeReferenceState.Record(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
         }
     }
 
@@ -2355,27 +2342,7 @@ internal static class StatusEffectOverrideManager
             }
         }
 
-        return ComputeStableHash(builder.ToString());
-    }
-
-    private static bool ShouldSkipReferenceUpdate(string referencePath, string sourceSignature)
-    {
-        return DataForgeReferenceState.ShouldSkip(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
-    }
-
-    private static void RecordReferenceUpdateState(string referencePath, string sourceSignature)
-    {
-        DataForgeReferenceState.Record(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
-    }
-
-    private static string BuildFileStamp(string path)
-    {
-        return DataForgeReferenceState.BuildFileStamp(path);
-    }
-
-    private static string ComputeStableHash(string value)
-    {
-        return DataForgeReferenceState.ComputeStableHash(value);
+        return DataForgeReferenceState.ComputeStableHash(builder.ToString());
     }
 
     internal sealed class StatusEffectEntry

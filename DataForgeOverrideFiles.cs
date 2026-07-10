@@ -21,18 +21,48 @@ internal static class DataForgeOverrideFiles
             .ToArray();
     }
 
-    internal static List<TEntry> LoadEntries<TEntry>(
+    internal static bool TryLoadEntries<TEntry>(
         IEnumerable<string> files,
-        Func<string, string, IEnumerable<TEntry>> deserializeEntries)
+        Func<string, string, IEnumerable<TEntry>> deserializeEntries,
+        out List<TEntry> entries)
     {
-        List<TEntry> entries = new();
-        foreach (string file in files)
+        List<TEntry> loadedEntries = new();
+        try
         {
-            string yaml = File.ReadAllText(file);
-            entries.AddRange(deserializeEntries(yaml, file));
-        }
+            foreach (string file in files)
+            {
+                string yaml = File.ReadAllText(file);
+                loadedEntries.AddRange(deserializeEntries(yaml, file));
+            }
 
-        return entries;
+            entries = loadedEntries;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogError($"Override reload failed; keeping the last-known-good configuration. {ex.Message}");
+            entries = new List<TEntry>();
+            return false;
+        }
+    }
+
+    internal static bool TryDeserializeEntries<TEntry>(
+        string yaml,
+        string source,
+        Func<string, string, IEnumerable<TEntry>> deserializeEntries,
+        out List<TEntry> entries)
+    {
+        try
+        {
+            entries = deserializeEntries(yaml, source).ToList();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogError($"Synced override payload was rejected; keeping the last-known-good configuration. {ex.Message}");
+            entries = new List<TEntry>();
+            return false;
+        }
     }
 
     internal static void EnsureDefaultOverride(

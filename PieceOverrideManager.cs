@@ -24,7 +24,7 @@ internal static class PieceOverrideManager
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
     private const int DefaultPieceSortOrder = 100;
     private const string ReferenceStateKey = "pieces";
-    private const string ReferenceLogicVersion = "2026-06-26-piece-visual-scale-v1";
+    private const string ReferenceLogicVersion = "2026-07-10-piece-visual-roundtrip-v2";
     private static readonly HashSet<string> IgnoredCategoryNames = new(StringComparer.OrdinalIgnoreCase)
     {
         "Feasts",
@@ -41,11 +41,13 @@ internal static class PieceOverrideManager
 
     private static readonly object StateLock = new();
     private static readonly Dictionary<string, PieceDefinition> Baselines = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, Piece> BaselinePieces = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<PieceTable, List<GameObject>> PieceTableOrderBaselines = new(ReferenceComparer<PieceTable>.Instance);
     private static readonly HashSet<int> ManagedStationExtensionInstanceIds = new();
     private static readonly HashSet<int> ManagedCraftingStationInstanceIds = new();
     private static readonly Dictionary<int, List<StationExtensionSnapshot>> StationExtensionRemovalSnapshots = new();
     private static readonly Dictionary<int, List<RendererMaterialSnapshot>> PieceMaterialSnapshots = new();
+    private static readonly Dictionary<int, Sprite?> PieceIconSnapshots = new();
     private static readonly HashSet<string> RuntimeAppliedPieceKeys = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, string> PieceTableAliases = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -72,10 +74,9 @@ internal static class PieceOverrideManager
 
     private static List<PieceEntry> ActiveEntries = new();
     private static Dictionary<string, List<PieceEntry>> ActiveRuntimeEntriesByPiece = new(StringComparer.OrdinalIgnoreCase);
-    private static Dictionary<string, string> ActiveEntrySignaturesByPiece = new(StringComparer.OrdinalIgnoreCase);
-    private static HashSet<string>? PendingChangedPieceKeys;
-    private static bool HasPendingScopedApply;
-    private static bool ForceNextFullApply = true;
+    private static readonly DomainEntryChangeTracker<PieceEntry> EntryChanges = new(
+        entry => entry.Piece,
+        entries => SparseSerializer.Serialize(entries));
     private static CustomSyncedValue<string>? SyncedPayload;
     private static string? LastAppliedSyncedPayload;
     private static FileSystemWatcher? Watcher;
@@ -87,6 +88,7 @@ internal static class PieceOverrideManager
     private static bool PieceTableSortWasApplied;
     private static bool PieceTableMembershipWasApplied;
     private static bool CraftingStationTopologyChanged;
+    private static bool StationExtensionTopologyChanged;
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
 
@@ -136,7 +138,10 @@ internal static class PieceOverrideManager
         }
 
         EnsureConfigDirectoryAndDefaultOverride();
-        List<PieceEntry> entries = LoadEntriesFromDisk();
+        if (!TryLoadEntriesFromDisk(out List<PieceEntry> entries))
+        {
+            return;
+        }
         lock (StateLock)
         {
             SetActiveEntries(entries);
@@ -165,7 +170,7 @@ internal static class PieceOverrideManager
         HashSet<string>? changedPieceKeys;
         lock (StateLock)
         {
-            changedPieceKeys = ConsumePendingChangedPieceKeys();
+            changedPieceKeys = EntryChanges.ConsumeChangedKeys();
         }
 
         if (changedPieceKeys is { Count: 0 })
@@ -202,7 +207,12 @@ internal static class PieceOverrideManager
         if (shouldTouchRuntime)
         {
             ApplyToLoadedInstances(runtimePieceKeys);
-            InvalidateCraftingStationExtensionCaches();
+            if (CraftingStationTopologyChanged || StationExtensionTopologyChanged)
+            {
+                InvalidateCraftingStationExtensionCaches();
+                StationExtensionTopologyChanged = false;
+            }
+
             RefreshLocalBuildPieces();
         }
 
@@ -274,6 +284,10 @@ internal static class PieceOverrideManager
 
     internal static void OnWorldShutdown()
     {
+        RunWorldShutdownStep("visual state", RestoreAllPieceVisualStates);
+        RunWorldShutdownStep("prefab definitions", RestoreAppliedPrefabDefinitionsForWorldShutdown);
+        RunWorldShutdownStep("piece tables", RestoreCapturedPieceTablesForWorldShutdown);
+        RunWorldShutdownStep("piece categories", PieceTableCategoryGuard.ResetWorldState);
         GameDataReady = false;
         ObjectDbReady = false;
         PieceTablesReady = false;
@@ -283,9 +297,88 @@ internal static class PieceOverrideManager
         ManagedStationExtensionInstanceIds.Clear();
         StationExtensionRemovalSnapshots.Clear();
         PieceMaterialSnapshots.Clear();
+        PieceIconSnapshots.Clear();
+        PieceTableOrderBaselines.Clear();
         CraftingStationTopologyChanged = false;
+        StationExtensionTopologyChanged = false;
         PieceTableSortWasApplied = false;
         PieceTableMembershipWasApplied = false;
+        lock (StateLock)
+        {
+            if (DataForgePlugin.IsRemoteServerClient)
+            {
+                SetActiveEntries(new List<PieceEntry>());
+                LastAppliedSyncedPayload = null;
+            }
+
+            EntryChanges.RequireFullApply();
+        }
+    }
+
+    private static void RunWorldShutdownStep(string name, Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogWarning($"Failed to restore DataForge piece {name} during world shutdown: {ex}");
+        }
+    }
+
+    private static void RestoreAppliedPrefabDefinitionsForWorldShutdown()
+    {
+        if (ZNetScene.instance == null || RuntimeAppliedPieceKeys.Count == 0)
+        {
+            return;
+        }
+
+        foreach ((string prefabName, Piece piece) in GetPrefabPieces(RuntimeAppliedPieceKeys))
+        {
+            GameObject gameObject = piece.gameObject;
+            RestorePieceVisualState(gameObject);
+            bool hasStationExtension = false;
+            bool hasCraftingStation = false;
+            if (Baselines.TryGetValue(prefabName, out PieceDefinition? baseline))
+            {
+                hasStationExtension = baseline.StationExtension != null;
+                hasCraftingStation = baseline.CraftingStation != null;
+                ApplyDefinition(gameObject, baseline, adjustHealthZdo: false, applyVisualScale: true);
+            }
+
+            RemoveManagedComponentsIfAbsent(gameObject, hasStationExtension, hasCraftingStation);
+        }
+    }
+
+    private static void RestoreCapturedPieceTablesForWorldShutdown()
+    {
+        PieceTable[] pieceTables = PieceTableOrderBaselines.Keys
+            .Where(pieceTable => pieceTable != null)
+            .ToArray();
+        if (pieceTables.Length > 0)
+        {
+            RestorePieceTableMemberships(pieceTables);
+        }
+    }
+
+    private static void RestoreAllPieceVisualStates()
+    {
+        if (ZNetScene.instance != null)
+        {
+            foreach ((string PrefabName, Piece Piece) pair in GetPrefabPieces().ToList())
+            {
+                RestorePieceVisualState(pair.Piece.gameObject);
+            }
+        }
+
+        foreach (Piece piece in Piece.s_allPieces.ToList())
+        {
+            if (piece != null && piece.gameObject != null)
+            {
+                RestorePieceVisualState(piece.gameObject);
+            }
+        }
     }
 
     internal static void OnPieceTablesReady()
@@ -363,8 +456,12 @@ internal static class PieceOverrideManager
             return;
         }
 
+        if (!DataForgeOverrideFiles.TryDeserializeEntries(payload, "synced piece payload", DeserializeEntries, out List<PieceEntry> entries))
+        {
+            return;
+        }
+
         LastAppliedSyncedPayload = payload;
-        List<PieceEntry> entries = DeserializeEntries(payload, "synced piece payload");
         lock (StateLock)
         {
             SetActiveEntries(entries);
@@ -375,89 +472,9 @@ internal static class PieceOverrideManager
 
     private static void SetActiveEntries(List<PieceEntry> entries)
     {
-        Dictionary<string, string> signatures = BuildEntrySignaturesByPiece(entries);
-        if (!ForceNextFullApply)
-        {
-            PendingChangedPieceKeys = GetChangedKeys(ActiveEntrySignaturesByPiece, signatures);
-            HasPendingScopedApply = true;
-        }
-
+        EntryChanges.SetEntries(entries);
         ActiveEntries = entries;
         ActiveRuntimeEntriesByPiece = BuildActiveRuntimeEntriesByPiece(entries);
-        ActiveEntrySignaturesByPiece = signatures;
-    }
-
-    private static HashSet<string>? ConsumePendingChangedPieceKeys()
-    {
-        if (ForceNextFullApply)
-        {
-            ForceNextFullApply = false;
-            PendingChangedPieceKeys = null;
-            HasPendingScopedApply = false;
-            return null;
-        }
-
-        if (!HasPendingScopedApply)
-        {
-            return null;
-        }
-
-        HashSet<string> changedKeys = PendingChangedPieceKeys ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        PendingChangedPieceKeys = null;
-        HasPendingScopedApply = false;
-        return changedKeys;
-    }
-
-    private static Dictionary<string, string> BuildEntrySignaturesByPiece(List<PieceEntry> entries)
-    {
-        Dictionary<string, List<PieceEntry>> entriesByPiece = new(StringComparer.OrdinalIgnoreCase);
-        foreach (PieceEntry entry in entries)
-        {
-            if (string.IsNullOrWhiteSpace(entry.Piece))
-            {
-                continue;
-            }
-
-            if (!entriesByPiece.TryGetValue(entry.Piece, out List<PieceEntry> pieceEntries))
-            {
-                pieceEntries = new List<PieceEntry>();
-                entriesByPiece[entry.Piece] = pieceEntries;
-            }
-
-            pieceEntries.Add(entry);
-        }
-
-        Dictionary<string, string> signatures = new(StringComparer.OrdinalIgnoreCase);
-        foreach (KeyValuePair<string, List<PieceEntry>> pair in entriesByPiece)
-        {
-            signatures[pair.Key] = SparseSerializer.Serialize(pair.Value);
-        }
-
-        return signatures;
-    }
-
-    private static HashSet<string> GetChangedKeys(Dictionary<string, string> oldSignatures, Dictionary<string, string> newSignatures)
-    {
-        HashSet<string> changedKeys = new(StringComparer.OrdinalIgnoreCase);
-        foreach (KeyValuePair<string, string> pair in oldSignatures)
-        {
-            if (!newSignatures.TryGetValue(pair.Key, out string newSignature) ||
-                !string.Equals(pair.Value, newSignature, StringComparison.Ordinal))
-            {
-                changedKeys.Add(pair.Key);
-            }
-        }
-
-        foreach (KeyValuePair<string, string> pair in newSignatures)
-        {
-            if (!oldSignatures.TryGetValue(pair.Key, out string oldSignature) ||
-                !string.Equals(oldSignature, pair.Value, StringComparison.Ordinal))
-            {
-                changedKeys.Add(pair.Key);
-            }
-        }
-
-        return changedKeys;
     }
 
     private static Dictionary<string, List<PieceEntry>> BuildActiveRuntimeEntriesByPiece(List<PieceEntry> entries)
@@ -490,9 +507,9 @@ internal static class PieceOverrideManager
         DataForgeSync.PublishPayload(SyncedPayload, DomainName, payload);
     }
 
-    private static List<PieceEntry> LoadEntriesFromDisk()
+    private static bool TryLoadEntriesFromDisk(out List<PieceEntry> entries)
     {
-        return DataForgeOverrideFiles.LoadEntries(GetOverrideFiles(), DeserializeEntries);
+        return DataForgeOverrideFiles.TryLoadEntries(GetOverrideFiles(), DeserializeEntries, out entries);
     }
 
     private static List<PieceEntry> DeserializeEntries(string yaml, string source)
@@ -509,8 +526,7 @@ internal static class PieceOverrideManager
         }
         catch (Exception ex)
         {
-            DataForgePlugin.Log.LogError($"Failed to parse {source}: {ex.Message}");
-            return new List<PieceEntry>();
+            throw new InvalidDataException($"Failed to parse {source}: {ex.Message}", ex);
         }
     }
 
@@ -610,6 +626,8 @@ internal static class PieceOverrideManager
             "#   visual:",
             "#     scale: 1                          # uniform prefab scale for newly placed pieces; larger values also affect collider/support behavior.",
             "#     material: wood                    # material name from z_materials.reference.txt; replaces piece renderer material slots.",
+            "#     icon: auto                        # auto snapshots the piece icon after visual changes; or use a 256*256 png name from DataForge/icon.",
+            "#     iconRotation: 23, 51, 25.8        # x, y, z rotation used by icon: auto.",
             "#   resources:",
             "#   - Wood: 2                           # item: amount; add ', false' to disable build resource recovery.",
             "#   sapCollector: Sap, 60, 10           # produced item, seconds per unit, max stored units.",
@@ -647,6 +665,7 @@ internal static class PieceOverrideManager
             "#   visual:",
             "#     scale: 2",
             "#     material: amber",
+            "#     icon: auto",
             "#   stationExtension: None",
             "#   resources:",
             "#   - Wood: 4"
@@ -712,13 +731,22 @@ internal static class PieceOverrideManager
 
     private static bool CaptureBaseline(string prefabName, Piece piece)
     {
-        if (string.IsNullOrWhiteSpace(prefabName) || Baselines.ContainsKey(prefabName))
+        if (string.IsNullOrWhiteSpace(prefabName))
+        {
+            return false;
+        }
+
+        bool hasBaseline = Baselines.ContainsKey(prefabName);
+        if (hasBaseline &&
+            BaselinePieces.TryGetValue(prefabName, out Piece? baselinePiece) &&
+            ReferenceEquals(baselinePiece, piece))
         {
             return false;
         }
 
         Baselines[prefabName] = PieceDefinition.From(piece);
-        return true;
+        BaselinePieces[prefabName] = piece;
+        return !hasBaseline;
     }
 
     private static IEnumerable<(string PrefabName, Piece Piece)> GetPrefabPieces()
@@ -811,7 +839,7 @@ internal static class PieceOverrideManager
 
     private static void ApplyConfiguredState(GameObject gameObject, string prefabName, bool adjustHealthZdo, bool applyVisualScale)
     {
-        RestorePieceVisualMaterials(gameObject);
+        RestorePieceVisualState(gameObject);
         bool finalHasStationExtension = false;
         bool finalHasCraftingStation = false;
         if (Baselines.TryGetValue(prefabName, out PieceDefinition? baseline))
@@ -1549,6 +1577,7 @@ internal static class PieceOverrideManager
         }
         if (string.IsNullOrWhiteSpace(definition.Material))
         {
+            ApplyPieceIconDefinition(gameObject, definition, applyVisualScale);
             return;
         }
 
@@ -1558,6 +1587,7 @@ internal static class PieceOverrideManager
         if (material == null)
         {
             DataForgeLogContext.Warning($"{prefabName} has unknown visual material '{materialName}'. Check z_materials.reference.txt.");
+            ApplyPieceIconDefinition(gameObject, definition, applyVisualScale);
             return;
         }
 
@@ -1565,6 +1595,7 @@ internal static class PieceOverrideManager
         if (renderers.Count == 0)
         {
             DataForgeLogContext.Warning($"{prefabName} has no piece renderers for visual material override.");
+            ApplyPieceIconDefinition(gameObject, definition, applyVisualScale);
             return;
         }
 
@@ -1587,6 +1618,65 @@ internal static class PieceOverrideManager
             }
 
             renderer.sharedMaterials = updatedMaterials;
+        }
+
+        ApplyPieceIconDefinition(gameObject, definition, applyVisualScale);
+    }
+
+    private static void ApplyPieceIconDefinition(GameObject gameObject, PieceVisualDefinition definition, bool applyToPrefabIcon)
+    {
+        if (!applyToPrefabIcon || string.IsNullOrWhiteSpace(definition.Icon))
+        {
+            return;
+        }
+
+        Piece piece = gameObject.GetComponent<Piece>();
+        if (piece == null)
+        {
+            return;
+        }
+
+        string prefabName = GetPrefabName(gameObject);
+        string iconName = definition.Icon!.Trim();
+        Sprite? icon;
+        if (ItemVisualOverrides.IsAutoIconValue(iconName))
+        {
+            if (!ItemVisualOverrides.CanRenderAutoIcons())
+            {
+                return;
+            }
+
+            icon = ItemVisualOverrides.ResolveAutoIconSpriteForPrefab(
+                "piece",
+                prefabName,
+                gameObject,
+                definition.Material,
+                null,
+                null,
+                definition.IconRotation);
+            if (icon == null)
+            {
+                DataForgeLogContext.Warning($"{prefabName} could not generate visual.icon auto. Keeping the current piece icon.");
+                return;
+            }
+        }
+        else
+        {
+            icon = ItemVisualOverrides.ResolveIconSpriteFromConfig(iconName);
+            if (icon == null)
+            {
+                DataForgeLogContext.Warning($"{prefabName} has unknown visual icon '{iconName}'. Expected a png under DataForge/icon.");
+                return;
+            }
+        }
+
+        StorePieceIconSnapshot(gameObject, piece);
+        piece.m_icon = icon;
+
+        CraftingStation craftingStation = gameObject.GetComponent<CraftingStation>();
+        if (craftingStation != null)
+        {
+            craftingStation.m_icon = icon;
         }
     }
 
@@ -1632,6 +1722,21 @@ internal static class PieceOverrideManager
             .ToList();
     }
 
+    private static void StorePieceIconSnapshot(GameObject gameObject, Piece piece)
+    {
+        int key = gameObject.GetInstanceID();
+        if (!PieceIconSnapshots.ContainsKey(key))
+        {
+            PieceIconSnapshots[key] = piece.m_icon;
+        }
+    }
+
+    private static void RestorePieceVisualState(GameObject gameObject)
+    {
+        RestorePieceVisualIcon(gameObject);
+        RestorePieceVisualMaterials(gameObject);
+    }
+
     private static void RestorePieceVisualMaterials(GameObject gameObject)
     {
         int key = gameObject.GetInstanceID();
@@ -1647,6 +1752,28 @@ internal static class PieceOverrideManager
             {
                 snapshot.Renderer.sharedMaterials = snapshot.Materials.ToArray();
             }
+        }
+    }
+
+    private static void RestorePieceVisualIcon(GameObject gameObject)
+    {
+        int key = gameObject.GetInstanceID();
+        if (!PieceIconSnapshots.TryGetValue(key, out Sprite? icon))
+        {
+            return;
+        }
+
+        PieceIconSnapshots.Remove(key);
+        Piece piece = gameObject.GetComponent<Piece>();
+        if (piece != null)
+        {
+            piece.m_icon = icon;
+        }
+
+        CraftingStation craftingStation = gameObject.GetComponent<CraftingStation>();
+        if (craftingStation != null)
+        {
+            craftingStation.m_icon = icon;
         }
     }
 
@@ -1682,6 +1809,7 @@ internal static class PieceOverrideManager
 
             extension = gameObject.AddComponent<StationExtension>();
             ManagedStationExtensionInstanceIds.Add(gameObject.GetInstanceID());
+            StationExtensionTopologyChanged = true;
             extension.m_piece = gameObject.GetComponent<Piece>();
             extension.m_continousConnection = false;
             extension.m_stack = false;
@@ -1692,6 +1820,8 @@ internal static class PieceOverrideManager
 
     private static void ApplyStationExtensionDefinition(StationExtension extension, string definition)
     {
+        CraftingStation? previousStation = extension.m_craftingStation;
+        float previousDistance = extension.m_maxStationDistance;
         string[] parts = SplitTuple(definition);
         if (parts.Length > 0 && parts[0].Length > 0)
         {
@@ -1716,6 +1846,11 @@ internal static class PieceOverrideManager
         }
 
         CopyFloatPart(parts, 1, value => extension.m_maxStationDistance = Math.Max(0f, value));
+        if (extension.m_craftingStation != previousStation ||
+            Math.Abs(extension.m_maxStationDistance - previousDistance) > 0.0001f)
+        {
+            StationExtensionTopologyChanged = true;
+        }
     }
 
     private static void RemoveStationExtensions(GameObject gameObject)
@@ -1763,6 +1898,7 @@ internal static class PieceOverrideManager
             StationExtension extension = gameObject.AddComponent<StationExtension>();
             snapshot.Apply(extension);
             EnableStationExtension(extension);
+            StationExtensionTopologyChanged = true;
         }
     }
 
@@ -1791,6 +1927,7 @@ internal static class PieceOverrideManager
         }
 
         StationExtension.m_allExtensions.Remove(extension);
+        StationExtensionTopologyChanged = true;
         extension.CancelInvoke();
         extension.StopConnectionEffect();
         try
@@ -1835,6 +1972,7 @@ internal static class PieceOverrideManager
         }
 
         StationExtension.m_allExtensions.Remove(extension);
+        StationExtensionTopologyChanged = true;
         try
         {
             UnityEngine.Object.DestroyImmediate(extension);
@@ -1858,6 +1996,7 @@ internal static class PieceOverrideManager
         CraftingStation craftingStation = gameObject.AddComponent<CraftingStation>();
         ManagedCraftingStationInstanceIds.Add(gameObject.GetInstanceID());
         CraftingStationTopologyChanged = true;
+        StationExtensionTopologyChanged = true;
 
         craftingStation.name = GetPrefabName(gameObject);
         craftingStation.m_name = !string.IsNullOrWhiteSpace(piece.m_name) ? piece.m_name : craftingStation.name;
@@ -1900,10 +2039,12 @@ internal static class PieceOverrideManager
         if (craftingStation == null)
         {
             CraftingStationTopologyChanged = true;
+            StationExtensionTopologyChanged = true;
             return;
         }
 
         CraftingStationTopologyChanged = true;
+        StationExtensionTopologyChanged = true;
         craftingStation.CancelInvoke();
         craftingStation.m_attachedExtensions?.Clear();
         CraftingStation.m_allStations.Remove(craftingStation);
@@ -3329,7 +3470,7 @@ internal static class PieceOverrideManager
         CaptureAllBaselinesIfNeeded();
         string sourceSignature = ComputeReferenceSourceSignature();
         string referencePath = Path.Combine(ConfigDirectory, ReferenceFileName);
-        if (ShouldSkipReferenceUpdate(referencePath, sourceSignature))
+        if (DataForgeReferenceState.ShouldSkip(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion))
         {
             return;
         }
@@ -3343,7 +3484,7 @@ internal static class PieceOverrideManager
             BuildReferenceArtifactContent);
         if (wrote || File.Exists(referencePath))
         {
-            RecordReferenceUpdateState(referencePath, sourceSignature);
+            DataForgeReferenceState.Record(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
         }
     }
 
@@ -3382,34 +3523,14 @@ internal static class PieceOverrideManager
     {
         StringBuilder builder = new();
         builder.AppendLine(ReferenceLogicVersion);
-        builder.AppendLine(BuildFileStamp(Path.Combine(ConfigDirectory, "z_resourcemap.txt")));
+        builder.AppendLine(DataForgeReferenceState.BuildFileStamp(Path.Combine(ConfigDirectory, "z_resourcemap.txt")));
         foreach ((string prefabName, _) in GetPrefabPieces()
                      .OrderBy(pair => pair.PrefabName, StringComparer.OrdinalIgnoreCase))
         {
             builder.AppendLine(prefabName);
         }
 
-        return ComputeStableHash(builder.ToString());
-    }
-
-    private static bool ShouldSkipReferenceUpdate(string referencePath, string sourceSignature)
-    {
-        return DataForgeReferenceState.ShouldSkip(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
-    }
-
-    private static void RecordReferenceUpdateState(string referencePath, string sourceSignature)
-    {
-        DataForgeReferenceState.Record(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
-    }
-
-    private static string BuildFileStamp(string path)
-    {
-        return DataForgeReferenceState.BuildFileStamp(path);
-    }
-
-    private static string ComputeStableHash(string value)
-    {
-        return DataForgeReferenceState.ComputeStableHash(value);
+        return DataForgeReferenceState.ComputeStableHash(builder.ToString());
     }
 
     private static int GetPieceGroupSortRank(PieceDefinition definition)
@@ -4001,11 +4122,11 @@ internal static class PieceOverrideManager
             : FormatTuple(container.m_width, container.m_height);
     }
 
-    private static float FormatUniformScale(Vector3 scale)
+    private static float? FormatUniformScale(Vector3 scale)
     {
         return Math.Abs(scale.x - scale.y) <= 0.0001f && Math.Abs(scale.x - scale.z) <= 0.0001f
             ? scale.x
-            : Math.Max(scale.x, Math.Max(scale.y, scale.z));
+            : null;
     }
 
     private static string? FormatStationExtension(StationExtension[] extensions)
@@ -4027,6 +4148,8 @@ internal static class PieceOverrideManager
     {
         public float? Scale { get; set; }
         public string? Material { get; set; }
+        public string? Icon { get; set; }
+        public string? IconRotation { get; set; }
 
         internal static PieceVisualDefinition? From(Piece piece)
         {

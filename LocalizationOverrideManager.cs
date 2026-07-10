@@ -49,6 +49,7 @@ internal static class LocalizationOverrideManager
         new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, HashSet<string>> AppliedKeysByLanguage =
         new(StringComparer.OrdinalIgnoreCase);
+    private static Localization? AppliedLocalization;
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
     private static string LocalizationDirectory => Path.Combine(ConfigDirectory, DomainName);
@@ -99,7 +100,10 @@ internal static class LocalizationOverrideManager
         }
 
         EnsureConfigDirectoryAndDefaultOverride();
-        LocalizationPayload payload = LoadPayloadFromDisk();
+        if (!TryLoadPayloadFromDisk(out LocalizationPayload payload))
+        {
+            return;
+        }
         string serializedPayload = SerializePayload(payload);
         lock (StateLock)
         {
@@ -129,6 +133,8 @@ internal static class LocalizationOverrideManager
             return;
         }
 
+        EnsureLocalizationInstance(localization);
+
         string languageKey = NormalizeLanguage(language);
         Dictionary<string, string> translations;
         lock (StateLock)
@@ -143,6 +149,60 @@ internal static class LocalizationOverrideManager
         }
 
         AppliedKeysByLanguage[languageKey] = new HashSet<string>(translations.Keys, StringComparer.OrdinalIgnoreCase);
+    }
+
+    internal static void OnWorldShutdown()
+    {
+        try
+        {
+            RestoreAppliedTranslations(AppliedLocalization);
+        }
+        finally
+        {
+            AppliedLocalization = null;
+            OriginalTranslationsByLanguage.Clear();
+            AppliedKeysByLanguage.Clear();
+            if (DataForgePlugin.IsRemoteServerClient)
+            {
+                lock (StateLock)
+                {
+                    ActivePayload = new LocalizationPayload();
+                    LastParsedPayload = null;
+                }
+            }
+        }
+    }
+
+    private static void EnsureLocalizationInstance(Localization localization)
+    {
+        if (ReferenceEquals(AppliedLocalization, localization))
+        {
+            return;
+        }
+
+        try
+        {
+            RestoreAppliedTranslations(AppliedLocalization);
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogDebug($"Could not restore translations from the previous Localization instance: {ex.Message}");
+        }
+        OriginalTranslationsByLanguage.Clear();
+        AppliedKeysByLanguage.Clear();
+        AppliedLocalization = localization;
+    }
+
+    private static void RestoreAppliedTranslations(Localization? localization)
+    {
+        if (localization == null)
+        {
+            return;
+        }
+
+        string languageKey = NormalizeLanguage(localization.GetSelectedLanguage());
+        RestoreRemovedTranslations(localization, languageKey, Array.Empty<string>());
+        AppliedKeysByLanguage.Remove(languageKey);
     }
 
     private static void ReadYamlValues(object sender, FileSystemEventArgs e)
@@ -199,7 +259,11 @@ internal static class LocalizationOverrideManager
     {
         if (!string.Equals(LastParsedPayload, payload, StringComparison.Ordinal))
         {
-            LocalizationPayload localizationPayload = DeserializePayload(payload, "synced localization payload");
+            if (!TryDeserializePayload(payload, "synced localization payload", out LocalizationPayload localizationPayload))
+            {
+                return;
+            }
+
             lock (StateLock)
             {
                 ActivePayload = localizationPayload;
@@ -247,6 +311,21 @@ internal static class LocalizationOverrideManager
         return payload;
     }
 
+    private static bool TryLoadPayloadFromDisk(out LocalizationPayload payload)
+    {
+        try
+        {
+            payload = LoadPayloadFromDisk();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogError($"Localization reload failed; keeping the last-known-good configuration. {ex.Message}");
+            payload = new LocalizationPayload();
+            return false;
+        }
+    }
+
     private static Dictionary<string, string> LoadTranslationMap(string path, string source)
     {
         if (!File.Exists(path))
@@ -267,8 +346,7 @@ internal static class LocalizationOverrideManager
         }
         catch (Exception ex)
         {
-            DataForgePlugin.Log.LogError($"Failed to parse {source} from '{path}': {ex.Message}");
-            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            throw new InvalidDataException($"Failed to parse {source} from '{path}': {ex.Message}", ex);
         }
     }
 
@@ -314,8 +392,22 @@ internal static class LocalizationOverrideManager
         }
         catch (Exception ex)
         {
-            DataForgePlugin.Log.LogError($"Failed to parse {source}: {ex.Message}");
-            return new LocalizationPayload();
+            throw new InvalidDataException($"Failed to parse {source}: {ex.Message}", ex);
+        }
+    }
+
+    private static bool TryDeserializePayload(string payload, string source, out LocalizationPayload localizationPayload)
+    {
+        try
+        {
+            localizationPayload = DeserializePayload(payload, source);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogError($"Synced localization payload was rejected; keeping the last-known-good configuration. {ex.Message}");
+            localizationPayload = new LocalizationPayload();
+            return false;
         }
     }
 

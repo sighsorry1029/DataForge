@@ -32,7 +32,9 @@ internal static class RecipeOverrideManager
     private static readonly Dictionary<string, RecipeDefinition> Baselines = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, Recipe> BaselineRecipes = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> CreatedRecipes = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, Recipe> CreatedRecipeObjects = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> RuntimeAppliedRecipeKeys = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, HashSet<string>> RuntimeAppliedRecipeNamesByEntryKey = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, List<QualityBonusRule>> ActiveQualityBonuses = new(StringComparer.OrdinalIgnoreCase);
     private static readonly List<QualityBonusRule> EmptyQualityBonusRules = new();
     private static Dictionary<string, List<Recipe>>? RecipeLookupCache;
@@ -71,10 +73,9 @@ internal static class RecipeOverrideManager
     private static int ActiveQualityBonusRecipeCount;
     private static bool RecipeLookupCacheDirty = true;
     private static bool RuntimeStateWasApplied;
-    private static Dictionary<string, string> ActiveEntrySignaturesByRecipe = new(StringComparer.OrdinalIgnoreCase);
-    private static HashSet<string>? PendingChangedRecipeKeys;
-    private static bool HasPendingScopedApply;
-    private static bool ForceNextFullApply = true;
+    private static readonly DomainEntryChangeTracker<RecipeEntry> EntryChanges = new(
+        entry => entry.Recipe,
+        entries => SparseSerializer.Serialize(entries));
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
 
@@ -124,7 +125,10 @@ internal static class RecipeOverrideManager
         }
 
         EnsureConfigDirectoryAndDefaultOverride();
-        List<RecipeEntry> entries = LoadEntriesFromDisk();
+        if (!TryLoadEntriesFromDisk(out List<RecipeEntry> entries))
+        {
+            return;
+        }
         lock (StateLock)
         {
             SetActiveEntries(entries);
@@ -191,7 +195,7 @@ internal static class RecipeOverrideManager
         lock (StateLock)
         {
             entries = ActiveEntries.ToList();
-            changedRecipeKeys = ConsumePendingChangedRecipeKeys();
+            changedRecipeKeys = EntryChanges.ConsumeChangedKeys();
         }
 
         if (changedRecipeKeys is { Count: 0 })
@@ -201,11 +205,18 @@ internal static class RecipeOverrideManager
 
         List<RecipeEntry> entriesToApply = FilterEntries(entries, changedRecipeKeys);
         CaptureBaselinesForEntriesIfNeeded(entriesToApply);
-        HashSet<string> runtimeRecipeKeys = GetRuntimeApplyRecipeKeys(entriesToApply);
         HashSet<string> cleanedCreatedRecipes = CleanupCreatedRecipes(entries);
         EnsureAddedRecipes(entries);
+        HashSet<string> runtimeRecipeKeys = GetRuntimeApplyRecipeKeys(entriesToApply, changedRecipeKeys);
         RestoreBaselineRecipes(runtimeRecipeKeys);
-        ClearActiveQualityBonuses();
+        if (changedRecipeKeys == null)
+        {
+            ClearActiveQualityBonuses();
+        }
+        else
+        {
+            RemoveActiveQualityBonuses(runtimeRecipeKeys);
+        }
 
         if (!DataForgePlugin.RecipeOverridesEnabled)
         {
@@ -381,8 +392,12 @@ internal static class RecipeOverrideManager
             return;
         }
 
+        if (!DataForgeOverrideFiles.TryDeserializeEntries(payload, "synced recipe payload", DeserializeEntries, out List<RecipeEntry> entries))
+        {
+            return;
+        }
+
         LastAppliedSyncedPayload = payload;
-        List<RecipeEntry> entries = DeserializeEntries(payload, "synced recipe payload");
         lock (StateLock)
         {
             SetActiveEntries(entries);
@@ -393,88 +408,8 @@ internal static class RecipeOverrideManager
 
     private static void SetActiveEntries(List<RecipeEntry> entries)
     {
-        Dictionary<string, string> signatures = BuildEntrySignaturesByRecipe(entries);
-        if (!ForceNextFullApply)
-        {
-            PendingChangedRecipeKeys = GetChangedKeys(ActiveEntrySignaturesByRecipe, signatures);
-            HasPendingScopedApply = true;
-        }
-
+        EntryChanges.SetEntries(entries);
         ActiveEntries = entries;
-        ActiveEntrySignaturesByRecipe = signatures;
-    }
-
-    private static HashSet<string>? ConsumePendingChangedRecipeKeys()
-    {
-        if (ForceNextFullApply)
-        {
-            ForceNextFullApply = false;
-            PendingChangedRecipeKeys = null;
-            HasPendingScopedApply = false;
-            return null;
-        }
-
-        if (!HasPendingScopedApply)
-        {
-            return null;
-        }
-
-        HashSet<string> changedKeys = PendingChangedRecipeKeys ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        PendingChangedRecipeKeys = null;
-        HasPendingScopedApply = false;
-        return changedKeys;
-    }
-
-    private static Dictionary<string, string> BuildEntrySignaturesByRecipe(List<RecipeEntry> entries)
-    {
-        Dictionary<string, List<RecipeEntry>> entriesByRecipe = new(StringComparer.OrdinalIgnoreCase);
-        foreach (RecipeEntry entry in entries)
-        {
-            if (string.IsNullOrWhiteSpace(entry.Recipe))
-            {
-                continue;
-            }
-
-            if (!entriesByRecipe.TryGetValue(entry.Recipe, out List<RecipeEntry> recipeEntries))
-            {
-                recipeEntries = new List<RecipeEntry>();
-                entriesByRecipe[entry.Recipe] = recipeEntries;
-            }
-
-            recipeEntries.Add(entry);
-        }
-
-        Dictionary<string, string> signatures = new(StringComparer.OrdinalIgnoreCase);
-        foreach (KeyValuePair<string, List<RecipeEntry>> pair in entriesByRecipe)
-        {
-            signatures[pair.Key] = SparseSerializer.Serialize(pair.Value);
-        }
-
-        return signatures;
-    }
-
-    private static HashSet<string> GetChangedKeys(Dictionary<string, string> oldSignatures, Dictionary<string, string> newSignatures)
-    {
-        HashSet<string> changedKeys = new(StringComparer.OrdinalIgnoreCase);
-        foreach (KeyValuePair<string, string> pair in oldSignatures)
-        {
-            if (!newSignatures.TryGetValue(pair.Key, out string newSignature) ||
-                !string.Equals(pair.Value, newSignature, StringComparison.Ordinal))
-            {
-                changedKeys.Add(pair.Key);
-            }
-        }
-
-        foreach (KeyValuePair<string, string> pair in newSignatures)
-        {
-            if (!oldSignatures.TryGetValue(pair.Key, out string oldSignature) ||
-                !string.Equals(oldSignature, pair.Value, StringComparison.Ordinal))
-            {
-                changedKeys.Add(pair.Key);
-            }
-        }
-
-        return changedKeys;
     }
 
     private static List<RecipeEntry> FilterEntries(List<RecipeEntry> entries, HashSet<string>? recipeKeys)
@@ -489,9 +424,9 @@ internal static class RecipeOverrideManager
         DataForgeSync.PublishPayload(SyncedPayload, DomainName, payload);
     }
 
-    private static List<RecipeEntry> LoadEntriesFromDisk()
+    private static bool TryLoadEntriesFromDisk(out List<RecipeEntry> entries)
     {
-        return DataForgeOverrideFiles.LoadEntries(GetOverrideFiles(), DeserializeEntries);
+        return DataForgeOverrideFiles.TryLoadEntries(GetOverrideFiles(), DeserializeEntries, out entries);
     }
 
     private static List<RecipeEntry> DeserializeEntries(string yaml, string source)
@@ -508,8 +443,7 @@ internal static class RecipeOverrideManager
         }
         catch (Exception ex)
         {
-            DataForgePlugin.Log.LogError($"Failed to parse {source}: {ex.Message}");
-            return new List<RecipeEntry>();
+            throw new InvalidDataException($"Failed to parse {source}: {ex.Message}", ex);
         }
     }
 
@@ -694,9 +628,27 @@ internal static class RecipeOverrideManager
         return true;
     }
 
-    private static HashSet<string> GetRuntimeApplyRecipeKeys(List<RecipeEntry> entries)
+    private static HashSet<string> GetRuntimeApplyRecipeKeys(
+        List<RecipeEntry> entries,
+        HashSet<string>? changedRecipeKeys)
     {
         HashSet<string> keys = new(StringComparer.OrdinalIgnoreCase);
+        if (changedRecipeKeys != null)
+        {
+            foreach (string changedKey in changedRecipeKeys)
+            {
+                if (!RuntimeAppliedRecipeNamesByEntryKey.TryGetValue(changedKey, out HashSet<string>? recipeNames))
+                {
+                    continue;
+                }
+
+                foreach (string recipeName in recipeNames)
+                {
+                    keys.Add(recipeName);
+                }
+            }
+        }
+
         foreach (RecipeEntry entry in entries)
         {
             if (!entry.Override || string.IsNullOrWhiteSpace(entry.Recipe))
@@ -718,7 +670,7 @@ internal static class RecipeOverrideManager
             }
         }
 
-        if (RuntimeStateWasApplied)
+        if (changedRecipeKeys == null && RuntimeStateWasApplied)
         {
             foreach (string key in RuntimeAppliedRecipeKeys)
             {
@@ -732,6 +684,7 @@ internal static class RecipeOverrideManager
     private static void UpdateRuntimeAppliedRecipeState(List<RecipeEntry> entries)
     {
         RuntimeAppliedRecipeKeys.Clear();
+        RuntimeAppliedRecipeNamesByEntryKey.Clear();
         foreach (RecipeEntry entry in entries)
         {
             if (!entry.Override || string.IsNullOrWhiteSpace(entry.Recipe))
@@ -740,16 +693,19 @@ internal static class RecipeOverrideManager
             }
 
             Recipe? recipe = ResolveRecipe(entry.Recipe);
-            if (recipe != null && !string.IsNullOrWhiteSpace(recipe.name))
-            {
-                RuntimeAppliedRecipeKeys.Add(recipe.name);
-                continue;
-            }
-
-            string recipeName = ToRecipeName(entry.Recipe);
+            string recipeName = recipe != null && !string.IsNullOrWhiteSpace(recipe.name)
+                ? recipe.name
+                : ToRecipeName(entry.Recipe);
             if (recipeName.Length > 0)
             {
                 RuntimeAppliedRecipeKeys.Add(recipeName);
+                if (!RuntimeAppliedRecipeNamesByEntryKey.TryGetValue(entry.Recipe, out HashSet<string>? recipeNames))
+                {
+                    recipeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    RuntimeAppliedRecipeNamesByEntryKey[entry.Recipe] = recipeNames;
+                }
+
+                recipeNames.Add(recipeName);
             }
         }
 
@@ -789,6 +745,7 @@ internal static class RecipeOverrideManager
         if (ObjectDB.instance == null)
         {
             CreatedRecipes.Clear();
+            CreatedRecipeObjects.Clear();
             return;
         }
 
@@ -800,16 +757,41 @@ internal static class RecipeOverrideManager
 
     internal static void OnWorldShutdown()
     {
-        ObjectDbReady = false;
-        ZNetSceneReady = false;
-        RuntimeStateWasApplied = false;
-        RuntimeAppliedRecipeKeys.Clear();
-        CleanupCreatedRecipesForWorldTransition();
+        try
+        {
+            RestoreBaselineRecipes(RuntimeAppliedRecipeKeys.ToArray());
+        }
+        finally
+        {
+            try
+            {
+                CleanupCreatedRecipesForWorldTransition();
+            }
+            finally
+            {
+                ObjectDbReady = false;
+                ZNetSceneReady = false;
+                RuntimeStateWasApplied = false;
+                RuntimeAppliedRecipeKeys.Clear();
+                RuntimeAppliedRecipeNamesByEntryKey.Clear();
+                ClearActiveQualityBonuses();
+                lock (StateLock)
+                {
+                    if (DataForgePlugin.IsRemoteServerClient)
+                    {
+                        SetActiveEntries(new List<RecipeEntry>());
+                        LastAppliedSyncedPayload = null;
+                    }
+
+                    EntryChanges.RequireFullApply();
+                }
+            }
+        }
     }
 
     private static void RemoveCreatedRecipe(string recipeName, bool destroy)
     {
-        Recipe? recipe = FindRecipeByExactName(recipeName) ?? ResolveRecipe(recipeName);
+        CreatedRecipeObjects.TryGetValue(recipeName, out Recipe? recipe);
         if (recipe != null && ObjectDB.instance != null)
         {
             ObjectDB.instance.m_recipes.Remove(recipe);
@@ -821,8 +803,13 @@ internal static class RecipeOverrideManager
         }
 
         CreatedRecipes.Remove(recipeName);
-        Baselines.Remove(recipeName);
-        BaselineRecipes.Remove(recipeName);
+        CreatedRecipeObjects.Remove(recipeName);
+        if (BaselineRecipes.TryGetValue(recipeName, out Recipe? baselineRecipe) &&
+            ReferenceEquals(baselineRecipe, recipe))
+        {
+            Baselines.Remove(recipeName);
+            BaselineRecipes.Remove(recipeName);
+        }
     }
 
     private static void EnsureAddedRecipes(List<RecipeEntry> entries)
@@ -875,6 +862,7 @@ internal static class RecipeOverrideManager
         Baselines[recipeName] = RecipeDefinition.From(recipe);
         BaselineRecipes[recipeName] = recipe;
         CreatedRecipes.Add(recipeName);
+        CreatedRecipeObjects[recipeName] = recipe;
         DataForgePlugin.Log.LogInfo($"Added recipe '{recipeName}'.");
     }
 
@@ -932,8 +920,12 @@ internal static class RecipeOverrideManager
 
         ObjectDB.instance.m_recipes.Remove(recipe);
         InvalidateRecipeLookupCache();
-        if (!string.IsNullOrWhiteSpace(recipe.name) && CreatedRecipes.Remove(recipe.name))
+        if (!string.IsNullOrWhiteSpace(recipe.name) &&
+            CreatedRecipeObjects.TryGetValue(recipe.name, out Recipe? ownedRecipe) &&
+            ReferenceEquals(recipe, ownedRecipe))
         {
+            CreatedRecipes.Remove(recipe.name);
+            CreatedRecipeObjects.Remove(recipe.name);
             Baselines.Remove(recipe.name);
             BaselineRecipes.Remove(recipe.name);
         }
@@ -1218,6 +1210,19 @@ internal static class RecipeOverrideManager
         {
             ActiveQualityBonuses.Clear();
             ActiveQualityBonusRecipeCount = 0;
+        }
+    }
+
+    private static void RemoveActiveQualityBonuses(IEnumerable<string> recipeNames)
+    {
+        lock (StateLock)
+        {
+            foreach (string recipeName in recipeNames)
+            {
+                ActiveQualityBonuses.Remove(recipeName);
+            }
+
+            ActiveQualityBonusRecipeCount = ActiveQualityBonuses.Count;
         }
     }
 
@@ -1615,7 +1620,7 @@ internal static class RecipeOverrideManager
         CaptureAllBaselinesIfNeeded();
         string sourceSignature = ComputeReferenceSourceSignature();
         string referencePath = Path.Combine(ConfigDirectory, ReferenceFileName);
-        if (ShouldSkipReferenceUpdate(referencePath, sourceSignature))
+        if (DataForgeReferenceState.ShouldSkip(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion))
         {
             return;
         }
@@ -1629,7 +1634,7 @@ internal static class RecipeOverrideManager
             BuildReferenceArtifactContent);
         if (wrote || File.Exists(referencePath))
         {
-            RecordReferenceUpdateState(referencePath, sourceSignature);
+            DataForgeReferenceState.Record(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
         }
     }
 
@@ -1665,7 +1670,7 @@ internal static class RecipeOverrideManager
     {
         StringBuilder builder = new();
         builder.AppendLine(ReferenceLogicVersion);
-        builder.AppendLine(BuildFileStamp(Path.Combine(ConfigDirectory, "z_resourcemap.txt")));
+        builder.AppendLine(DataForgeReferenceState.BuildFileStamp(Path.Combine(ConfigDirectory, "z_resourcemap.txt")));
         if (ObjectDB.instance != null)
         {
             foreach (Recipe recipe in ObjectDB.instance.m_recipes
@@ -1678,27 +1683,7 @@ internal static class RecipeOverrideManager
             }
         }
 
-        return ComputeStableHash(builder.ToString());
-    }
-
-    private static bool ShouldSkipReferenceUpdate(string referencePath, string sourceSignature)
-    {
-        return DataForgeReferenceState.ShouldSkip(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
-    }
-
-    private static void RecordReferenceUpdateState(string referencePath, string sourceSignature)
-    {
-        DataForgeReferenceState.Record(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
-    }
-
-    private static string BuildFileStamp(string path)
-    {
-        return DataForgeReferenceState.BuildFileStamp(path);
-    }
-
-    private static string ComputeStableHash(string value)
-    {
-        return DataForgeReferenceState.ComputeStableHash(value);
+        return DataForgeReferenceState.ComputeStableHash(builder.ToString());
     }
 
     private static string GetItemName(ItemDrop? item)
