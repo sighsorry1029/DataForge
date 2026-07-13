@@ -14,7 +14,7 @@ namespace DataForge;
 public class DataForgePlugin : BaseUnityPlugin
 {
     internal const string ModName = "DataForge";
-    internal const string ModVersion = "1.1.1";
+    internal const string ModVersion = "1.1.2";
     internal const string Author = "sighsorry";
     internal const string ModGUID = $"{Author}.{ModName}";
 
@@ -51,7 +51,6 @@ public class DataForgePlugin : BaseUnityPlugin
     private static ConfigEntry<Toggle> _highlightStationExtensionsInHammer = null!;
     private static ConfigEntry<Toggle> _ignoreStationExtensionSpacing = null!;
     private static ConfigEntry<int> _maxStoredFireplaceFuel = null!;
-    private static ConfigEntry<Toggle> _logStartupTimings = null!;
 
     public enum Toggle
     {
@@ -85,7 +84,6 @@ public class DataForgePlugin : BaseUnityPlugin
     internal static bool HighlightStationExtensionsInHammer => _highlightStationExtensionsInHammer.Value.IsOn();
     internal static bool IgnoreStationExtensionSpacing => _ignoreStationExtensionSpacing.Value.IsOn();
     internal static int MaxStoredFireplaceFuel => Math.Min(MaxStoredFireplaceFuelLimit, Math.Max(0, _maxStoredFireplaceFuel.Value));
-    internal static bool LogStartupTimings => _logStartupTimings.Value.IsOn();
 
     public void Awake()
     {
@@ -185,14 +183,6 @@ public class DataForgePlugin : BaseUnityPlugin
             order: 100);
         _maxStoredFireplaceFuel.SettingChanged += (_, _) => ClampMaxStoredFireplaceFuel();
         ClampMaxStoredFireplaceFuel();
-
-        _logStartupTimings = ConfigEntry(
-            "2 - Misc",
-            "Log Startup Timings",
-            Toggle.Off,
-            "If on, logs a lobby-to-world connection timeline plus DataForge synced payload parsing and world-data apply timings. Use only while diagnosing connection or loading delays.",
-            synchronizedSetting: false,
-            order: 50);
 
         LocalizationOverrideManager.Initialize(ConfigSync);
         StatusEffectOverrideManager.Initialize(ConfigSync);

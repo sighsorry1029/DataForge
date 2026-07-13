@@ -261,11 +261,10 @@ internal static class PieceOverrideManager
             return;
         }
 
-        WriteGeneratedArtifacts();
         ApplyCurrentConfiguration();
     }
 
-    internal static void OnObjectDBReady()
+    internal static void OnObjectDBReady(bool writeGeneratedArtifacts)
     {
         if (ObjectDB.instance == null)
         {
@@ -278,7 +277,10 @@ internal static class PieceOverrideManager
             return;
         }
 
-        WriteGeneratedArtifacts();
+        if (writeGeneratedArtifacts)
+        {
+            WriteGeneratedArtifacts();
+        }
         ApplyCurrentConfiguration();
     }
 
@@ -446,7 +448,7 @@ internal static class PieceOverrideManager
         }
 
         string payload = SyncedPayload?.Value ?? "";
-        DataForgeProfiler.Profile($"{DomainName}.ApplySyncedPayload chars={payload.Length}", () => ApplySyncedPayload(payload));
+        ApplySyncedPayload(payload);
     }
 
     private static void ApplySyncedPayload(string payload)
@@ -706,7 +708,7 @@ internal static class PieceOverrideManager
         foreach (string prefabName in prefabNames)
         {
             string normalizedName = NormalizePrefabName(prefabName);
-            if (normalizedName.Length == 0 || !seen.Add(normalizedName) || Baselines.ContainsKey(normalizedName))
+            if (normalizedName.Length == 0 || !seen.Add(normalizedName))
             {
                 continue;
             }
@@ -3467,13 +3469,14 @@ internal static class PieceOverrideManager
         }
 
         EnsureConfigDirectoryAndDefaultOverride();
-        CaptureAllBaselinesIfNeeded();
         string sourceSignature = ComputeReferenceSourceSignature();
         string referencePath = Path.Combine(ConfigDirectory, ReferenceFileName);
         if (DataForgeReferenceState.ShouldSkip(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion))
         {
             return;
         }
+
+        CaptureAllBaselinesIfNeeded();
 
         bool wrote = GeneratedArtifactWriter.WriteReferenceIfReady(
             Baselines.Count > 0,
@@ -3515,6 +3518,7 @@ internal static class PieceOverrideManager
     private static bool CanBuildGeneratedArtifacts()
     {
         return ObjectDbReady &&
+               PieceTablesReady &&
                ZNetScene.instance != null &&
                ObjectDB.instance != null;
     }

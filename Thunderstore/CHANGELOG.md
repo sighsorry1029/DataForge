@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.2
+
+- Removed DataForge's built-in startup and lobby profiler now that loading diagnostics are available in the standalone LoadTimeProfiler patcher.
+- Delayed reference and full-scaffold generation until the required game databases and piece tables are ready, avoiding premature or repeated generated-artifact work.
+- Skipped full baseline scans when an unchanged reference-state cache can be reused.
+- Reduced global item stack and weight multiplier overhead by keeping lightweight multiplier baselines separate from full item override baselines.
+- Refreshed targeted item, recipe, status-effect, and piece baselines when game database prefab instances are replaced across world transitions.
+
 ## 1.1.1
 
 - Improved incremental override reloads so only changed entries are reapplied while invalid YAML and localization payloads keep the last-known-good configuration.

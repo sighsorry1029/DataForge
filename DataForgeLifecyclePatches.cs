@@ -40,21 +40,21 @@ internal static class DataForgeObjectDBAwakePatch
     [HarmonyPriority(Priority.Last)]
     private static void Postfix()
     {
-        NotifyObjectDBReady();
+        NotifyObjectDBReady(writeGeneratedArtifacts: true);
     }
 
-    internal static void NotifyObjectDBReady()
+    internal static void NotifyObjectDBReady(bool writeGeneratedArtifacts)
     {
         if (DataForgeWorldLifecycle.IsShuttingDown)
         {
             return;
         }
 
-        DataForgeProfiler.Profile("EnsureSourceOfTruthFileMode/ObjectDB", DataForgePlugin.EnsureSourceOfTruthFileMode);
-        DataForgeProfiler.Profile("effects.OnObjectDBReady", StatusEffectOverrideManager.OnObjectDBReady);
-        DataForgeProfiler.Profile("items.OnObjectDBReady", ItemOverrideManager.OnObjectDBReady);
-        DataForgeProfiler.Profile("recipes.OnObjectDBReady", RecipeOverrideManager.OnObjectDBReady);
-        DataForgeProfiler.Profile("pieces.OnObjectDBReady", PieceOverrideManager.OnObjectDBReady);
+        DataForgePlugin.EnsureSourceOfTruthFileMode();
+        StatusEffectOverrideManager.OnObjectDBReady(writeGeneratedArtifacts);
+        ItemOverrideManager.OnObjectDBReady(writeGeneratedArtifacts);
+        RecipeOverrideManager.OnObjectDBReady(writeGeneratedArtifacts);
+        PieceOverrideManager.OnObjectDBReady(writeGeneratedArtifacts);
     }
 }
 
@@ -64,12 +64,8 @@ internal static class DataForgeObjectDBCopyOtherDBPatch
     [HarmonyPriority(Priority.Last)]
     private static void Postfix()
     {
-        if (DataForgeWorldLifecycle.IsShuttingDown)
-        {
-            return;
-        }
-
-        DataForgeObjectDBAwakePatch.NotifyObjectDBReady();
+        DataForgeObjectDBAwakePatch.NotifyObjectDBReady(
+            writeGeneratedArtifacts: DataForgeWorldLifecycle.IsGameStarted);
     }
 }
 
@@ -80,14 +76,14 @@ internal static class DataForgeZNetSceneAwakePatch
     {
         if (DataForgeWorldLifecycle.MarkStarting() && ObjectDB.instance != null)
         {
-            DataForgeObjectDBAwakePatch.NotifyObjectDBReady();
+            DataForgeObjectDBAwakePatch.NotifyObjectDBReady(writeGeneratedArtifacts: false);
         }
 
-        DataForgeProfiler.Profile("EnsureSourceOfTruthFileMode/ZNetScene", DataForgePlugin.EnsureSourceOfTruthFileMode);
-        DataForgeProfiler.Profile("recipes.OnZNetSceneReady", RecipeOverrideManager.OnZNetSceneReady);
-        DataForgeProfiler.Profile("effects.OnZNetSceneReady", StatusEffectOverrideManager.OnZNetSceneReady);
-        DataForgeProfiler.Profile("items.OnZNetSceneReady", ItemOverrideManager.OnZNetSceneReady);
-        DataForgeProfiler.Profile("pieces.OnGameDataReady", PieceOverrideManager.OnGameDataReady);
+        DataForgePlugin.EnsureSourceOfTruthFileMode();
+        RecipeOverrideManager.OnZNetSceneReady();
+        StatusEffectOverrideManager.OnZNetSceneReady();
+        ItemOverrideManager.OnZNetSceneReady();
+        PieceOverrideManager.OnGameDataReady();
     }
 }
 
@@ -102,7 +98,7 @@ internal static class DataForgeMaterialReferenceZNetSceneAwakePatch
             return;
         }
 
-        DataForgeProfiler.Profile("materials.WriteReferenceIfReady", MaterialReferenceWriter.WriteReferenceIfReady);
+        MaterialReferenceWriter.WriteReferenceIfReady();
     }
 }
 
@@ -117,8 +113,8 @@ internal static class DataForgePieceDungeonDbStartPatch
             return;
         }
 
-        DataForgeProfiler.Profile("pieces.OnPieceTablesReady", PieceOverrideManager.OnPieceTablesReady);
-        DataForgeProfiler.Profile("recipes.OnPieceTablesReady", RecipeOverrideManager.ApplyCurrentConfiguration);
+        PieceOverrideManager.OnPieceTablesReady();
+        RecipeOverrideManager.ApplyCurrentConfiguration();
     }
 }
 
@@ -134,9 +130,9 @@ internal static class DataForgeGameStartPatch
         }
 
         DataForgeWorldLifecycle.MarkGameStarted();
-        DataForgeProfiler.Profile("localization.OnGameReady", LocalizationOverrideManager.ApplyCurrentLocalization);
-        DataForgeProfiler.Profile("effects.OnGameReady", StatusEffectOverrideManager.ApplyCurrentConfiguration);
-        DataForgeProfiler.Profile("items.OnGameReady", ItemOverrideManager.ApplyCurrentConfiguration);
+        LocalizationOverrideManager.ApplyCurrentLocalization();
+        StatusEffectOverrideManager.ApplyCurrentConfiguration();
+        ItemOverrideManager.ApplyCurrentConfiguration();
     }
 }
 

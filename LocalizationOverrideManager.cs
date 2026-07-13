@@ -252,7 +252,7 @@ internal static class LocalizationOverrideManager
         }
 
         string payload = SyncedPayload?.Value ?? "";
-        DataForgeProfiler.Profile($"{DomainName}.ApplySyncedPayload chars={payload.Length}", () => ApplySyncedPayload(payload));
+        ApplySyncedPayload(payload);
     }
 
     private static void ApplySyncedPayload(string payload)

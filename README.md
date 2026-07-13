@@ -14,7 +14,6 @@ DataForge also includes a few optional helpers for modpack operation:
 - highlight same comfort-group pieces while hovering a comfort piece
 - ignore station extension spacing checks
 - allow fireplaces to store extra fuel without changing the displayed vanilla max fuel
-- profile lobby-to-world startup timing while diagnosing slow joins
 
 ## Workflow
 

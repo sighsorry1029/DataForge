@@ -132,9 +132,6 @@
         <Compile Include="DataForgeValue.cs"/>
         <Compile Include="DataForgeSync.cs"/>
         <Compile Include="DataForgeReferenceState.cs"/>
-        <Compile Include="DataForgeProfiler.cs"/>
-        <Compile Include="DataForgeConnectionProfiler.cs"/>
-        <Compile Include="DataForgeHarmonyPatchProfiler.cs"/>
         <Compile Include="DataForgeOverrideFiles.cs"/>
         <Compile Include="DomainEntryChangeTracker.cs"/>
         <Compile Include="DataForgeFileWatcher.cs"/>

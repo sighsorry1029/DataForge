@@ -126,7 +126,7 @@ internal static class StatusEffectOverrideManager
         ApplyCurrentConfiguration();
     }
 
-    internal static void OnObjectDBReady()
+    internal static void OnObjectDBReady(bool writeGeneratedArtifacts)
     {
         if (ObjectDB.instance == null)
         {
@@ -139,7 +139,10 @@ internal static class StatusEffectOverrideManager
             return;
         }
 
-        WriteGeneratedArtifacts();
+        if (writeGeneratedArtifacts)
+        {
+            WriteGeneratedArtifacts();
+        }
         ApplyCurrentConfiguration();
     }
 
@@ -558,7 +561,7 @@ internal static class StatusEffectOverrideManager
         }
 
         string payload = SyncedPayload?.Value ?? "";
-        DataForgeProfiler.Profile($"{DomainName}.ApplySyncedPayload chars={payload.Length}", () => ApplySyncedPayload(payload));
+        ApplySyncedPayload(payload);
     }
 
     private static void ApplySyncedPayload(string payload)
@@ -2285,13 +2288,14 @@ internal static class StatusEffectOverrideManager
         }
 
         EnsureConfigDirectoryAndDefaultOverride();
-        CaptureAllBaselinesIfNeeded();
         string sourceSignature = ComputeReferenceSourceSignature();
         string referencePath = Path.Combine(ConfigDirectory, ReferenceFileName);
         if (DataForgeReferenceState.ShouldSkip(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion))
         {
             return;
         }
+
+        CaptureAllBaselinesIfNeeded();
 
         bool wrote = GeneratedArtifactWriter.WriteReferenceIfReady(
             Baselines.Count > 0,
@@ -2323,7 +2327,9 @@ internal static class StatusEffectOverrideManager
 
     private static bool CanBuildGeneratedArtifacts()
     {
-        return ObjectDbReady && ObjectDB.instance != null;
+        return ObjectDbReady &&
+               ZNetScene.instance != null &&
+               ObjectDB.instance != null;
     }
 
     private static string ComputeReferenceSourceSignature()
