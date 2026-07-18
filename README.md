@@ -116,6 +116,8 @@ Piece overrides focus on the fields that are most useful for modpack tuning:
 - build resources
 - health
 - comfort amount and comfort group
+- exact, case-sensitive reuse of existing hammer categories; unknown names in `pieces.yml` create a new category
+- per-hammer category ordering and localized display labels through `pieceCategory.yml`
 - visual material overrides, plus prefab scale overrides for newly placed pieces
 - selected component configuration for containers, crafting stations, extensions, smelters, cooking stations, fermenters, sap collectors, and beehives
 - `stationExtension` can add a `StationExtension` component to a piece that does not already have one. `stationExtension: None` can disable an existing extension, and native/original extension components are restored from baseline instead of being deleted.
@@ -135,8 +137,21 @@ Example:
     scale: 2
     material: amber
   resources:
-  - Wood: 4
+- Wood: 4
 ```
+
+`pieceCategory.reference.yml` records the detected category order for every build tool. Copy only the sections you want to control into `pieceCategory.yml`:
+
+```yaml
+Hammer:
+- Misc
+- Furniture
+- ValheimCuisine, $df_piececategory_valheimcuisine
+```
+
+Category names are exact and case-sensitive. The optional second value is a literal tab label or a `$` localization token. Listed categories move first, while omitted categories keep their relative order afterward. This file does not create categories or preserve empty tabs; a dormant entry takes effect again when a matching piece appears.
+
+When Homestead is installed, its `Homestead` category is owner-managed: DataForge omits it from `pieceCategory.reference.yml`, ignores it in `pieceCategory.yml`, and leaves it fixed at the end. `pieces.yml` also cannot assign pieces to that category.
 
 Component example:
 
@@ -195,6 +210,8 @@ effects.reference.yml
 pieces.yml
 pieces_*.yml
 pieces.reference.yml
+pieceCategory.yml
+pieceCategory.reference.yml
 z_materials.reference.txt
 z_resourcemap.txt
 localization/*.yml
@@ -213,6 +230,7 @@ Reference files are meant for browsing and copy-paste edits:
 - entries are grouped by owner section when possible
 - item and recipe references use resource-map sorting
 - piece references use tier sorting
+- `pieceCategory.reference.yml` records the effective per-hammer category order and labels
 
 Full scaffold files are generated only by command:
 

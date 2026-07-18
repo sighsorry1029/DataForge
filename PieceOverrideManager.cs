@@ -20,12 +20,17 @@ internal static class PieceOverrideManager
     private const string DomainName = "pieces";
     private const string ReferenceFileName = "pieces.reference.yml";
     private const string FullScaffoldFileName = "pieces.full.yml";
+    private const string PieceCategoryFileName = "pieceCategory.yml";
+    private const string PieceCategoryReferenceFileName = "pieceCategory.reference.yml";
     private const string SyncedPayloadKey = "pieces";
+    private const string PieceCategorySyncedPayloadKey = "pieceCategories";
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
     private const int DefaultPieceSortOrder = 100;
     private const string ReferenceStateKey = "pieces";
-    private const string ReferenceLogicVersion = "2026-07-10-piece-visual-roundtrip-v2";
-    private static readonly HashSet<string> IgnoredCategoryNames = new(StringComparer.OrdinalIgnoreCase)
+    private const string ReferenceLogicVersion = "2026-07-18-piece-category-registry-v1";
+    private const string HomesteadPluginGuid = "sighsorry.Homestead";
+    private const string HomesteadCategoryName = "Homestead";
+    private static readonly HashSet<string> IgnoredCategoryNames = new(StringComparer.Ordinal)
     {
         "Feasts",
         "Food",
@@ -56,9 +61,14 @@ internal static class PieceOverrideManager
         ["Cultivator"] = "_CultivatorPieceTable",
         ["ServingTray"] = "_FeasterPieceTable"
     };
-    private static Dictionary<Piece.PieceCategory, string>? JotunnPieceCategoryNames;
-    private static Dictionary<string, Piece.PieceCategory>? JotunnPieceCategoryValues;
-    private static bool JotunnPieceCategoryMapLoaded;
+    private static readonly Dictionary<Piece.PieceCategory, string> KnownPieceCategoryNames = new();
+    private static readonly Dictionary<string, Piece.PieceCategory> KnownPieceCategoryValues = new(StringComparer.Ordinal);
+    private static readonly Dictionary<Piece.PieceCategory, int> KnownPieceCategoryNamePriorities = new();
+    private static readonly Dictionary<string, int> KnownPieceCategoryValuePriorities = new(StringComparer.Ordinal);
+    private static readonly Dictionary<Piece.PieceCategory, string> KnownPieceCategoryNameSources = new();
+    private static readonly Dictionary<string, string> KnownPieceCategoryValueSources = new(StringComparer.Ordinal);
+    private static readonly HashSet<string> ReportedPieceCategoryConflicts = new(StringComparer.Ordinal);
+    private static readonly HashSet<string> ReportedPieceCategoryConfigurationIssues = new(StringComparer.Ordinal);
     private static readonly IDeserializer Deserializer = new DeserializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
         .Build();
@@ -74,11 +84,17 @@ internal static class PieceOverrideManager
 
     private static List<PieceEntry> ActiveEntries = new();
     private static Dictionary<string, List<PieceEntry>> ActiveRuntimeEntriesByPiece = new(StringComparer.OrdinalIgnoreCase);
+    private static PieceCategoryConfiguration ActivePieceCategoryConfiguration = new();
+    private static string ActivePieceCategoryConfigurationSignature = "";
+    private static int PieceCategoryConfigurationVersion;
+    private static int AppliedPieceCategoryConfigurationVersion = -1;
     private static readonly DomainEntryChangeTracker<PieceEntry> EntryChanges = new(
         entry => entry.Piece,
         entries => SparseSerializer.Serialize(entries));
     private static CustomSyncedValue<string>? SyncedPayload;
+    private static CustomSyncedValue<string>? SyncedPieceCategoryPayload;
     private static string? LastAppliedSyncedPayload;
+    private static string? LastAppliedPieceCategorySyncedPayload;
     private static FileSystemWatcher? Watcher;
     private static DataForgeFileWatcher.DebouncedAction? ReloadDebouncer;
     private static bool GameDataReady;
@@ -87,6 +103,7 @@ internal static class PieceOverrideManager
     private static bool RuntimeStateWasApplied;
     private static bool PieceTableSortWasApplied;
     private static bool PieceTableMembershipWasApplied;
+    private static bool PieceCategoryConfigurationWasApplied;
     private static bool CraftingStationTopologyChanged;
     private static bool StationExtensionTopologyChanged;
 
@@ -96,6 +113,8 @@ internal static class PieceOverrideManager
     {
         SyncedPayload = new CustomSyncedValue<string>(configSync, SyncedPayloadKey, "");
         SyncedPayload.ValueChanged += OnSyncedPayloadChanged;
+        SyncedPieceCategoryPayload = new CustomSyncedValue<string>(configSync, PieceCategorySyncedPayloadKey, "");
+        SyncedPieceCategoryPayload.ValueChanged += OnSyncedPieceCategoryPayloadChanged;
     }
 
     internal static void Dispose()
@@ -103,6 +122,11 @@ internal static class PieceOverrideManager
         if (SyncedPayload != null)
         {
             SyncedPayload.ValueChanged -= OnSyncedPayloadChanged;
+        }
+
+        if (SyncedPieceCategoryPayload != null)
+        {
+            SyncedPieceCategoryPayload.ValueChanged -= OnSyncedPieceCategoryPayloadChanged;
         }
 
         Watcher?.Dispose();
@@ -134,6 +158,7 @@ internal static class PieceOverrideManager
         if (!DataForgePlugin.UsesLocalAuthorityFiles)
         {
             ApplySyncedPayload(SyncedPayload?.Value ?? "");
+            ApplySyncedPieceCategoryPayload(SyncedPieceCategoryPayload?.Value ?? "");
             return;
         }
 
@@ -142,13 +167,22 @@ internal static class PieceOverrideManager
         {
             return;
         }
+
+        if (!TryLoadPieceCategoryConfigurationFromDisk(out PieceCategoryConfiguration pieceCategoryConfiguration))
+        {
+            return;
+        }
+
         lock (StateLock)
         {
             SetActiveEntries(entries);
+            SetActivePieceCategoryConfiguration(pieceCategoryConfiguration);
         }
 
         PublishPayload(SerializeEntries(entries));
+        PublishPieceCategoryPayload(SerializePieceCategoryConfiguration(pieceCategoryConfiguration));
         ApplyCurrentConfiguration();
+        WritePieceCategoryReferenceArtifact();
     }
 
     internal static void ApplyCurrentConfiguration()
@@ -163,17 +197,28 @@ internal static class PieceOverrideManager
             return;
         }
 
+        RefreshPieceCategoryRegistry();
+
         bool hasActiveRuntimeDefinitions = HasActiveRuntimeDefinitions();
         Dictionary<string, int> activeSortOrders = GetActiveSortOrders();
         Dictionary<string, PieceTableAssignment> activePieceTableAssignments = GetActivePieceTableAssignments();
         HashSet<string> activeRemovedPieces = GetActiveRemovedPieces();
         HashSet<string>? changedPieceKeys;
+        int pieceCategoryConfigurationVersion;
+        bool hasActivePieceCategoryConfiguration;
         lock (StateLock)
         {
             changedPieceKeys = EntryChanges.ConsumeChangedKeys();
+            pieceCategoryConfigurationVersion = PieceCategoryConfigurationVersion;
+            hasActivePieceCategoryConfiguration =
+                DataForgePlugin.PieceOverridesEnabled &&
+                ActivePieceCategoryConfiguration.Tables.Count > 0;
         }
 
-        if (changedPieceKeys is { Count: 0 })
+        bool pieceCategoryConfigurationNeedsApply =
+            pieceCategoryConfigurationVersion != AppliedPieceCategoryConfigurationVersion ||
+            hasActivePieceCategoryConfiguration != PieceCategoryConfigurationWasApplied;
+        if (changedPieceKeys is { Count: 0 } && !pieceCategoryConfigurationNeedsApply)
         {
             return;
         }
@@ -185,10 +230,13 @@ internal static class PieceOverrideManager
             !hasActiveSortOrders &&
             !hasActivePieceTableAssignments &&
             !hasActiveRemovedPieces &&
+            !hasActivePieceCategoryConfiguration &&
             !RuntimeStateWasApplied &&
             !PieceTableSortWasApplied &&
-            !PieceTableMembershipWasApplied)
+            !PieceTableMembershipWasApplied &&
+            !PieceCategoryConfigurationWasApplied)
         {
+            AppliedPieceCategoryConfigurationVersion = pieceCategoryConfigurationVersion;
             return;
         }
 
@@ -213,6 +261,14 @@ internal static class PieceOverrideManager
                 StationExtensionTopologyChanged = false;
             }
 
+        }
+
+        PieceTableCategoryGuard.PruneUnusedCustomCategories();
+        ApplyPieceCategoryConfiguration();
+        if (shouldTouchRuntime ||
+            hasActivePieceCategoryConfiguration ||
+            PieceCategoryConfigurationWasApplied)
+        {
             RefreshLocalBuildPieces();
         }
 
@@ -229,7 +285,78 @@ internal static class PieceOverrideManager
         }
         PieceTableSortWasApplied = hasActiveSortOrders;
         PieceTableMembershipWasApplied = hasActivePieceTableAssignments || hasActiveRemovedPieces;
+        PieceCategoryConfigurationWasApplied = hasActivePieceCategoryConfiguration;
+        AppliedPieceCategoryConfigurationVersion = pieceCategoryConfigurationVersion;
+        WritePieceCategoryReferenceArtifact();
         VneiRefreshManager.RequestRefresh(DomainName);
+    }
+
+    private static void ApplyPieceCategoryConfiguration()
+    {
+        PieceCategoryConfiguration configuration;
+        lock (StateLock)
+        {
+            configuration = ActivePieceCategoryConfiguration;
+        }
+
+        Dictionary<PieceTable, IReadOnlyList<PieceTableCategoryGuard.ConfiguredCategory>> configuredOrders =
+            new(ReferenceComparer<PieceTable>.Instance);
+        if (DataForgePlugin.PieceOverridesEnabled)
+        {
+            foreach (KeyValuePair<string, List<PieceCategoryOrderEntry>> tableConfiguration in configuration.Tables)
+            {
+                PieceTable? pieceTable = ResolvePieceTable(tableConfiguration.Key);
+                if (pieceTable == null)
+                {
+                    ReportPieceCategoryConfigurationIssue(
+                        $"table:{tableConfiguration.Key}",
+                        $"pieceCategory.yml has unknown piece table '{tableConfiguration.Key}'.");
+                    continue;
+                }
+
+                if (configuredOrders.ContainsKey(pieceTable))
+                {
+                    ReportPieceCategoryConfigurationIssue(
+                        $"duplicate-table:{tableConfiguration.Key}:{RuntimeHelpers.GetHashCode(pieceTable)}",
+                        $"pieceCategory.yml table '{tableConfiguration.Key}' resolves to a piece table already configured by another section.");
+                    continue;
+                }
+
+                List<PieceTableCategoryGuard.ConfiguredCategory> categories = new();
+                foreach (PieceCategoryOrderEntry entry in tableConfiguration.Value)
+                {
+                    if (!TryResolvePieceCategory(entry.Category, out Piece.PieceCategory category))
+                    {
+                        ReportPieceCategoryConfigurationIssue(
+                            $"category:{tableConfiguration.Key}:{entry.Category}",
+                            $"pieceCategory.yml table '{tableConfiguration.Key}' has unknown exact category '{entry.Category}'.");
+                        continue;
+                    }
+
+                    if (IsOwnerManagedHomesteadCategory(category))
+                    {
+                        ReportPieceCategoryConfigurationIssue(
+                            $"owner-managed-category:{tableConfiguration.Key}:{entry.Category}",
+                            $"pieceCategory.yml table '{tableConfiguration.Key}' cannot configure the owner-managed Homestead category; the entry was ignored.");
+                        continue;
+                    }
+
+                    categories.Add(new PieceTableCategoryGuard.ConfiguredCategory(category, entry.Label));
+                }
+
+                configuredOrders[pieceTable] = categories;
+            }
+        }
+
+        PieceTableCategoryGuard.ReplaceConfiguredOrders(configuredOrders);
+    }
+
+    private static void ReportPieceCategoryConfigurationIssue(string key, string message)
+    {
+        if (ReportedPieceCategoryConfigurationIssues.Add(key))
+        {
+            DataForgePlugin.Log.LogWarning(message);
+        }
     }
 
     private static bool ShouldSkipRemoteClientBaselineWork()
@@ -237,14 +364,15 @@ internal static class PieceOverrideManager
         if (!DataForgePlugin.IsRemoteServerClient ||
             RuntimeStateWasApplied ||
             PieceTableSortWasApplied ||
-            PieceTableMembershipWasApplied)
+            PieceTableMembershipWasApplied ||
+            PieceCategoryConfigurationWasApplied)
         {
             return false;
         }
 
         lock (StateLock)
         {
-            return ActiveEntries.Count == 0;
+            return ActiveEntries.Count == 0 && ActivePieceCategoryConfiguration.Tables.Count == 0;
         }
     }
 
@@ -290,6 +418,7 @@ internal static class PieceOverrideManager
         RunWorldShutdownStep("prefab definitions", RestoreAppliedPrefabDefinitionsForWorldShutdown);
         RunWorldShutdownStep("piece tables", RestoreCapturedPieceTablesForWorldShutdown);
         RunWorldShutdownStep("piece categories", PieceTableCategoryGuard.ResetWorldState);
+        ResetPieceCategoryRegistry();
         GameDataReady = false;
         ObjectDbReady = false;
         PieceTablesReady = false;
@@ -305,12 +434,16 @@ internal static class PieceOverrideManager
         StationExtensionTopologyChanged = false;
         PieceTableSortWasApplied = false;
         PieceTableMembershipWasApplied = false;
+        PieceCategoryConfigurationWasApplied = false;
+        AppliedPieceCategoryConfigurationVersion = -1;
         lock (StateLock)
         {
             if (DataForgePlugin.IsRemoteServerClient)
             {
                 SetActiveEntries(new List<PieceEntry>());
                 LastAppliedSyncedPayload = null;
+                SetActivePieceCategoryConfiguration(new PieceCategoryConfiguration());
+                LastAppliedPieceCategorySyncedPayload = null;
             }
 
             EntryChanges.RequireFullApply();
@@ -392,6 +525,7 @@ internal static class PieceOverrideManager
 
         GameDataReady = true;
         PieceTablesReady = true;
+        RefreshPieceCategoryRegistry();
         if (ShouldSkipRemoteClientBaselineWork())
         {
             return;
@@ -399,6 +533,7 @@ internal static class PieceOverrideManager
 
         WriteGeneratedArtifacts();
         ApplyCurrentConfiguration();
+        WritePieceCategoryReferenceArtifact();
     }
 
     private static void ReadYamlValues(object sender, FileSystemEventArgs e)
@@ -432,12 +567,13 @@ internal static class PieceOverrideManager
             return false;
         }
 
-        if (IsOverrideFile(e.FullPath))
+        if (IsOverrideFile(e.FullPath) || IsPieceCategoryOverrideFile(e.FullPath))
         {
             return true;
         }
 
-        return e is RenamedEventArgs renamed && IsOverrideFile(renamed.OldFullPath);
+        return e is RenamedEventArgs renamed &&
+               (IsOverrideFile(renamed.OldFullPath) || IsPieceCategoryOverrideFile(renamed.OldFullPath));
     }
 
     private static void OnSyncedPayloadChanged()
@@ -472,11 +608,64 @@ internal static class PieceOverrideManager
         ApplyCurrentConfiguration();
     }
 
+    private static void OnSyncedPieceCategoryPayloadChanged()
+    {
+        if (DataForgePlugin.UsesLocalAuthorityFiles)
+        {
+            return;
+        }
+
+        string payload = SyncedPieceCategoryPayload?.Value ?? "";
+        ApplySyncedPieceCategoryPayload(payload);
+    }
+
+    private static void ApplySyncedPieceCategoryPayload(string payload)
+    {
+        if (string.Equals(LastAppliedPieceCategorySyncedPayload, payload, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        PieceCategoryConfiguration configuration;
+        try
+        {
+            configuration = DeserializePieceCategoryConfiguration(payload, "synced piece category payload");
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogError(
+                $"Synced piece category payload was rejected; keeping the last-known-good configuration. {ex.Message}");
+            return;
+        }
+
+        LastAppliedPieceCategorySyncedPayload = payload;
+        lock (StateLock)
+        {
+            SetActivePieceCategoryConfiguration(configuration);
+        }
+
+        ApplyCurrentConfiguration();
+    }
+
     private static void SetActiveEntries(List<PieceEntry> entries)
     {
         EntryChanges.SetEntries(entries);
         ActiveEntries = entries;
         ActiveRuntimeEntriesByPiece = BuildActiveRuntimeEntriesByPiece(entries);
+    }
+
+    private static void SetActivePieceCategoryConfiguration(PieceCategoryConfiguration configuration)
+    {
+        string signature = SerializePieceCategoryConfiguration(configuration);
+        if (string.Equals(ActivePieceCategoryConfigurationSignature, signature, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        ActivePieceCategoryConfiguration = configuration;
+        ActivePieceCategoryConfigurationSignature = signature;
+        PieceCategoryConfigurationVersion++;
+        ReportedPieceCategoryConfigurationIssues.Clear();
     }
 
     private static Dictionary<string, List<PieceEntry>> BuildActiveRuntimeEntriesByPiece(List<PieceEntry> entries)
@@ -509,9 +698,148 @@ internal static class PieceOverrideManager
         DataForgeSync.PublishPayload(SyncedPayload, DomainName, payload);
     }
 
+    private static void PublishPieceCategoryPayload(string payload)
+    {
+        DataForgeSync.PublishPayload(SyncedPieceCategoryPayload, "piece categories", payload);
+    }
+
     private static bool TryLoadEntriesFromDisk(out List<PieceEntry> entries)
     {
         return DataForgeOverrideFiles.TryLoadEntries(GetOverrideFiles(), DeserializeEntries, out entries);
+    }
+
+    private static bool TryLoadPieceCategoryConfigurationFromDisk(out PieceCategoryConfiguration configuration)
+    {
+        string path = Path.Combine(ConfigDirectory, PieceCategoryFileName);
+        try
+        {
+            string yaml = File.Exists(path) ? File.ReadAllText(path) : "";
+            configuration = DeserializePieceCategoryConfiguration(yaml, path);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogError(
+                $"Piece category reload failed; keeping the last-known-good configuration. {ex.Message}");
+            configuration = new PieceCategoryConfiguration();
+            return false;
+        }
+    }
+
+    private static PieceCategoryConfiguration DeserializePieceCategoryConfiguration(string yaml, string source)
+    {
+        if (string.IsNullOrWhiteSpace(yaml))
+        {
+            return new PieceCategoryConfiguration();
+        }
+
+        try
+        {
+            Dictionary<string, List<string>?>? tables =
+                Deserializer.Deserialize<Dictionary<string, List<string>?>>(yaml);
+            return NormalizePieceCategoryConfiguration(tables, source);
+        }
+        catch (Exception ex) when (ex is not InvalidDataException)
+        {
+            throw new InvalidDataException($"Failed to parse {source}: {ex.Message}", ex);
+        }
+    }
+
+    private static PieceCategoryConfiguration NormalizePieceCategoryConfiguration(
+        Dictionary<string, List<string>?>? tables,
+        string source)
+    {
+        PieceCategoryConfiguration configuration = new();
+        if (tables == null)
+        {
+            return configuration;
+        }
+
+        foreach (KeyValuePair<string, List<string>?> table in tables)
+        {
+            string pieceTableName = table.Key?.Trim() ?? "";
+            if (pieceTableName.Length == 0)
+            {
+                throw new InvalidDataException($"{source}: piece table name cannot be empty.");
+            }
+
+            if (configuration.Tables.ContainsKey(pieceTableName))
+            {
+                throw new InvalidDataException(
+                    $"{source}: piece table '{pieceTableName}' is defined more than once.");
+            }
+
+            List<PieceCategoryOrderEntry> entries = new();
+            HashSet<string> seenCategories = new(StringComparer.Ordinal);
+            int entryIndex = 0;
+            foreach (string? rawEntry in table.Value ?? new List<string>())
+            {
+                entryIndex++;
+                string value = rawEntry?.Trim() ?? "";
+                if (value.Length == 0)
+                {
+                    throw new InvalidDataException(
+                        $"{source}: {pieceTableName} category entry #{entryIndex} cannot be empty.");
+                }
+
+                int separatorIndex = value.IndexOf(',');
+                string categoryName = (separatorIndex >= 0 ? value.Substring(0, separatorIndex) : value).Trim();
+                string? label = null;
+                if (separatorIndex >= 0)
+                {
+                    string rawLabel = value.Substring(separatorIndex + 1).Trim();
+                    label = rawLabel.Length > 0 ? rawLabel : null;
+                }
+                if (categoryName.Length == 0)
+                {
+                    throw new InvalidDataException(
+                        $"{source}: {pieceTableName} category entry #{entryIndex} has no category name.");
+                }
+
+                if (IsOwnerManagedHomesteadCategoryName(categoryName))
+                {
+                    DataForgeLogContext.Warning(
+                        $"{source}: {pieceTableName} category entry #{entryIndex} '{HomesteadCategoryName}' was ignored because Homestead owns its tab order and label.");
+                    continue;
+                }
+
+                if (!seenCategories.Add(categoryName))
+                {
+                    throw new InvalidDataException(
+                        $"{source}: {pieceTableName} category '{categoryName}' is listed more than once.");
+                }
+
+                if (label != null && label.StartsWith("&", StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException(
+                        $"{source}: {pieceTableName} category '{categoryName}' uses '{label}'. " +
+                        "Valheim localization tokens start with '$', not '&'.");
+                }
+
+                entries.Add(new PieceCategoryOrderEntry(categoryName, label));
+            }
+
+            if (entries.Count > 0)
+            {
+                configuration.Tables[pieceTableName] = entries;
+            }
+        }
+
+        return configuration;
+    }
+
+    private static string SerializePieceCategoryConfiguration(PieceCategoryConfiguration configuration)
+    {
+        Dictionary<string, List<string>> serialized = new(StringComparer.OrdinalIgnoreCase);
+        foreach (KeyValuePair<string, List<PieceCategoryOrderEntry>> table in configuration.Tables
+                     .OrderBy(static pair => pair.Key, PieceTableNameComparer.Instance))
+        {
+            serialized[table.Key] = table.Value
+                .Select(static entry => entry.ToSerializedValue())
+                .ToList();
+        }
+
+        return SparseSerializer.Serialize(serialized);
     }
 
     private static List<PieceEntry> DeserializeEntries(string yaml, string source)
@@ -553,7 +881,13 @@ internal static class PieceOverrideManager
 
             entry.Piece = NormalizePrefabName(entry.Piece);
             entry.SetLogContext($"{sourceContext} piece={entry.Piece}");
-            if (IsIgnoredCategoryName(entry.Category))
+            if (IsOwnerManagedHomesteadCategoryName(entry.Category))
+            {
+                DataForgeLogContext.Warning(
+                    $"{entry.LogContext}: category '{HomesteadCategoryName}' is owned by Homestead and cannot be assigned by DataForge; the field was ignored.");
+                entry.Category = null;
+            }
+            else if (IsIgnoredCategoryName(entry.Category))
             {
                 entry.Category = null;
             }
@@ -598,9 +932,41 @@ internal static class PieceOverrideManager
         return fileName.StartsWith(DomainName, StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsPieceCategoryOverrideFile(string path)
+    {
+        return Path.GetFileName(path).Equals(PieceCategoryFileName, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static void EnsureConfigDirectoryAndDefaultOverride()
     {
         DataForgeOverrideFiles.EnsureDefaultOverride(ConfigDirectory, $"{DomainName}.yml", GetOverrideFiles, DefaultOverrideTemplate);
+        Directory.CreateDirectory(ConfigDirectory);
+        string pieceCategoryPath = Path.Combine(ConfigDirectory, PieceCategoryFileName);
+        if (!File.Exists(pieceCategoryPath))
+        {
+            File.WriteAllText(pieceCategoryPath, DefaultPieceCategoryTemplate());
+        }
+    }
+
+    private static string DefaultPieceCategoryTemplate()
+    {
+        return string.Join(Environment.NewLine, new[]
+        {
+            "# DataForge piece category order and display labels.",
+            "# Copy piece-table sections from pieceCategory.reference.yml and reorder their category entries here.",
+            "# Piece-table keys use the build tool prefab name, such as Hammer, rather than an internal _HammerPieceTable name.",
+            "# Category names are exact and case-sensitive. Leading and trailing whitespace is ignored.",
+            "# An optional second value overrides the displayed tab label. Use a $token from DataForge/localization for per-language text.",
+            "# Categories omitted from a configured table keep their relative order after the listed categories.",
+            "# This file reorders existing categories only; categories are created by pieces.yml or their owner mod.",
+            "# A listed category with no matching pieces does not keep or create an empty build tab.",
+            "# When Homestead is installed, its owner-managed category is omitted here and always remains last.",
+            "#",
+            "# Hammer:",
+            "# - Misc",
+            "# - Furniture",
+            "# - ValheimCuisine, $df_piececategory_valheimcuisine"
+        }) + Environment.NewLine;
     }
 
     private static string DefaultOverrideTemplate()
@@ -619,7 +985,9 @@ internal static class PieceOverrideManager
             "#   name: $piece_woodwall               # Piece.m_name localization token or text.",
             "#   description: $piece_woodwall_desc   # Piece.m_description localization token or text.",
             "#   pieceTable: Hammer                  # build tool/table to show this piece in. Hammer is the reference default and is omitted there.",
-            "#   category: Building                  # Piece.PieceCategory enum or custom hammer tab name; unknown names are created automatically. Feasts, Food, and Meads are ignored by DataForge.",
+            "#   category: Building                  # exact case-sensitive tab name; an unknown name creates a new tab. Feasts, Food, and Meads are ignored by DataForge.",
+            "#                                        # configure tab order and display labels in pieceCategory.yml.",
+            "#                                        # Homestead is owner-managed and cannot be assigned through this field while that mod is installed.",
             "#   sortOrder: 100                      # lower appears earlier in the same build tab; omitted keeps original order.",
             "#   needStation: None                   # station prefab/name needed to build; None clears the station requirement.",
             "#   canBeRemoved: true                  # false prevents removing the placed piece with a hammer.",
@@ -1053,9 +1421,20 @@ internal static class PieceOverrideManager
             return;
         }
 
-        Piece.PieceCategory category = TryResolvePieceCategory(trimmedCategoryName, out Piece.PieceCategory resolvedCategory)
-            ? resolvedCategory
-            : PieceTableCategoryGuard.GetOrCreateCustomCategory(trimmedCategoryName);
+        Piece.PieceCategory category;
+        if (TryResolvePieceCategory(trimmedCategoryName, out Piece.PieceCategory resolvedCategory))
+        {
+            if (IsOwnerManagedHomesteadCategory(resolvedCategory))
+            {
+                return;
+            }
+
+            category = resolvedCategory;
+        }
+        else
+        {
+            category = PieceTableCategoryGuard.GetOrCreateCustomCategory(trimmedCategoryName);
+        }
 
         piece.m_category = category;
         foreach (PieceTable pieceTable in GetPieceTablesContaining(piece.gameObject))
@@ -2699,6 +3078,11 @@ internal static class PieceOverrideManager
         Piece? piece = prefab != null ? prefab.GetComponent<Piece>() : null;
         if (piece != null)
         {
+            if (IsOwnerManagedHomesteadCategory(piece.m_category))
+            {
+                return null;
+            }
+
             return NullIfIgnoredCategory(FormatPieceCategory(piece));
         }
 
@@ -2706,6 +3090,11 @@ internal static class PieceOverrideManager
         if (fallbackValue.Length > 0 &&
             TryResolvePieceCategory(fallbackValue, out Piece.PieceCategory category))
         {
+            if (IsOwnerManagedHomesteadCategory(category))
+            {
+                return null;
+            }
+
             return NullIfIgnoredCategory(FormatPieceCategory(category, null, fallbackValue));
         }
 
@@ -2714,7 +3103,37 @@ internal static class PieceOverrideManager
 
     private static string? NullIfIgnoredCategory(string? categoryName)
     {
-        return IsIgnoredCategoryName(categoryName) ? null : categoryName;
+        return IsIgnoredCategoryName(categoryName) || IsOwnerManagedHomesteadCategoryName(categoryName)
+            ? null
+            : categoryName;
+    }
+
+    private static bool IsOwnerManagedHomesteadCategoryName(string? categoryName)
+    {
+        return IsHomesteadLoaded() &&
+               string.Equals(categoryName?.Trim(), HomesteadCategoryName, StringComparison.Ordinal);
+    }
+
+    internal static bool IsOwnerManagedHomesteadCategory(Piece.PieceCategory category)
+    {
+        if (!IsHomesteadLoaded())
+        {
+            return false;
+        }
+
+        if (KnownPieceCategoryNames.TryGetValue(category, out string knownName) &&
+            knownName.Equals(HomesteadCategoryName, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return TryResolvePieceCategory(HomesteadCategoryName, out Piece.PieceCategory homesteadCategory) &&
+               homesteadCategory == category;
+    }
+
+    private static bool IsHomesteadLoaded()
+    {
+        return BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey(HomesteadPluginGuid);
     }
 
     private static bool IsIgnoredCategoryName(string? categoryName)
@@ -2747,13 +3166,9 @@ internal static class PieceOverrideManager
             return category.ToString();
         }
 
-        if (TryGetCategoryDisplayName(category, piecePrefab, out string displayName) &&
+        if (KnownPieceCategoryNames.TryGetValue(category, out string displayName) &&
+            !string.IsNullOrWhiteSpace(displayName) &&
             !IsNumericCategoryName(displayName))
-        {
-            return displayName;
-        }
-
-        if (TryGetJotunnPieceCategoryDisplayName(category, out displayName))
         {
             return displayName;
         }
@@ -2763,22 +3178,29 @@ internal static class PieceOverrideManager
             return displayName;
         }
 
+        if (TryGetCategoryDisplayName(category, piecePrefab, out displayName) &&
+            !IsNumericCategoryName(displayName))
+        {
+            return displayName;
+        }
+
         return fallback;
     }
 
     private static bool TryResolvePieceCategory(string categoryName, out Piece.PieceCategory category)
     {
-        if (Enum.TryParse(categoryName, ignoreCase: true, out category))
-        {
-            return true;
-        }
-
-        if (TryResolveJotunnPieceCategory(categoryName, out category))
+        if (Enum.TryParse(categoryName, ignoreCase: false, out category))
         {
             return true;
         }
 
         string normalized = categoryName.Trim();
+        if (KnownPieceCategoryValues.TryGetValue(normalized, out category) ||
+            PieceTableCategoryGuard.TryResolveKnownCategory(normalized, out category))
+        {
+            return true;
+        }
+
         if (PieceTableCategoryGuard.TryResolveCustomCategory(normalized, out category))
         {
             return true;
@@ -2809,88 +3231,266 @@ internal static class PieceOverrideManager
         return false;
     }
 
-    private static bool TryGetJotunnPieceCategoryDisplayName(Piece.PieceCategory category, out string displayName)
+    private static void RefreshPieceCategoryRegistry()
     {
-        EnsureJotunnPieceCategoryMap();
-        if (JotunnPieceCategoryNames != null &&
-            JotunnPieceCategoryNames.TryGetValue(category, out string name) &&
-            !string.IsNullOrWhiteSpace(name) &&
-            !IsNumericCategoryName(name))
+        KnownPieceCategoryNames.Clear();
+        KnownPieceCategoryValues.Clear();
+        KnownPieceCategoryNamePriorities.Clear();
+        KnownPieceCategoryValuePriorities.Clear();
+        KnownPieceCategoryNameSources.Clear();
+        KnownPieceCategoryValueSources.Clear();
+
+        for (int value = 0; value < (int)Piece.PieceCategory.Max; value++)
         {
-            displayName = name;
-            return true;
+            Piece.PieceCategory category = (Piece.PieceCategory)value;
+            RegisterKnownPieceCategory(category.ToString(), category, 1000, "Valheim");
         }
 
-        displayName = "";
-        return false;
+        RegisterJotunnPieceCategories();
+        RegisterEmbeddedPieceManagerCategories();
+        RegisterPieceTableCategoryLabels();
+        PieceTableCategoryGuard.ReplaceKnownCategories(KnownPieceCategoryValues, KnownPieceCategoryNames);
     }
 
-    private static bool TryResolveJotunnPieceCategory(string categoryName, out Piece.PieceCategory category)
+    private static void ResetPieceCategoryRegistry()
     {
-        EnsureJotunnPieceCategoryMap();
-        string normalized = categoryName.Trim();
-        if (JotunnPieceCategoryValues != null &&
-            JotunnPieceCategoryValues.TryGetValue(normalized, out category))
-        {
-            return true;
-        }
-
-        category = Piece.PieceCategory.Misc;
-        return false;
+        KnownPieceCategoryNames.Clear();
+        KnownPieceCategoryValues.Clear();
+        KnownPieceCategoryNamePriorities.Clear();
+        KnownPieceCategoryValuePriorities.Clear();
+        KnownPieceCategoryNameSources.Clear();
+        KnownPieceCategoryValueSources.Clear();
+        ReportedPieceCategoryConflicts.Clear();
+        ReportedPieceCategoryConfigurationIssues.Clear();
     }
 
-    private static void EnsureJotunnPieceCategoryMap()
+    private static void RegisterJotunnPieceCategories()
     {
-        if (JotunnPieceCategoryMapLoaded)
+        foreach (System.Reflection.Assembly assembly in AppDomain.CurrentDomain.GetAssemblies()
+                     .OrderBy(static assembly => assembly.FullName, StringComparer.Ordinal))
         {
-            return;
-        }
-
-        JotunnPieceCategoryMapLoaded = true;
-        JotunnPieceCategoryNames = new Dictionary<Piece.PieceCategory, string>();
-        JotunnPieceCategoryValues = new Dictionary<string, Piece.PieceCategory>(StringComparer.OrdinalIgnoreCase);
-
-        Type? pieceManagerType = FindLoadedType("Jotunn.Managers.PieceManager");
-        object? pieceManager = pieceManagerType
-            ?.GetProperty("Instance", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
-            ?.GetValue(null);
-        object? categoryMap = pieceManagerType
-            ?.GetMethod("GetPieceCategoriesMap", Type.EmptyTypes)
-            ?.Invoke(pieceManager, null);
-        if (categoryMap is not System.Collections.IEnumerable entries)
-        {
-            return;
-        }
-
-        foreach (object entry in entries)
-        {
-            Type entryType = entry.GetType();
-            object? key = entryType.GetProperty("Key")?.GetValue(entry);
-            object? value = entryType.GetProperty("Value")?.GetValue(entry);
-            if (key is not Piece.PieceCategory category ||
-                value is not string name ||
-                string.IsNullOrWhiteSpace(name))
+            Type? type = assembly.GetType("Jotunn.Managers.PieceManager", throwOnError: false);
+            if (type == null)
             {
                 continue;
             }
 
-            JotunnPieceCategoryNames[category] = name;
-            JotunnPieceCategoryValues[name] = category;
+            try
+            {
+                object? instance = type
+                    .GetProperty("Instance", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+                    ?.GetValue(null);
+                string source = assembly.GetName().Name ?? "Jotunn";
+                RegisterPieceManagerCategoryDictionary(type, instance, "PieceCategories", 800, source);
+                RegisterPieceManagerCategoryDictionary(type, instance, "OtherPieceCategories", 700, source);
+            }
+            catch (Exception ex)
+            {
+                DataForgePlugin.Log.LogDebug($"Could not inspect Jotunn piece categories: {ex.Message}");
+            }
         }
     }
 
-    private static Type? FindLoadedType(string fullName)
+    private static void RegisterEmbeddedPieceManagerCategories()
     {
-        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        foreach (System.Reflection.Assembly assembly in AppDomain.CurrentDomain.GetAssemblies()
+                     .OrderBy(static assembly => assembly.FullName, StringComparer.Ordinal))
         {
-            Type? type = assembly.GetType(fullName, throwOnError: false);
-            if (type != null)
+            Type? type = assembly.GetType("PieceManager.PiecePrefabManager", throwOnError: false);
+            if (type == null)
             {
-                return type;
+                continue;
+            }
+
+            try
+            {
+                string source = assembly.GetName().Name ?? type.FullName ?? "PieceManager";
+                RegisterPieceManagerCategoryDictionary(type, null, "PieceCategories", 800, source);
+                RegisterPieceManagerCategoryDictionary(type, null, "OtherPieceCategories", 700, source);
+            }
+            catch (Exception ex)
+            {
+                DataForgePlugin.Log.LogDebug($"Could not inspect piece categories from '{assembly.GetName().Name}': {ex.Message}");
+            }
+        }
+    }
+
+    private static void RegisterPieceManagerCategoryDictionary(
+        Type type,
+        object? instance,
+        string fieldName,
+        int priority,
+        string source)
+    {
+        const System.Reflection.BindingFlags flags =
+            System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.NonPublic |
+            System.Reflection.BindingFlags.Static |
+            System.Reflection.BindingFlags.Instance;
+        System.Reflection.FieldInfo? field = type.GetField(fieldName, flags);
+        if (field == null || (!field.IsStatic && instance == null))
+        {
+            return;
+        }
+
+        object? dictionaryObject = field.GetValue(field.IsStatic ? null : instance);
+        if (dictionaryObject is not System.Collections.IDictionary dictionary)
+        {
+            return;
+        }
+
+        List<(string Name, Piece.PieceCategory Category)> categories = new();
+        foreach (System.Collections.DictionaryEntry entry in dictionary)
+        {
+            if (entry.Key is string name && entry.Value is Piece.PieceCategory category)
+            {
+                categories.Add((name, category));
             }
         }
 
-        return null;
+        foreach ((string name, Piece.PieceCategory category) in categories.OrderBy(static pair => pair.Name, StringComparer.Ordinal))
+        {
+            RegisterKnownPieceCategory(name, category, priority, source);
+        }
+    }
+
+    private static void RegisterPieceTableCategoryLabels()
+    {
+        foreach (PieceTable pieceTable in GetAllPieceTables().OrderBy(static table => table.name, StringComparer.OrdinalIgnoreCase))
+        {
+            List<Piece.PieceCategory>? categories = pieceTable.m_categories;
+            List<string>? labels = pieceTable.m_categoryLabels;
+            if (categories == null || labels == null)
+            {
+                continue;
+            }
+
+            int count = Math.Min(categories.Count, labels.Count);
+            for (int index = 0; index < count; index++)
+            {
+                if (TryFormatCategoryLabel(labels[index], out string displayName))
+                {
+                    RegisterKnownPieceCategory(displayName, categories[index], 200, pieceTable.name);
+                }
+            }
+        }
+    }
+
+    private static void RegisterKnownPieceCategory(
+        string? name,
+        Piece.PieceCategory category,
+        int priority,
+        string source)
+    {
+        string normalized = name?.Trim() ?? "";
+        if (normalized.Length == 0 ||
+            IsNumericCategoryName(normalized) ||
+            category is Piece.PieceCategory.Max or Piece.PieceCategory.All ||
+            (int)category < 0)
+        {
+            return;
+        }
+
+        if (KnownPieceCategoryValues.TryGetValue(normalized, out Piece.PieceCategory existingCategory) &&
+            existingCategory != category)
+        {
+            int existingPriority = KnownPieceCategoryValuePriorities[normalized];
+            string existingSource = KnownPieceCategoryValueSources[normalized];
+            bool replace = priority > existingPriority ||
+                           (priority == existingPriority && (int)category < (int)existingCategory);
+            ReportPieceCategoryConflict(normalized, existingCategory, existingSource, category, source, replace ? category : existingCategory);
+            if (!replace)
+            {
+                return;
+            }
+
+            if (KnownPieceCategoryNames.TryGetValue(existingCategory, out string staleName) &&
+                staleName.Equals(normalized, StringComparison.Ordinal))
+            {
+                KnownPieceCategoryNames.Remove(existingCategory);
+                KnownPieceCategoryNamePriorities.Remove(existingCategory);
+                KnownPieceCategoryNameSources.Remove(existingCategory);
+            }
+        }
+
+        KnownPieceCategoryValues[normalized] = category;
+        KnownPieceCategoryValuePriorities[normalized] = priority;
+        KnownPieceCategoryValueSources[normalized] = source;
+
+        if (KnownPieceCategoryNames.TryGetValue(category, out string existingName))
+        {
+            int existingPriority = KnownPieceCategoryNamePriorities[category];
+            string existingSource = KnownPieceCategoryNameSources[category];
+            if (priority >= 800 &&
+                existingPriority >= 800 &&
+                !normalized.Equals(existingName, StringComparison.Ordinal))
+            {
+                ReportPieceCategoryIdConflict(category, existingName, existingSource, normalized, source);
+            }
+
+            bool replace = priority > existingPriority ||
+                           (priority == existingPriority &&
+                            string.Compare(normalized, existingName, StringComparison.Ordinal) < 0);
+            if (!replace)
+            {
+                return;
+            }
+        }
+
+        KnownPieceCategoryNames[category] = normalized;
+        KnownPieceCategoryNamePriorities[category] = priority;
+        KnownPieceCategoryNameSources[category] = source;
+    }
+
+    private static void ReportPieceCategoryConflict(
+        string name,
+        Piece.PieceCategory first,
+        string firstSource,
+        Piece.PieceCategory second,
+        string secondSource,
+        Piece.PieceCategory selected)
+    {
+        int low = Math.Min((int)first, (int)second);
+        int high = Math.Max((int)first, (int)second);
+        string key = $"{name}|{low}|{high}";
+        if (!ReportedPieceCategoryConflicts.Add(key))
+        {
+            return;
+        }
+
+        DataForgePlugin.Log.LogWarning(
+            $"Piece category '{name}' was registered as both {(int)first} by '{firstSource}' and {(int)second} by '{secondSource}'; using {(int)selected}.");
+    }
+
+    private static void ReportPieceCategoryIdConflict(
+        Piece.PieceCategory category,
+        string firstName,
+        string firstSource,
+        string secondName,
+        string secondSource)
+    {
+        string lowName;
+        string highName;
+        if (string.Compare(firstName, secondName, StringComparison.Ordinal) <= 0)
+        {
+            lowName = firstName;
+            highName = secondName;
+        }
+        else
+        {
+            lowName = secondName;
+            highName = firstName;
+        }
+
+        string key = $"id:{(int)category}|{lowName}|{highName}";
+        if (!ReportedPieceCategoryConflicts.Add(key))
+        {
+            return;
+        }
+
+        DataForgePlugin.Log.LogWarning(
+            $"Piece category id {(int)category} is shared by '{firstName}' from '{firstSource}' and '{secondName}' from '{secondSource}'. " +
+            "DataForge will keep the deterministic registry name, but those external categories cannot be separated without remapping their owner mod's pieces.");
     }
 
     private static bool IsNumericCategoryName(string? categoryName)
@@ -2956,14 +3556,14 @@ internal static class PieceOverrideManager
             return false;
         }
 
-        if (input.Equals(trimmedLabel, StringComparison.OrdinalIgnoreCase) ||
-            input.Equals(trimmedLabel.TrimStart('$'), StringComparison.OrdinalIgnoreCase))
+        if (input.Equals(trimmedLabel, StringComparison.Ordinal) ||
+            input.Equals(trimmedLabel.TrimStart('$'), StringComparison.Ordinal))
         {
             return true;
         }
 
         return TryFormatCategoryLabel(trimmedLabel, out string displayName) &&
-               input.Equals(displayName, StringComparison.OrdinalIgnoreCase);
+               input.Equals(displayName, StringComparison.Ordinal);
     }
 
     private static bool TryFormatCategoryLabel(string? label, out string displayName)
@@ -3410,6 +4010,137 @@ internal static class PieceOverrideManager
         float currentHealth = zdo.GetFloat(ZDOVars.s_health, previousMax);
         float ratio = Mathf.Clamp01(currentHealth / previousMax);
         zdo.Set(ZDOVars.s_health, Mathf.Clamp(maxHealth * ratio, 0f, maxHealth));
+    }
+
+    private static void WritePieceCategoryReferenceArtifact()
+    {
+        if (!DataForgePlugin.UsesLocalAuthorityFiles ||
+            !PieceTablesReady ||
+            ZNetScene.instance == null ||
+            ObjectDB.instance == null)
+        {
+            return;
+        }
+
+        Dictionary<string, List<string>> tables = new(StringComparer.OrdinalIgnoreCase);
+        foreach (PieceTable pieceTable in GetAllPieceTables()
+                     .OrderBy(GetFriendlyPieceTableName, PieceTableNameComparer.Instance))
+        {
+            if (!pieceTable || pieceTable.m_categories == null)
+            {
+                continue;
+            }
+
+            string pieceTableName = GetFriendlyPieceTableName(pieceTable);
+            if (pieceTableName.Length == 0 || tables.ContainsKey(pieceTableName))
+            {
+                continue;
+            }
+
+            PieceTableCategoryGuard.Normalize(pieceTable);
+            Dictionary<Piece.PieceCategory, string> labelsByCategory = new();
+            int pairedCount = Math.Min(
+                pieceTable.m_categories.Count,
+                pieceTable.m_categoryLabels?.Count ?? 0);
+            for (int index = 0; index < pairedCount; index++)
+            {
+                Piece.PieceCategory category = pieceTable.m_categories[index];
+                if (!labelsByCategory.ContainsKey(category))
+                {
+                    labelsByCategory[category] = pieceTable.m_categoryLabels![index]?.Trim() ?? "";
+                }
+            }
+
+            HashSet<Piece.PieceCategory> usedCategories = new();
+            if (pieceTable.m_pieces != null)
+            {
+                foreach (GameObject piecePrefab in pieceTable.m_pieces)
+                {
+                    Piece? piece = piecePrefab ? piecePrefab.GetComponent<Piece>() : null;
+                    Piece.PieceCategory category = piece != null ? piece.m_category : Piece.PieceCategory.Max;
+                    if (category is not Piece.PieceCategory.Max and not Piece.PieceCategory.All &&
+                        (int)category >= 0)
+                    {
+                        usedCategories.Add(category);
+                    }
+                }
+            }
+
+            List<Piece.PieceCategory> categoryOrder = pieceTable.m_categories
+                .Where(usedCategories.Contains)
+                .Distinct()
+                .ToList();
+            categoryOrder.AddRange(usedCategories
+                .Where(category => !categoryOrder.Contains(category))
+                .OrderBy(static category => (int)category));
+
+            List<string> categories = new();
+            foreach (Piece.PieceCategory category in categoryOrder)
+            {
+                if (IsOwnerManagedHomesteadCategory(category))
+                {
+                    continue;
+                }
+
+                string rawLabel = labelsByCategory.TryGetValue(category, out string label)
+                    ? label
+                    : PieceTableCategoryGuard.GetLabel(category);
+                string categoryName = GetPieceCategoryReferenceName(category, rawLabel);
+                if (categoryName.Length == 0)
+                {
+                    continue;
+                }
+
+                categories.Add(ShouldWritePieceCategoryLabel(categoryName, rawLabel)
+                    ? $"{categoryName}, {rawLabel}"
+                    : categoryName);
+            }
+
+            if (categories.Count > 0)
+            {
+                tables[pieceTableName] = categories;
+            }
+        }
+
+        string header = string.Join(Environment.NewLine, new[]
+        {
+            "# Generated by DataForge: detected piece category order and labels.",
+            "# Do not edit this generated file directly. Copy the sections you want to control into pieceCategory.yml.",
+            "# Category names are exact and case-sensitive. An optional second value is the displayed label or a $localization token.",
+            "# Categories omitted from pieceCategory.yml remain after configured categories in their existing relative order.",
+            "# Listing a category does not create or preserve an empty build tab.",
+            "# When Homestead is installed, its owner-managed category is omitted and always remains last."
+        }) + Environment.NewLine;
+        GeneratedArtifactWriter.WriteTextIfChanged(
+            Path.Combine(ConfigDirectory, PieceCategoryReferenceFileName),
+            header + SparseSerializer.Serialize(tables));
+    }
+
+    private static string GetPieceCategoryReferenceName(Piece.PieceCategory category, string rawLabel)
+    {
+        string categoryName = FormatPieceCategory(category, null, category.ToString()).Trim();
+        if (!IsNumericCategoryName(categoryName))
+        {
+            return categoryName;
+        }
+
+        if (TryFormatCategoryLabel(rawLabel, out string displayName) && !IsNumericCategoryName(displayName))
+        {
+            return displayName;
+        }
+
+        string rawName = rawLabel.Trim().TrimStart('$');
+        return !IsNumericCategoryName(rawName) ? rawName : categoryName;
+    }
+
+    private static bool ShouldWritePieceCategoryLabel(string categoryName, string rawLabel)
+    {
+        if (rawLabel.Length == 0 || IsNumericCategoryName(rawLabel))
+        {
+            return false;
+        }
+
+        return !CategoryLabelMatches(categoryName, rawLabel);
     }
 
     private static void WriteGeneratedArtifacts()
@@ -3953,6 +4684,47 @@ internal static class PieceOverrideManager
         {
             List<string> tableNames = GetTableNames(prefabName);
             return tableNames.Count > 0 && tableNames.All(IsIgnoredPieceTableName);
+        }
+    }
+
+    private sealed class PieceCategoryConfiguration
+    {
+        internal Dictionary<string, List<PieceCategoryOrderEntry>> Tables { get; } =
+            new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private sealed class PieceCategoryOrderEntry
+    {
+        internal PieceCategoryOrderEntry(string category, string? label)
+        {
+            Category = category;
+            Label = label;
+        }
+
+        internal string Category { get; }
+        internal string? Label { get; }
+
+        internal string ToSerializedValue()
+        {
+            return Label == null ? Category : $"{Category}, {Label}";
+        }
+    }
+
+    private sealed class PieceTableNameComparer : IComparer<string>
+    {
+        internal static readonly PieceTableNameComparer Instance = new();
+
+        public int Compare(string? left, string? right)
+        {
+            bool leftIsHammer = string.Equals(left, "Hammer", StringComparison.OrdinalIgnoreCase);
+            bool rightIsHammer = string.Equals(right, "Hammer", StringComparison.OrdinalIgnoreCase);
+            if (leftIsHammer != rightIsHammer)
+            {
+                return leftIsHammer ? -1 : 1;
+            }
+
+            int comparison = StringComparer.OrdinalIgnoreCase.Compare(left, right);
+            return comparison != 0 ? comparison : StringComparer.Ordinal.Compare(left, right);
         }
     }
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.3
+
+- Added `pieceCategory.yml` and `pieceCategory.reference.yml` for per-hammer category ordering and localized display labels.
+- Improved exact, case-sensitive category discovery so categories added by PieceManager, Jotunn, and other mods keep stable names instead of shifting to numeric tabs.
+- Added Homestead compatibility by leaving its category owner-managed, excluding it from DataForge category overrides, and keeping its tab last.
+
 ## 1.1.2
 
 - Removed DataForge's built-in startup and lobby profiler now that loading diagnostics are available in the standalone LoadTimeProfiler patcher.

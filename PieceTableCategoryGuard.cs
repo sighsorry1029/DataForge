@@ -14,10 +14,14 @@ internal static class PieceTableCategoryGuard
     private const int VanillaCategorySlots = (int)Piece.PieceCategory.Max;
 
     private static readonly Dictionary<Piece.PieceCategory, string> CategoryLabels = new();
-    private static readonly Dictionary<string, Piece.PieceCategory> CustomCategoriesByName = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, Piece.PieceCategory> KnownCategoriesByName = new(StringComparer.Ordinal);
+    private static readonly Dictionary<Piece.PieceCategory, string> KnownCategoryNames = new();
+    private static readonly Dictionary<string, Piece.PieceCategory> CustomCategoriesByName = new(StringComparer.Ordinal);
     private static readonly Dictionary<Piece.PieceCategory, string> CustomCategoryNames = new();
     private static readonly Dictionary<PieceTable, NormalizationStamp> NormalizationStamps = new(ReferenceComparer<PieceTable>.Instance);
     private static readonly Dictionary<PieceTable, PieceTableCategorySnapshot> CategorySnapshots = new(ReferenceComparer<PieceTable>.Instance);
+    private static readonly Dictionary<PieceTable, List<ConfiguredCategory>> ConfiguredOrders = new(ReferenceComparer<PieceTable>.Instance);
+    private static readonly Dictionary<PieceTable, List<CategorySlot>> ConfiguredOrderBaselines = new(ReferenceComparer<PieceTable>.Instance);
     private static readonly HashSet<GameObject> CreatedHudCategoryTabs = new(ReferenceComparer<GameObject>.Instance);
     private static readonly FieldInfo? SelectedCategoryField = AccessTools.Field(typeof(PieceTable), "m_selectedCategory");
     private static readonly FieldInfo? AvailablePiecesField = AccessTools.Field(typeof(PieceTable), "m_availablePieces");
@@ -53,8 +57,12 @@ internal static class PieceTableCategoryGuard
             CreatedHudCategoryTabs.Clear();
         }
         CategoryLabels.Clear();
+        KnownCategoriesByName.Clear();
+        KnownCategoryNames.Clear();
         CustomCategoriesByName.Clear();
         CustomCategoryNames.Clear();
+        ConfiguredOrders.Clear();
+        ConfiguredOrderBaselines.Clear();
         NormalizationStamps.Clear();
         CustomCategoryVersion++;
     }
@@ -91,12 +99,19 @@ internal static class PieceTableCategoryGuard
                 continue;
             }
 
-            if (string.IsNullOrWhiteSpace(pieceTable.m_categoryLabels[index]))
+            if (PieceOverrideManager.IsOwnerManagedHomesteadCategory(category))
+            {
+                continue;
+            }
+
+            if (ShouldReplaceLabel(category, pieceTable.m_categoryLabels[index], label))
             {
                 pieceTable.m_categoryLabels[index] = label;
             }
         }
 
+        ApplyConfiguredOrder(pieceTable);
+        MoveOwnerManagedCategoriesToEnd(pieceTable);
         NormalizeSelectedCategory(pieceTable);
         EnsureHudCategoryTabs(pieceTable);
         RememberNormalization(pieceTable);
@@ -126,6 +141,281 @@ internal static class PieceTableCategoryGuard
         return CustomCategoriesByName.TryGetValue(categoryName.Trim(), out category);
     }
 
+    internal static bool TryResolveKnownCategory(string categoryName, out Piece.PieceCategory category)
+    {
+        return KnownCategoriesByName.TryGetValue(categoryName.Trim(), out category);
+    }
+
+    internal static bool TryGetKnownCategoryName(Piece.PieceCategory category, out string name)
+    {
+        return KnownCategoryNames.TryGetValue(category, out name);
+    }
+
+    internal static void ReplaceKnownCategories(
+        IReadOnlyDictionary<string, Piece.PieceCategory> categoriesByName,
+        IReadOnlyDictionary<Piece.PieceCategory, string> namesByCategory)
+    {
+        KnownCategoriesByName.Clear();
+        foreach (KeyValuePair<string, Piece.PieceCategory> pair in categoriesByName)
+        {
+            if (!string.IsNullOrWhiteSpace(pair.Key))
+            {
+                KnownCategoriesByName[pair.Key.Trim()] = pair.Value;
+            }
+        }
+
+        KnownCategoryNames.Clear();
+        foreach (KeyValuePair<Piece.PieceCategory, string> pair in namesByCategory)
+        {
+            if (!string.IsNullOrWhiteSpace(pair.Value))
+            {
+                KnownCategoryNames[pair.Key] = pair.Value.Trim();
+            }
+        }
+
+        CategoryLabels.Clear();
+        CustomCategoryVersion++;
+        NormalizationStamps.Clear();
+    }
+
+    internal static void ReplaceConfiguredOrders(
+        IReadOnlyDictionary<PieceTable, IReadOnlyList<ConfiguredCategory>> configuredOrders)
+    {
+        Dictionary<PieceTable, List<ConfiguredCategory>> normalized =
+            new(ReferenceComparer<PieceTable>.Instance);
+        foreach (KeyValuePair<PieceTable, IReadOnlyList<ConfiguredCategory>> pair in configuredOrders)
+        {
+            if (!pair.Key || pair.Value == null || pair.Value.Count == 0)
+            {
+                continue;
+            }
+
+            normalized[pair.Key] = pair.Value.ToList();
+        }
+
+        if (ConfiguredOrdersMatch(normalized))
+        {
+            return;
+        }
+
+        HashSet<PieceTable> affectedTables = new(ReferenceComparer<PieceTable>.Instance);
+        foreach (PieceTable pieceTable in ConfiguredOrders.Keys.ToArray())
+        {
+            if (!pieceTable)
+            {
+                continue;
+            }
+
+            affectedTables.Add(pieceTable);
+            RestoreConfiguredOrderBaseline(pieceTable);
+        }
+
+        ConfiguredOrders.Clear();
+        ConfiguredOrderBaselines.Clear();
+        foreach (KeyValuePair<PieceTable, List<ConfiguredCategory>> pair in normalized)
+        {
+            PieceTable pieceTable = pair.Key;
+            CaptureCategorySnapshotIfNeeded(pieceTable);
+            ConfiguredOrderBaselines[pieceTable] = CaptureCategorySlots(pieceTable);
+            ConfiguredOrders[pieceTable] = pair.Value;
+            affectedTables.Add(pieceTable);
+        }
+
+        CustomCategoryVersion++;
+        NormalizationStamps.Clear();
+        foreach (PieceTable pieceTable in affectedTables)
+        {
+            if (pieceTable)
+            {
+                Normalize(pieceTable);
+            }
+        }
+    }
+
+    private static bool ConfiguredOrdersMatch(
+        IReadOnlyDictionary<PieceTable, List<ConfiguredCategory>> configuredOrders)
+    {
+        if (ConfiguredOrders.Count != configuredOrders.Count)
+        {
+            return false;
+        }
+
+        foreach (KeyValuePair<PieceTable, List<ConfiguredCategory>> pair in ConfiguredOrders)
+        {
+            if (!configuredOrders.TryGetValue(pair.Key, out List<ConfiguredCategory>? replacement) ||
+                pair.Value.Count != replacement.Count)
+            {
+                return false;
+            }
+
+            for (int index = 0; index < pair.Value.Count; index++)
+            {
+                if (!pair.Value[index].Equals(replacement[index]))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private static void ApplyConfiguredOrder(PieceTable pieceTable)
+    {
+        if (!ConfiguredOrders.TryGetValue(pieceTable, out List<ConfiguredCategory>? configured) ||
+            configured.Count == 0 ||
+            pieceTable.m_categories == null)
+        {
+            return;
+        }
+
+        List<CategorySlot> current = CaptureCategorySlots(pieceTable);
+        bool[] consumed = new bool[current.Count];
+        List<CategorySlot> ordered = new(current.Count);
+        foreach (ConfiguredCategory desired in configured)
+        {
+            for (int index = 0; index < current.Count; index++)
+            {
+                if (consumed[index] || current[index].Category != desired.Category)
+                {
+                    continue;
+                }
+
+                consumed[index] = true;
+                CategorySlot slot = current[index];
+                ordered.Add(new CategorySlot(slot.Category, desired.Label ?? slot.Label));
+                break;
+            }
+        }
+
+        for (int index = 0; index < current.Count; index++)
+        {
+            if (!consumed[index])
+            {
+                ordered.Add(current[index]);
+            }
+        }
+
+        if (CategorySlotsMatch(current, ordered))
+        {
+            return;
+        }
+
+        pieceTable.m_categories = ordered.Select(static slot => slot.Category).ToList();
+        pieceTable.m_categoryLabels = ordered.Select(static slot => slot.Label).ToList();
+    }
+
+    private static List<CategorySlot> CaptureCategorySlots(PieceTable pieceTable)
+    {
+        List<CategorySlot> slots = new();
+        if (!pieceTable || pieceTable.m_categories == null)
+        {
+            return slots;
+        }
+
+        List<string>? labels = pieceTable.m_categoryLabels;
+        for (int index = 0; index < pieceTable.m_categories.Count; index++)
+        {
+            Piece.PieceCategory category = pieceTable.m_categories[index];
+            string label = labels != null && index < labels.Count && !string.IsNullOrWhiteSpace(labels[index])
+                ? labels[index]
+                : GetLabel(category);
+            slots.Add(new CategorySlot(category, label));
+        }
+
+        return slots;
+    }
+
+    private static bool CategorySlotsMatch(IReadOnlyList<CategorySlot> left, IReadOnlyList<CategorySlot> right)
+    {
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < left.Count; index++)
+        {
+            if (!left[index].Equals(right[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void MoveOwnerManagedCategoriesToEnd(PieceTable pieceTable)
+    {
+        if (pieceTable.m_categories == null || pieceTable.m_categories.Count < 2)
+        {
+            return;
+        }
+
+        for (int index = pieceTable.m_categories.Count - 2; index >= 0; index--)
+        {
+            Piece.PieceCategory category = pieceTable.m_categories[index];
+            if (!PieceOverrideManager.IsOwnerManagedHomesteadCategory(category))
+            {
+                continue;
+            }
+
+            string label = pieceTable.m_categoryLabels != null && index < pieceTable.m_categoryLabels.Count
+                ? pieceTable.m_categoryLabels[index]
+                : GetLabel(category);
+            pieceTable.m_categories.RemoveAt(index);
+            pieceTable.m_categories.Add(category);
+            if (pieceTable.m_categoryLabels != null)
+            {
+                if (index < pieceTable.m_categoryLabels.Count)
+                {
+                    pieceTable.m_categoryLabels.RemoveAt(index);
+                }
+
+                pieceTable.m_categoryLabels.Add(label);
+            }
+        }
+    }
+
+    private static void RestoreConfiguredOrderBaseline(PieceTable pieceTable)
+    {
+        if (!ConfiguredOrderBaselines.TryGetValue(pieceTable, out List<CategorySlot>? baseline) ||
+            !pieceTable ||
+            pieceTable.m_categories == null)
+        {
+            return;
+        }
+
+        List<CategorySlot> current = CaptureCategorySlots(pieceTable);
+        bool[] consumed = new bool[current.Count];
+        List<CategorySlot> restored = new(current.Count);
+        foreach (CategorySlot original in baseline)
+        {
+            for (int index = 0; index < current.Count; index++)
+            {
+                if (consumed[index] || current[index].Category != original.Category)
+                {
+                    continue;
+                }
+
+                consumed[index] = true;
+                restored.Add(original);
+                break;
+            }
+        }
+
+        for (int index = 0; index < current.Count; index++)
+        {
+            if (!consumed[index])
+            {
+                restored.Add(current[index]);
+            }
+        }
+
+        pieceTable.m_categories = restored.Select(static slot => slot.Category).ToList();
+        pieceTable.m_categoryLabels = restored.Select(static slot => slot.Label).ToList();
+        NormalizationStamps.Remove(pieceTable);
+    }
+
     internal static Piece.PieceCategory GetOrCreateCustomCategory(string categoryName)
     {
         string normalizedName = categoryName.Trim();
@@ -149,47 +439,17 @@ internal static class PieceTableCategoryGuard
         return CustomCategoryNames.TryGetValue(category, out name);
     }
 
-    internal static void AppendCustomCategoryValues(ref Array values)
-    {
-        if (CustomCategoryNames.Count == 0)
-        {
-            return;
-        }
-
-        List<Piece.PieceCategory> categories = values.Cast<Piece.PieceCategory>().ToList();
-        foreach (Piece.PieceCategory category in CustomCategoryNames.Keys.OrderBy(static category => (int)category))
-        {
-            if (!categories.Contains(category))
-            {
-                categories.Add(category);
-            }
-        }
-
-        values = categories.ToArray();
-    }
-
-    internal static void AppendCustomCategoryNames(ref string[] names)
-    {
-        if (CustomCategoryNames.Count == 0)
-        {
-            return;
-        }
-
-        List<string> categoryNames = names.ToList();
-        foreach (KeyValuePair<Piece.PieceCategory, string> pair in CustomCategoryNames.OrderBy(static pair => (int)pair.Key))
-        {
-            if (!categoryNames.Contains(pair.Value))
-            {
-                categoryNames.Add(pair.Value);
-            }
-        }
-
-        names = categoryNames.ToArray();
-    }
-
     private static Piece.PieceCategory AllocateCustomCategory()
     {
-        HashSet<int> used = new(Enum.GetValues(typeof(Piece.PieceCategory)).Cast<Piece.PieceCategory>().Select(static category => (int)category));
+        HashSet<int> used = new();
+        for (int vanillaValue = 0; vanillaValue <= VanillaCategorySlots; vanillaValue++)
+        {
+            used.Add(vanillaValue);
+        }
+
+        used.Add((int)Piece.PieceCategory.All);
+        used.UnionWith(KnownCategoriesByName.Values.Select(static category => (int)category));
+        used.UnionWith(KnownCategoryNames.Keys.Select(static category => (int)category));
         used.UnionWith(CustomCategoryNames.Keys.Select(static category => (int)category));
         foreach (PieceTable pieceTable in Resources.FindObjectsOfTypeAll<PieceTable>())
         {
@@ -205,7 +465,7 @@ internal static class PieceTableCategoryGuard
         }
 
         int value = VanillaCategorySlots + 1;
-        while (used.Contains(value))
+        while (used.Contains(value) || value == (int)Piece.PieceCategory.All)
         {
             value++;
         }
@@ -254,9 +514,70 @@ internal static class PieceTableCategoryGuard
 
         pieceTable.m_categories.Add(category);
         pieceTable.m_categoryLabels.Add(GetLabel(category));
-        NormalizeSelectedCategory(pieceTable);
-        EnsureHudCategoryTabs(pieceTable);
-        RememberNormalization(pieceTable);
+        NormalizationStamps.Remove(pieceTable);
+        Normalize(pieceTable);
+    }
+
+    internal static void PruneUnusedCustomCategories()
+    {
+        if (CustomCategoryNames.Count == 0)
+        {
+            return;
+        }
+
+        foreach (PieceTable pieceTable in Resources.FindObjectsOfTypeAll<PieceTable>())
+        {
+            if (!pieceTable || pieceTable.m_categories == null)
+            {
+                continue;
+            }
+
+            bool changed = false;
+            for (int index = pieceTable.m_categories.Count - 1; index >= 0; index--)
+            {
+                Piece.PieceCategory category = pieceTable.m_categories[index];
+                if (!CustomCategoryNames.ContainsKey(category) || IsCategoryUsed(pieceTable, category))
+                {
+                    continue;
+                }
+
+                CaptureCategorySnapshotIfNeeded(pieceTable);
+                pieceTable.m_categories.RemoveAt(index);
+                if (pieceTable.m_categoryLabels != null && index < pieceTable.m_categoryLabels.Count)
+                {
+                    pieceTable.m_categoryLabels.RemoveAt(index);
+                }
+
+                changed = true;
+            }
+
+            if (!changed)
+            {
+                continue;
+            }
+
+            NormalizationStamps.Remove(pieceTable);
+            Normalize(pieceTable);
+        }
+    }
+
+    private static bool IsCategoryUsed(PieceTable pieceTable, Piece.PieceCategory category)
+    {
+        if (pieceTable.m_pieces == null)
+        {
+            return false;
+        }
+
+        foreach (GameObject piecePrefab in pieceTable.m_pieces)
+        {
+            Piece? piece = piecePrefab ? piecePrefab.GetComponent<Piece>() : null;
+            if (piece != null && piece.m_category == category)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool IsNormalizationCurrent(PieceTable pieceTable)
@@ -290,7 +611,7 @@ internal static class PieceTableCategoryGuard
                     missingLabels++;
                 }
 
-                categoryHash = unchecked(categoryHash * 31 + StringComparer.OrdinalIgnoreCase.GetHashCode(label.Trim()));
+                categoryHash = unchecked(categoryHash * 31 + StringComparer.Ordinal.GetHashCode(label.Trim()));
             }
         }
 
@@ -461,6 +782,16 @@ internal static class PieceTableCategoryGuard
 
     internal static string GetLabel(Piece.PieceCategory category)
     {
+        if (CustomCategoryNames.TryGetValue(category, out string customName))
+        {
+            return customName;
+        }
+
+        if (KnownCategoryNames.TryGetValue(category, out string knownName))
+        {
+            return knownName;
+        }
+
         if (CategoryLabels.TryGetValue(category, out string label))
         {
             return label;
@@ -487,6 +818,77 @@ internal static class PieceTableCategoryGuard
         label = category.ToString();
         CategoryLabels[category] = label;
         return label;
+    }
+
+    private static bool ShouldReplaceLabel(Piece.PieceCategory category, string? currentLabel, string expectedLabel)
+    {
+        string current = currentLabel?.Trim() ?? "";
+        if (current.Length == 0)
+        {
+            return true;
+        }
+
+        if (LabelsMatch(current, expectedLabel))
+        {
+            return false;
+        }
+
+        if (IsNumericLabel(current) && !IsNumericLabel(expectedLabel))
+        {
+            return true;
+        }
+
+        bool hasAuthoritativeName =
+            CustomCategoryNames.ContainsKey(category) ||
+            KnownCategoryNames.ContainsKey(category);
+        if (!hasAuthoritativeName || (int)category < VanillaCategorySlots)
+        {
+            return false;
+        }
+
+        if (TryResolveLabel(current, out Piece.PieceCategory labelledCategory))
+        {
+            return labelledCategory != category;
+        }
+
+        return true;
+    }
+
+    private static bool TryResolveLabel(string label, out Piece.PieceCategory category)
+    {
+        string comparable = GetComparableLabel(label);
+        if (KnownCategoriesByName.TryGetValue(comparable, out category) ||
+            CustomCategoriesByName.TryGetValue(comparable, out category))
+        {
+            return true;
+        }
+
+        category = Piece.PieceCategory.Misc;
+        return false;
+    }
+
+    private static bool LabelsMatch(string left, string right)
+    {
+        return GetComparableLabel(left).Equals(GetComparableLabel(right), StringComparison.Ordinal);
+    }
+
+    private static string GetComparableLabel(string label)
+    {
+        string trimmed = label.Trim();
+        if (!trimmed.StartsWith("$", StringComparison.Ordinal) || Localization.instance == null)
+        {
+            return trimmed.TrimStart('$');
+        }
+
+        string localized = Localization.instance.Localize(trimmed).Trim();
+        return localized.Length > 0 && !localized.Equals(trimmed, StringComparison.Ordinal)
+            ? localized
+            : trimmed.TrimStart('$');
+    }
+
+    private static bool IsNumericLabel(string label)
+    {
+        return int.TryParse(label.Trim(), out _);
     }
 
     private static void EnsureHudCategoryTabs(PieceTable pieceTable)
@@ -526,7 +928,7 @@ internal static class PieceTableCategoryGuard
 
     private static void CaptureCategorySnapshotIfNeeded(PieceTable pieceTable)
     {
-        if (CustomCategoryNames.Count == 0 || CategorySnapshots.ContainsKey(pieceTable))
+        if (CategorySnapshots.ContainsKey(pieceTable))
         {
             return;
         }
@@ -571,6 +973,67 @@ internal static class PieceTableCategoryGuard
         }
 
         HudCategoryClickField.SetValue(inputHandler, Delegate.Combine(current, callback));
+    }
+
+    internal readonly struct ConfiguredCategory : IEquatable<ConfiguredCategory>
+    {
+        internal ConfiguredCategory(Piece.PieceCategory category, string? label)
+        {
+            Category = category;
+            string normalizedLabel = label?.Trim() ?? "";
+            Label = normalizedLabel.Length > 0 ? normalizedLabel : null;
+        }
+
+        internal Piece.PieceCategory Category { get; }
+        internal string? Label { get; }
+
+        public bool Equals(ConfiguredCategory other)
+        {
+            return Category == other.Category && string.Equals(Label, other.Label, StringComparison.Ordinal);
+        }
+
+        public override bool Equals(object? obj)
+        {
+            return obj is ConfiguredCategory other && Equals(other);
+        }
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                return ((int)Category * 397) ^ (Label != null ? StringComparer.Ordinal.GetHashCode(Label) : 0);
+            }
+        }
+    }
+
+    private readonly struct CategorySlot : IEquatable<CategorySlot>
+    {
+        internal CategorySlot(Piece.PieceCategory category, string label)
+        {
+            Category = category;
+            Label = label ?? "";
+        }
+
+        internal Piece.PieceCategory Category { get; }
+        internal string Label { get; }
+
+        public bool Equals(CategorySlot other)
+        {
+            return Category == other.Category && string.Equals(Label, other.Label, StringComparison.Ordinal);
+        }
+
+        public override bool Equals(object? obj)
+        {
+            return obj is CategorySlot other && Equals(other);
+        }
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                return ((int)Category * 397) ^ StringComparer.Ordinal.GetHashCode(Label);
+            }
+        }
     }
 
     private sealed class PieceTableCategorySnapshot
@@ -734,34 +1197,20 @@ internal static class PieceTableCategoryGuard
     }
 }
 
-[HarmonyPatch(typeof(Enum), nameof(Enum.GetValues), new[] { typeof(Type) })]
-internal static class DataForgeEnumGetValuesPieceCategoryPatch
-{
-    private static void Postfix(Type enumType, ref Array __result)
-    {
-        if (enumType == typeof(Piece.PieceCategory))
-        {
-            PieceTableCategoryGuard.AppendCustomCategoryValues(ref __result);
-        }
-    }
-}
-
-[HarmonyPatch(typeof(Enum), nameof(Enum.GetNames), new[] { typeof(Type) })]
-internal static class DataForgeEnumGetNamesPieceCategoryPatch
-{
-    private static void Postfix(Type enumType, ref string[] __result)
-    {
-        if (enumType == typeof(Piece.PieceCategory))
-        {
-            PieceTableCategoryGuard.AppendCustomCategoryNames(ref __result);
-        }
-    }
-}
-
 [HarmonyPatch(typeof(Hud), nameof(Hud.UpdateBuild))]
 internal static class DataForgeHudUpdateBuildPieceTableCategoryGuardPatch
 {
     [HarmonyPriority(Priority.First)]
+    private static void Prefix(Player player)
+    {
+        PieceTableCategoryGuard.Normalize(player ? player.m_buildPieces : null);
+    }
+}
+
+[HarmonyPatch(typeof(Hud), nameof(Hud.UpdateBuild))]
+internal static class DataForgeHudUpdateBuildPieceTableCategoryRepairPatch
+{
+    [HarmonyPriority(Priority.Last)]
     private static void Prefix(Player player)
     {
         PieceTableCategoryGuard.Normalize(player ? player.m_buildPieces : null);
