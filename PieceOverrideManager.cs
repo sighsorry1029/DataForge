@@ -9,6 +9,7 @@ using BepInEx;
 using HarmonyLib;
 using ServerSync;
 using UnityEngine;
+using YamlDotNet.RepresentationModel;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 using static DataForge.DataForgeValue;
@@ -27,7 +28,7 @@ internal static class PieceOverrideManager
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
     private const int DefaultPieceSortOrder = 100;
     private const string ReferenceStateKey = "pieces";
-    private const string ReferenceLogicVersion = "2026-07-18-piece-category-registry-v1";
+    private const string ReferenceLogicVersion = "2026-07-21-piece-category-moves-v1";
     private const string HomesteadPluginGuid = "sighsorry.Homestead";
     private const string HomesteadCategoryName = "Homestead";
     private static readonly HashSet<string> IgnoredCategoryNames = new(StringComparer.Ordinal)
@@ -48,6 +49,7 @@ internal static class PieceOverrideManager
     private static readonly Dictionary<string, PieceDefinition> Baselines = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, Piece> BaselinePieces = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<PieceTable, List<GameObject>> PieceTableOrderBaselines = new(ReferenceComparer<PieceTable>.Instance);
+    private static readonly Dictionary<GameObject, Piece.PieceCategory> PieceCategoryMoveBaselines = new(ReferenceComparer<GameObject>.Instance);
     private static readonly HashSet<int> ManagedStationExtensionInstanceIds = new();
     private static readonly HashSet<int> ManagedCraftingStationInstanceIds = new();
     private static readonly Dictionary<int, List<StationExtensionSnapshot>> StationExtensionRemovalSnapshots = new();
@@ -197,12 +199,11 @@ internal static class PieceOverrideManager
             return;
         }
 
-        RefreshPieceCategoryRegistry();
-
         bool hasActiveRuntimeDefinitions = HasActiveRuntimeDefinitions();
         Dictionary<string, int> activeSortOrders = GetActiveSortOrders();
         Dictionary<string, PieceTableAssignment> activePieceTableAssignments = GetActivePieceTableAssignments();
         HashSet<string> activeRemovedPieces = GetActiveRemovedPieces();
+        List<PieceCategoryMoveRule> activePieceCategoryMoves = GetActivePieceCategoryMoves();
         HashSet<string>? changedPieceKeys;
         int pieceCategoryConfigurationVersion;
         bool hasActivePieceCategoryConfiguration;
@@ -226,6 +227,7 @@ internal static class PieceOverrideManager
         bool hasActiveSortOrders = activeSortOrders.Count > 0;
         bool hasActivePieceTableAssignments = activePieceTableAssignments.Count > 0;
         bool hasActiveRemovedPieces = activeRemovedPieces.Count > 0;
+        bool hasActivePieceCategoryMoves = activePieceCategoryMoves.Count > 0;
         if (!hasActiveRuntimeDefinitions &&
             !hasActiveSortOrders &&
             !hasActivePieceTableAssignments &&
@@ -240,6 +242,10 @@ internal static class PieceOverrideManager
             return;
         }
 
+        PieceTableCategoryGuard.RestoreTemporarilyPrunedCategories();
+        RestorePieceCategoryMoveBaselines();
+        RefreshPieceCategoryRegistry();
+
         bool shouldTouchRuntime = hasActiveRuntimeDefinitions || RuntimeStateWasApplied;
         HashSet<string>? runtimePieceKeys = shouldTouchRuntime
             ? GetRuntimeApplyKeys(changedPieceKeys, hasActiveRuntimeDefinitions)
@@ -250,7 +256,11 @@ internal static class PieceOverrideManager
             ApplyToPrefabDefinitions(runtimePieceKeys);
         }
 
-        ApplyPieceTableStructure(activePieceTableAssignments, activeSortOrders, activeRemovedPieces);
+        List<ResolvedPieceCategoryMove> appliedPieceCategoryMoves = ApplyPieceTableStructure(
+            activePieceTableAssignments,
+            activeSortOrders,
+            activeRemovedPieces,
+            activePieceCategoryMoves);
 
         if (shouldTouchRuntime)
         {
@@ -265,6 +275,10 @@ internal static class PieceOverrideManager
 
         PieceTableCategoryGuard.PruneUnusedCustomCategories();
         ApplyPieceCategoryConfiguration();
+        foreach (ResolvedPieceCategoryMove move in appliedPieceCategoryMoves)
+        {
+            PieceTableCategoryGuard.PruneCategoryIfUnused(move.Source, move.SourceCategory);
+        }
         if (shouldTouchRuntime ||
             hasActivePieceCategoryConfiguration ||
             PieceCategoryConfigurationWasApplied)
@@ -284,7 +298,10 @@ internal static class PieceOverrideManager
             }
         }
         PieceTableSortWasApplied = hasActiveSortOrders;
-        PieceTableMembershipWasApplied = hasActivePieceTableAssignments || hasActiveRemovedPieces;
+        PieceTableMembershipWasApplied =
+            hasActivePieceTableAssignments ||
+            hasActiveRemovedPieces ||
+            hasActivePieceCategoryMoves;
         PieceCategoryConfigurationWasApplied = hasActivePieceCategoryConfiguration;
         AppliedPieceCategoryConfigurationVersion = pieceCategoryConfigurationVersion;
         WritePieceCategoryReferenceArtifact();
@@ -323,9 +340,13 @@ internal static class PieceOverrideManager
                 }
 
                 List<PieceTableCategoryGuard.ConfiguredCategory> categories = new();
-                foreach (PieceCategoryOrderEntry entry in tableConfiguration.Value)
+                HashSet<Piece.PieceCategory> configuredCategories = new();
+                foreach (IGrouping<string, PieceCategoryOrderEntry> categoryEntries in tableConfiguration.Value
+                             .GroupBy(static entry => entry.Category, StringComparer.Ordinal))
                 {
-                    if (!TryResolvePieceCategory(entry.Category, out Piece.PieceCategory category))
+                    PieceCategoryOrderEntry entry = categoryEntries.First();
+                    if (!TryResolvePieceTableCategory(pieceTable, entry.Category, out Piece.PieceCategory category) &&
+                        !TryResolvePieceCategory(entry.Category, out category))
                     {
                         ReportPieceCategoryConfigurationIssue(
                             $"category:{tableConfiguration.Key}:{entry.Category}",
@@ -341,7 +362,15 @@ internal static class PieceOverrideManager
                         continue;
                     }
 
-                    categories.Add(new PieceTableCategoryGuard.ConfiguredCategory(category, entry.Label));
+                    if (!configuredCategories.Add(category))
+                    {
+                        continue;
+                    }
+
+                    string? label = categoryEntries
+                        .Select(static categoryEntry => categoryEntry.Label)
+                        .FirstOrDefault(static categoryLabel => categoryLabel != null);
+                    categories.Add(new PieceTableCategoryGuard.ConfiguredCategory(category, label));
                 }
 
                 configuredOrders[pieceTable] = categories;
@@ -415,6 +444,7 @@ internal static class PieceOverrideManager
     internal static void OnWorldShutdown()
     {
         RunWorldShutdownStep("visual state", RestoreAllPieceVisualStates);
+        RunWorldShutdownStep("moved piece categories", RestorePieceCategoryMoveBaselines);
         RunWorldShutdownStep("prefab definitions", RestoreAppliedPrefabDefinitionsForWorldShutdown);
         RunWorldShutdownStep("piece tables", RestoreCapturedPieceTablesForWorldShutdown);
         RunWorldShutdownStep("piece categories", PieceTableCategoryGuard.ResetWorldState);
@@ -430,6 +460,7 @@ internal static class PieceOverrideManager
         PieceMaterialSnapshots.Clear();
         PieceIconSnapshots.Clear();
         PieceTableOrderBaselines.Clear();
+        PieceCategoryMoveBaselines.Clear();
         CraftingStationTopologyChanged = false;
         StationExtensionTopologyChanged = false;
         PieceTableSortWasApplied = false;
@@ -735,8 +766,20 @@ internal static class PieceOverrideManager
 
         try
         {
-            Dictionary<string, List<string>?>? tables =
-                Deserializer.Deserialize<Dictionary<string, List<string>?>>(yaml);
+            YamlStream stream = new();
+            using StringReader reader = new(yaml);
+            stream.Load(reader);
+            if (stream.Documents.Count == 0 ||
+                stream.Documents[0].RootNode is YamlScalarNode { Value: null })
+            {
+                return new PieceCategoryConfiguration();
+            }
+
+            if (stream.Documents.Count != 1 || stream.Documents[0].RootNode is not YamlMappingNode tables)
+            {
+                throw new InvalidDataException($"{source}: root must be a mapping of piece tables to category lists.");
+            }
+
             return NormalizePieceCategoryConfiguration(tables, source);
         }
         catch (Exception ex) when (ex is not InvalidDataException)
@@ -746,18 +789,20 @@ internal static class PieceOverrideManager
     }
 
     private static PieceCategoryConfiguration NormalizePieceCategoryConfiguration(
-        Dictionary<string, List<string>?>? tables,
+        YamlMappingNode tables,
         string source)
     {
         PieceCategoryConfiguration configuration = new();
-        if (tables == null)
+        Dictionary<string, Dictionary<string, string>> moveTargetsBySourceTable =
+            new(StringComparer.OrdinalIgnoreCase);
+        foreach (KeyValuePair<YamlNode, YamlNode> table in tables.Children)
         {
-            return configuration;
-        }
+            if (table.Key is not YamlScalarNode tableNameNode)
+            {
+                throw new InvalidDataException($"{source}: piece table names must be scalar values.");
+            }
 
-        foreach (KeyValuePair<string, List<string>?> table in tables)
-        {
-            string pieceTableName = table.Key?.Trim() ?? "";
+            string pieceTableName = tableNameNode.Value?.Trim() ?? "";
             if (pieceTableName.Length == 0)
             {
                 throw new InvalidDataException($"{source}: piece table name cannot be empty.");
@@ -770,30 +815,63 @@ internal static class PieceOverrideManager
             }
 
             List<PieceCategoryOrderEntry> entries = new();
-            HashSet<string> seenCategories = new(StringComparer.Ordinal);
+            HashSet<string> seenOrderEntries = new(StringComparer.Ordinal);
+            Dictionary<string, string> labelsByCategory = new(StringComparer.Ordinal);
+            if (table.Value is YamlScalarNode { Value: null })
+            {
+                continue;
+            }
+
+            if (table.Value is not YamlSequenceNode categoryEntries)
+            {
+                throw new InvalidDataException(
+                    $"{source}: piece table '{pieceTableName}' must contain a category list.");
+            }
+
             int entryIndex = 0;
-            foreach (string? rawEntry in table.Value ?? new List<string>())
+            foreach (YamlNode rawEntry in categoryEntries.Children)
             {
                 entryIndex++;
-                string value = rawEntry?.Trim() ?? "";
-                if (value.Length == 0)
+                string value;
+                string? sourcePieceTable = null;
+                if (rawEntry is YamlScalarNode scalarEntry)
+                {
+                    value = scalarEntry.Value?.Trim() ?? "";
+                }
+                else if (rawEntry is YamlMappingNode mappingEntry && mappingEntry.Children.Count == 1)
+                {
+                    KeyValuePair<YamlNode, YamlNode> move = mappingEntry.Children.Single();
+                    if (move.Key is not YamlScalarNode moveCategory || move.Value is not YamlScalarNode moveSource)
+                    {
+                        throw new InvalidDataException(
+                            $"{source}: {pieceTableName} category entry #{entryIndex} move must use scalar category and piece-table names.");
+                    }
+
+                    value = moveCategory.Value?.Trim() ?? "";
+                    sourcePieceTable = moveSource.Value?.Trim() ?? "";
+                    if (sourcePieceTable.Length == 0)
+                    {
+                        throw new InvalidDataException(
+                            $"{source}: {pieceTableName} category entry #{entryIndex} has no source piece table.");
+                    }
+                }
+                else
                 {
                     throw new InvalidDataException(
-                        $"{source}: {pieceTableName} category entry #{entryIndex} cannot be empty.");
+                        $"{source}: {pieceTableName} category entry #{entryIndex} must be a category string or a single category-to-source mapping.");
                 }
 
-                int separatorIndex = value.IndexOf(',');
-                string categoryName = (separatorIndex >= 0 ? value.Substring(0, separatorIndex) : value).Trim();
-                string? label = null;
-                if (separatorIndex >= 0)
-                {
-                    string rawLabel = value.Substring(separatorIndex + 1).Trim();
-                    label = rawLabel.Length > 0 ? rawLabel : null;
-                }
+                ParsePieceCategoryDescriptor(
+                    value,
+                    source,
+                    pieceTableName,
+                    entryIndex,
+                    out string categoryName,
+                    out string? label);
                 if (categoryName.Length == 0)
                 {
                     throw new InvalidDataException(
-                        $"{source}: {pieceTableName} category entry #{entryIndex} has no category name.");
+                        $"{source}: {pieceTableName} category entry #{entryIndex} cannot be empty.");
                 }
 
                 if (IsOwnerManagedHomesteadCategoryName(categoryName))
@@ -803,20 +881,47 @@ internal static class PieceOverrideManager
                     continue;
                 }
 
-                if (!seenCategories.Add(categoryName))
+                if (sourcePieceTable == null && !seenOrderEntries.Add(categoryName))
                 {
                     throw new InvalidDataException(
-                        $"{source}: {pieceTableName} category '{categoryName}' is listed more than once.");
+                        $"{source}: {pieceTableName} category '{categoryName}' has more than one order/label entry.");
                 }
 
-                if (label != null && label.StartsWith("&", StringComparison.Ordinal))
+                if (label != null &&
+                    labelsByCategory.TryGetValue(categoryName, out string existingLabel) &&
+                    !existingLabel.Equals(label, StringComparison.Ordinal))
                 {
                     throw new InvalidDataException(
-                        $"{source}: {pieceTableName} category '{categoryName}' uses '{label}'. " +
-                        "Valheim localization tokens start with '$', not '&'.");
+                        $"{source}: {pieceTableName} category '{categoryName}' has conflicting labels " +
+                        $"'{existingLabel}' and '{label}'.");
                 }
 
-                entries.Add(new PieceCategoryOrderEntry(categoryName, label));
+                if (label != null)
+                {
+                    labelsByCategory[categoryName] = label;
+                }
+
+                if (sourcePieceTable != null)
+                {
+                    if (!moveTargetsBySourceTable.TryGetValue(
+                            sourcePieceTable,
+                            out Dictionary<string, string>? targetsByCategory))
+                    {
+                        targetsByCategory = new Dictionary<string, string>(StringComparer.Ordinal);
+                        moveTargetsBySourceTable[sourcePieceTable] = targetsByCategory;
+                    }
+
+                    if (targetsByCategory.TryGetValue(categoryName, out string previousTarget))
+                    {
+                        throw new InvalidDataException(
+                            $"{source}: source category '{sourcePieceTable}.{categoryName}' is already moved to " +
+                            $"'{previousTarget}' and cannot also move to '{pieceTableName}'.");
+                    }
+
+                    targetsByCategory[categoryName] = pieceTableName;
+                }
+
+                entries.Add(new PieceCategoryOrderEntry(categoryName, label, sourcePieceTable));
             }
 
             if (entries.Count > 0)
@@ -828,18 +933,66 @@ internal static class PieceOverrideManager
         return configuration;
     }
 
+    private static void ParsePieceCategoryDescriptor(
+        string value,
+        string source,
+        string pieceTableName,
+        int entryIndex,
+        out string categoryName,
+        out string? label)
+    {
+        if (value.Length == 0)
+        {
+            throw new InvalidDataException(
+                $"{source}: {pieceTableName} category entry #{entryIndex} cannot be empty.");
+        }
+
+        int separatorIndex = value.IndexOf(',');
+        categoryName = (separatorIndex >= 0 ? value.Substring(0, separatorIndex) : value).Trim();
+        string rawLabel = separatorIndex >= 0 ? value.Substring(separatorIndex + 1).Trim() : "";
+        label = rawLabel.Length > 0 ? rawLabel : null;
+        if (categoryName.Length == 0)
+        {
+            throw new InvalidDataException(
+                $"{source}: {pieceTableName} category entry #{entryIndex} has no category name.");
+        }
+
+        if (label != null && label.StartsWith("&", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                $"{source}: {pieceTableName} category '{categoryName}' uses '{label}'. " +
+                "Valheim localization tokens start with '$', not '&'.");
+        }
+    }
+
     private static string SerializePieceCategoryConfiguration(PieceCategoryConfiguration configuration)
     {
-        Dictionary<string, List<string>> serialized = new(StringComparer.OrdinalIgnoreCase);
+        YamlMappingNode root = new();
         foreach (KeyValuePair<string, List<PieceCategoryOrderEntry>> table in configuration.Tables
                      .OrderBy(static pair => pair.Key, PieceTableNameComparer.Instance))
         {
-            serialized[table.Key] = table.Value
-                .Select(static entry => entry.ToSerializedValue())
-                .ToList();
+            YamlSequenceNode entries = new();
+            foreach (PieceCategoryOrderEntry entry in table.Value)
+            {
+                YamlScalarNode descriptor = new(entry.ToSerializedValue());
+                if (entry.SourcePieceTable == null)
+                {
+                    entries.Add(descriptor);
+                    continue;
+                }
+
+                YamlMappingNode move = new();
+                move.Add(descriptor, new YamlScalarNode(entry.SourcePieceTable));
+                entries.Add(move);
+            }
+
+            root.Add(new YamlScalarNode(table.Key), entries);
         }
 
-        return SparseSerializer.Serialize(serialized);
+        YamlStream stream = new(new YamlDocument(root));
+        using StringWriter writer = new(CultureInfo.InvariantCulture);
+        stream.Save(writer, assignAnchors: false);
+        return writer.ToString();
     }
 
     private static List<PieceEntry> DeserializeEntries(string yaml, string source)
@@ -952,20 +1105,28 @@ internal static class PieceOverrideManager
     {
         return string.Join(Environment.NewLine, new[]
         {
-            "# DataForge piece category order and display labels.",
+            "# DataForge piece category order, display labels, and category moves.",
             "# Copy piece-table sections from pieceCategory.reference.yml and reorder their category entries here.",
             "# Piece-table keys use the build tool prefab name, such as Hammer, rather than an internal _HammerPieceTable name.",
             "# Category names are exact and case-sensitive. Leading and trailing whitespace is ignored.",
             "# An optional second value overrides the displayed tab label. Use a $token from DataForge/localization for per-language text.",
+            "# Use '- Furniture: GB_Parchment_Tool' to move every Furniture piece from that source tool into this section's tool.",
+            "# Use '- Furniture, $token: GB_Parchment_Tool' to move and set the destination tab's localized label together.",
+            "# An exact category already present on the destination is merged; otherwise the source category is added there.",
+            "# Keep one plain category entry for its order/label, then repeat that category as mappings to merge one or more source tools.",
+            "# A source tool/category pair can move to only one destination tool.",
+            "# A pieces.yml pieceTable value has final priority over a category move. Removing a move restores its baseline membership.",
+            "# After moving all categories out of a source tool, write 'GB_Parchment_Tool: []' to leave its section explicitly empty.",
             "# Categories omitted from a configured table keep their relative order after the listed categories.",
-            "# This file reorders existing categories only; categories are created by pieces.yml or their owner mod.",
             "# A listed category with no matching pieces does not keep or create an empty build tab.",
             "# When Homestead is installed, its owner-managed category is omitted here and always remains last.",
             "#",
             "# Hammer:",
             "# - Misc",
-            "# - Furniture",
-            "# - ValheimCuisine, $df_piececategory_valheimcuisine"
+            "# - Furniture, $hud_furniture",
+            "# - Furniture: GB_Parchment_Tool",
+            "# - Stone Building: GB_Parchment_Tool",
+            "# GB_Parchment_Tool: []"
         }) + Environment.NewLine;
     }
 
@@ -1353,6 +1514,34 @@ internal static class PieceOverrideManager
         }
 
         return assignments;
+    }
+
+    private static List<PieceCategoryMoveRule> GetActivePieceCategoryMoves()
+    {
+        List<PieceCategoryMoveRule> moves = new();
+        if (!DataForgePlugin.PieceOverridesEnabled)
+        {
+            return moves;
+        }
+
+        lock (StateLock)
+        {
+            foreach (KeyValuePair<string, List<PieceCategoryOrderEntry>> table in ActivePieceCategoryConfiguration.Tables)
+            {
+                foreach (PieceCategoryOrderEntry entry in table.Value)
+                {
+                    if (entry.SourcePieceTable != null)
+                    {
+                        moves.Add(new PieceCategoryMoveRule(
+                            table.Key,
+                            entry.SourcePieceTable,
+                            entry.Category));
+                    }
+                }
+            }
+        }
+
+        return moves;
     }
 
     private static HashSet<string> GetActiveRemovedPieces()
@@ -2715,39 +2904,60 @@ internal static class PieceOverrideManager
             .ToList();
     }
 
-    private static void ApplyPieceTableStructure(
+    private static void RestorePieceCategoryMoveBaselines()
+    {
+        foreach (KeyValuePair<GameObject, Piece.PieceCategory> baseline in PieceCategoryMoveBaselines.ToArray())
+        {
+            Piece? piece = baseline.Key ? baseline.Key.GetComponent<Piece>() : null;
+            if (piece != null)
+            {
+                piece.m_category = baseline.Value;
+            }
+        }
+
+        PieceCategoryMoveBaselines.Clear();
+    }
+
+    private static List<ResolvedPieceCategoryMove> ApplyPieceTableStructure(
         IReadOnlyDictionary<string, PieceTableAssignment> pieceTableAssignments,
         IReadOnlyDictionary<string, int> sortOrders,
-        IReadOnlyCollection<string> removedPieces)
+        IReadOnlyCollection<string> removedPieces,
+        IReadOnlyList<PieceCategoryMoveRule> pieceCategoryMoves)
     {
         if (!PieceTablesReady)
         {
-            return;
+            return new List<ResolvedPieceCategoryMove>();
         }
 
+        List<PendingPieceCategoryMove> pendingCategoryMoves = ResolvePieceCategoryMoveTables(pieceCategoryMoves);
         bool shouldTouchPieceTables =
             pieceTableAssignments.Count > 0 ||
             removedPieces.Count > 0 ||
             sortOrders.Count > 0 ||
+            pieceCategoryMoves.Count > 0 ||
             PieceTableMembershipWasApplied ||
             PieceTableSortWasApplied;
         if (!shouldTouchPieceTables)
         {
-            return;
+            return new List<ResolvedPieceCategoryMove>();
         }
 
         HashSet<PieceTable> affectedTables = GetAffectedPieceTables(
             pieceTableAssignments,
             sortOrders,
             removedPieces,
+            pendingCategoryMoves,
             includePreviouslyTouchedTables: PieceTableMembershipWasApplied || PieceTableSortWasApplied);
         if (affectedTables.Count == 0)
         {
-            return;
+            return new List<ResolvedPieceCategoryMove>();
         }
 
         CapturePieceTableOrderBaselinesIfNeeded(affectedTables);
         RestorePieceTableMemberships(affectedTables);
+
+        List<ResolvedPieceCategoryMove> appliedCategoryMoves =
+            ApplyPieceCategoryMoves(pendingCategoryMoves, affectedTables, pieceTableAssignments);
 
         if (pieceTableAssignments.Count > 0)
         {
@@ -2762,7 +2972,7 @@ internal static class PieceOverrideManager
         if (sortOrders.Count == 0)
         {
             RefreshLocalBuildPieces();
-            return;
+            return appliedCategoryMoves;
         }
 
         foreach (PieceTable pieceTable in affectedTables)
@@ -2771,12 +2981,14 @@ internal static class PieceOverrideManager
         }
 
         RefreshLocalBuildPieces();
+        return appliedCategoryMoves;
     }
 
     private static HashSet<PieceTable> GetAffectedPieceTables(
         IReadOnlyDictionary<string, PieceTableAssignment> pieceTableAssignments,
         IReadOnlyDictionary<string, int> sortOrders,
         IReadOnlyCollection<string> removedPieces,
+        IReadOnlyCollection<PendingPieceCategoryMove> pieceCategoryMoves,
         bool includePreviouslyTouchedTables)
     {
         HashSet<PieceTable> affectedTables = new(ReferenceComparer<PieceTable>.Instance);
@@ -2803,6 +3015,12 @@ internal static class PieceOverrideManager
             AddPieceTableIfValid(affectedTables, target);
         }
 
+        foreach (PendingPieceCategoryMove move in pieceCategoryMoves)
+        {
+            AddPieceTableIfValid(affectedTables, move.Source);
+            AddPieceTableIfValid(affectedTables, move.Target);
+        }
+
         foreach (string pieceName in removedPieces.Concat(sortOrders.Keys))
         {
             GameObject? prefab = ResolvePiecePrefab(pieceName);
@@ -2818,6 +3036,132 @@ internal static class PieceOverrideManager
         }
 
         return affectedTables;
+    }
+
+    private static List<PendingPieceCategoryMove> ResolvePieceCategoryMoveTables(
+        IReadOnlyList<PieceCategoryMoveRule> rules)
+    {
+        List<PendingPieceCategoryMove> resolved = new();
+        Dictionary<PieceTable, HashSet<string>> claimedSourceCategories =
+            new(ReferenceComparer<PieceTable>.Instance);
+        foreach (PieceCategoryMoveRule rule in rules)
+        {
+            PieceTable? target = ResolvePieceTable(rule.TargetPieceTable);
+            if (target == null || IsIgnoredPieceTableName(rule.TargetPieceTable))
+            {
+                ReportPieceCategoryConfigurationIssue(
+                    $"move-target:{rule.TargetPieceTable}:{rule.Category}:{rule.SourcePieceTable}",
+                    $"pieceCategory.yml cannot move category '{rule.Category}': target piece table '{rule.TargetPieceTable}' was not found or is not supported.");
+                continue;
+            }
+
+            PieceTable? source = ResolvePieceTable(rule.SourcePieceTable);
+            if (source == null || IsIgnoredPieceTableName(rule.SourcePieceTable))
+            {
+                ReportPieceCategoryConfigurationIssue(
+                    $"move-source:{rule.TargetPieceTable}:{rule.Category}:{rule.SourcePieceTable}",
+                    $"pieceCategory.yml cannot move category '{rule.Category}': source piece table '{rule.SourcePieceTable}' was not found or is not supported.");
+                continue;
+            }
+
+            if (ReferenceEquals(source, target))
+            {
+                ReportPieceCategoryConfigurationIssue(
+                    $"move-same-table:{rule.TargetPieceTable}:{rule.Category}:{rule.SourcePieceTable}",
+                    $"pieceCategory.yml category '{rule.Category}' already uses piece table '{rule.TargetPieceTable}'; its move source was ignored.");
+                continue;
+            }
+
+            if (!claimedSourceCategories.TryGetValue(source, out HashSet<string>? claimedCategories))
+            {
+                claimedCategories = new HashSet<string>(StringComparer.Ordinal);
+                claimedSourceCategories[source] = claimedCategories;
+            }
+
+            if (!claimedCategories.Add(rule.Category))
+            {
+                ReportPieceCategoryConfigurationIssue(
+                    $"move-duplicate-source:{RuntimeHelpers.GetHashCode(source)}:{rule.Category}",
+                    $"pieceCategory.yml cannot move source category '{GetFriendlyPieceTableName(source)}.{rule.Category}' to more than one target; the later move was ignored.");
+                continue;
+            }
+
+            resolved.Add(new PendingPieceCategoryMove(target, source, rule.Category));
+        }
+
+        return resolved;
+    }
+
+    private static List<ResolvedPieceCategoryMove> ApplyPieceCategoryMoves(
+        IReadOnlyList<PendingPieceCategoryMove> moves,
+        IReadOnlyCollection<PieceTable> affectedTables,
+        IReadOnlyDictionary<string, PieceTableAssignment> explicitAssignments)
+    {
+        List<ResolvedPieceCategoryMove> applied = new();
+        foreach (PendingPieceCategoryMove move in moves)
+        {
+            if (!TryResolvePieceTableCategory(move.Source, move.CategoryName, out Piece.PieceCategory sourceCategory))
+            {
+                ReportPieceCategoryConfigurationIssue(
+                    $"move-category:{GetFriendlyPieceTableName(move.Target)}:{move.CategoryName}:{GetFriendlyPieceTableName(move.Source)}",
+                    $"pieceCategory.yml cannot move category '{move.CategoryName}': source piece table '{GetFriendlyPieceTableName(move.Source)}' has no exact matching category.");
+                continue;
+            }
+
+            Piece.PieceCategory targetCategory =
+                TryResolvePieceTableCategory(move.Target, move.CategoryName, out Piece.PieceCategory existingTargetCategory)
+                    ? existingTargetCategory
+                    : sourceCategory;
+            List<GameObject> matchingPieces = (move.Source.m_pieces ?? new List<GameObject>())
+                .Where(piecePrefab =>
+                {
+                    Piece? piece = piecePrefab ? piecePrefab.GetComponent<Piece>() : null;
+                    return piece != null && piece.m_category == sourceCategory;
+                })
+                .ToList();
+            if (matchingPieces.Count == 0)
+            {
+                ReportPieceCategoryConfigurationIssue(
+                    $"move-empty:{GetFriendlyPieceTableName(move.Target)}:{move.CategoryName}:{GetFriendlyPieceTableName(move.Source)}",
+                    $"pieceCategory.yml found no pieces in category '{move.CategoryName}' on source piece table '{GetFriendlyPieceTableName(move.Source)}'.");
+                continue;
+            }
+
+            foreach (GameObject piecePrefab in matchingPieces)
+            {
+                if (!piecePrefab)
+                {
+                    continue;
+                }
+
+                if (explicitAssignments.ContainsKey(GetPrefabName(piecePrefab)))
+                {
+                    continue;
+                }
+
+                Piece? piece = piecePrefab ? piecePrefab.GetComponent<Piece>() : null;
+                if (piece != null && piece.m_category != targetCategory)
+                {
+                    if (!PieceCategoryMoveBaselines.ContainsKey(piecePrefab!))
+                    {
+                        PieceCategoryMoveBaselines[piecePrefab!] = piece.m_category;
+                    }
+
+                    piece.m_category = targetCategory;
+                }
+
+                MovePiecePrefabToTable(piecePrefab!, move.Target, affectedTables);
+            }
+
+            applied.Add(new ResolvedPieceCategoryMove(
+                move.Target,
+                move.Source,
+                move.CategoryName,
+                sourceCategory,
+                targetCategory));
+        }
+
+        return applied;
     }
 
     private static void AddPieceTableIfValid(HashSet<PieceTable> pieceTables, PieceTable? pieceTable)
@@ -3228,6 +3572,52 @@ internal static class PieceOverrideManager
             }
         }
 
+        return false;
+    }
+
+    private static bool TryResolvePieceTableCategory(
+        PieceTable pieceTable,
+        string categoryName,
+        out Piece.PieceCategory category)
+    {
+        string exactName = categoryName.Trim();
+        HashSet<Piece.PieceCategory> checkedCategories = new();
+        List<Piece.PieceCategory>? categories = pieceTable ? pieceTable.m_categories : null;
+        List<string>? labels = pieceTable ? pieceTable.m_categoryLabels : null;
+        if (categories != null)
+        {
+            for (int index = 0; index < categories.Count; index++)
+            {
+                Piece.PieceCategory candidate = categories[index];
+                checkedCategories.Add(candidate);
+                string rawLabel = labels != null && index < labels.Count ? labels[index] ?? "" : "";
+                if (GetPieceCategoryReferenceName(candidate, rawLabel).Equals(exactName, StringComparison.Ordinal))
+                {
+                    category = candidate;
+                    return true;
+                }
+            }
+        }
+
+        if (pieceTable && pieceTable.m_pieces != null)
+        {
+            foreach (GameObject piecePrefab in pieceTable.m_pieces)
+            {
+                Piece? piece = piecePrefab ? piecePrefab.GetComponent<Piece>() : null;
+                if (piece == null || !checkedCategories.Add(piece.m_category))
+                {
+                    continue;
+                }
+
+                if (GetPieceCategoryReferenceName(piece.m_category, "").Equals(exactName, StringComparison.Ordinal))
+                {
+                    category = piece.m_category;
+                    return true;
+                }
+            }
+        }
+
+        category = Piece.PieceCategory.Misc;
         return false;
     }
 
@@ -4107,6 +4497,12 @@ internal static class PieceOverrideManager
             "# Generated by DataForge: detected piece category order and labels.",
             "# Do not edit this generated file directly. Copy the sections you want to control into pieceCategory.yml.",
             "# Category names are exact and case-sensitive. An optional second value is the displayed label or a $localization token.",
+            "# In pieceCategory.yml, '- Furniture: GB_Parchment_Tool' moves that entire source category into the destination section.",
+            "# Add a label before the colon to move and translate together: '- Furniture, $hud_furniture: GB_Parchment_Tool'.",
+            "# Exact destination category names merge, and individual pieces.yml pieceTable assignments have final priority.",
+            "# A plain category entry and one or more mappings may share the same destination category name.",
+            "# A source tool/category pair can move to only one destination tool.",
+            "# After moving all categories out of a source tool, use 'GB_Parchment_Tool: []' for its empty section.",
             "# Categories omitted from pieceCategory.yml remain after configured categories in their existing relative order.",
             "# Listing a category does not create or preserve an empty build tab.",
             "# When Homestead is installed, its owner-managed category is omitted and always remains last."
@@ -4695,19 +5091,72 @@ internal static class PieceOverrideManager
 
     private sealed class PieceCategoryOrderEntry
     {
-        internal PieceCategoryOrderEntry(string category, string? label)
+        internal PieceCategoryOrderEntry(string category, string? label, string? sourcePieceTable = null)
         {
             Category = category;
             Label = label;
+            SourcePieceTable = sourcePieceTable;
         }
 
         internal string Category { get; }
         internal string? Label { get; }
+        internal string? SourcePieceTable { get; }
 
         internal string ToSerializedValue()
         {
             return Label == null ? Category : $"{Category}, {Label}";
         }
+    }
+
+    private sealed class PieceCategoryMoveRule
+    {
+        internal PieceCategoryMoveRule(string targetPieceTable, string sourcePieceTable, string category)
+        {
+            TargetPieceTable = targetPieceTable;
+            SourcePieceTable = sourcePieceTable;
+            Category = category;
+        }
+
+        internal string TargetPieceTable { get; }
+        internal string SourcePieceTable { get; }
+        internal string Category { get; }
+    }
+
+    private sealed class PendingPieceCategoryMove
+    {
+        internal PendingPieceCategoryMove(PieceTable target, PieceTable source, string categoryName)
+        {
+            Target = target;
+            Source = source;
+            CategoryName = categoryName;
+        }
+
+        internal PieceTable Target { get; }
+        internal PieceTable Source { get; }
+        internal string CategoryName { get; }
+    }
+
+    private sealed class ResolvedPieceCategoryMove
+    {
+        internal ResolvedPieceCategoryMove(
+            PieceTable target,
+            PieceTable source,
+            string categoryName,
+            Piece.PieceCategory sourceCategory,
+            Piece.PieceCategory targetCategory)
+        {
+            Target = target;
+            Source = source;
+            CategoryName = categoryName;
+            SourceCategory = sourceCategory;
+            TargetCategory = targetCategory;
+        }
+
+        internal PieceTable Target { get; }
+        internal PieceTable Source { get; }
+        internal string CategoryName { get; }
+        internal Piece.PieceCategory SourceCategory { get; }
+        internal Piece.PieceCategory TargetCategory { get; }
     }
 
     private sealed class PieceTableNameComparer : IComparer<string>

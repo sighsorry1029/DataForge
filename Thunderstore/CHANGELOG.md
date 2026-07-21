@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.4
+
+- Added whole-category moves between build tools through `pieceCategory.yml`, including optional localized labels and exact-name merging into existing destination tabs.
+- Made category moves reversible, hid emptied source tabs, and kept individual `pieces.yml` `pieceTable` assignments as the final priority.
+- Improved category YAML validation to support one order/label entry plus multiple source mappings, reject ambiguous conflicts, and document explicit empty sections such as `GB_Parchment_Tool: []`.
+
 ## 1.1.3
 
 - Added `pieceCategory.yml` and `pieceCategory.reference.yml` for per-hammer category ordering and localized display labels.

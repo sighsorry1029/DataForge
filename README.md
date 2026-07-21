@@ -145,11 +145,16 @@ Example:
 ```yaml
 Hammer:
 - Misc
-- Furniture
+- Furniture, $hud_furniture
+- Furniture: GB_Parchment_Tool
+- Stone Building: GB_Parchment_Tool
 - ValheimCuisine, $df_piececategory_valheimcuisine
+GB_Parchment_Tool: []
 ```
 
-Category names are exact and case-sensitive. The optional second value is a literal tab label or a `$` localization token. Listed categories move first, while omitted categories keep their relative order afterward. This file does not create categories or preserve empty tabs; a dormant entry takes effect again when a matching piece appears.
+Category names are exact and case-sensitive. The optional second value is a literal tab label or a `$` localization token. A scalar entry controls order and label. A mapping such as `Furniture: GB_Parchment_Tool` moves every matching source-table piece into the destination table named by the surrounding section; adding `, $hud_furniture` before the colon applies the label at the same time. A plain category entry and multiple mappings may share a destination category, allowing several source tools to merge into one tab. Conflicting labels for that destination are rejected. An exact category already present at the destination is merged, while a missing category is added. A source tool/category pair can move to only one destination. Individual `pieces.yml` `pieceTable` assignments take final priority, and removing a category move restores baseline membership.
+
+Listed categories move first, while omitted categories keep their relative order afterward. Empty source categories created by a move are hidden and restored with the mapping. After moving every desired category out of a source tool, write `GB_Parchment_Tool: []` to leave that source section explicitly empty. The empty list alone does not move pieces. A plain dormant entry still does not create or preserve an empty build tab.
 
 When Homestead is installed, its `Homestead` category is owner-managed: DataForge omits it from `pieceCategory.reference.yml`, ignores it in `pieceCategory.yml`, and leaves it fixed at the end. `pieces.yml` also cannot assign pieces to that category.
 
