@@ -469,8 +469,9 @@ internal static class ItemOverrideManager
 
         try
         {
+            IReadOnlyList<long> entryLines = DataForgeLogContext.GetLocalTopLevelEntryLines(yaml, source);
             List<ItemEntry>? entries = Deserializer.Deserialize<List<ItemEntry>>(yaml);
-            return NormalizeEntries(entries, source);
+            return NormalizeEntries(entries, source, entryLines);
         }
         catch (Exception ex)
         {
@@ -478,7 +479,10 @@ internal static class ItemOverrideManager
         }
     }
 
-    private static List<ItemEntry> NormalizeEntries(List<ItemEntry>? entries, string source)
+    private static List<ItemEntry> NormalizeEntries(
+        List<ItemEntry>? entries,
+        string source,
+        IReadOnlyList<long> entryLines)
     {
         List<ItemEntry> normalized = new();
         if (entries == null)
@@ -490,7 +494,10 @@ internal static class ItemOverrideManager
         foreach (ItemEntry entry in entries)
         {
             entryIndex++;
-            string sourceContext = DataForgeLogContext.FormatSource(source, entryIndex);
+            string sourceContext = DataForgeLogContext.FormatSource(
+                source,
+                entryIndex,
+                DataForgeLogContext.GetEntryLine(entryLines, entryIndex));
             if (string.IsNullOrWhiteSpace(entry.Item))
             {
                 DataForgeLogContext.Warning($"{sourceContext}: Skipping item entry without item.");

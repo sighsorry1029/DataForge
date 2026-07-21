@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.5
+
+- Hardened server-synced localization across language changes, reconnects, world transitions, and live YAML reloads while preserving later token changes made by other mods.
+- Added strict validation and size limits to the versioned localization payload so invalid or excessive data keeps the last-known-good configuration.
+- Added source file and line numbers to server-side validation messages for item, recipe, piece, status-effect, and piece-category YAML.
+
 ## 1.1.4
 
 - Added whole-category moves between build tools through `pieceCategory.yml`, including optional localized labels and exact-name merging into existing destination tabs.

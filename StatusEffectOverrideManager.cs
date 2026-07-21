@@ -617,8 +617,9 @@ internal static class StatusEffectOverrideManager
 
         try
         {
+            IReadOnlyList<long> entryLines = DataForgeLogContext.GetLocalTopLevelEntryLines(yaml, source);
             List<StatusEffectEntry>? entries = Deserializer.Deserialize<List<StatusEffectEntry>>(yaml);
-            return NormalizeEntries(entries, source);
+            return NormalizeEntries(entries, source, entryLines);
         }
         catch (Exception ex)
         {
@@ -626,7 +627,10 @@ internal static class StatusEffectOverrideManager
         }
     }
 
-    private static List<StatusEffectEntry> NormalizeEntries(List<StatusEffectEntry>? entries, string source)
+    private static List<StatusEffectEntry> NormalizeEntries(
+        List<StatusEffectEntry>? entries,
+        string source,
+        IReadOnlyList<long> entryLines)
     {
         List<StatusEffectEntry> normalized = new();
         if (entries == null)
@@ -638,7 +642,10 @@ internal static class StatusEffectOverrideManager
         foreach (StatusEffectEntry entry in entries)
         {
             entryIndex++;
-            string sourceContext = DataForgeLogContext.FormatSource(source, entryIndex);
+            string sourceContext = DataForgeLogContext.FormatSource(
+                source,
+                entryIndex,
+                DataForgeLogContext.GetEntryLine(entryLines, entryIndex));
             if (string.IsNullOrWhiteSpace(entry.Effect))
             {
                 DataForgeLogContext.Warning($"{sourceContext}: Skipping status effect entry without effect.");

@@ -440,8 +440,9 @@ internal static class RecipeOverrideManager
 
         try
         {
+            IReadOnlyList<long> entryLines = DataForgeLogContext.GetLocalTopLevelEntryLines(yaml, source);
             List<RecipeEntry>? entries = Deserializer.Deserialize<List<RecipeEntry>>(yaml);
-            return NormalizeEntries(entries, source);
+            return NormalizeEntries(entries, source, entryLines);
         }
         catch (Exception ex)
         {
@@ -449,7 +450,10 @@ internal static class RecipeOverrideManager
         }
     }
 
-    private static List<RecipeEntry> NormalizeEntries(List<RecipeEntry>? entries, string source)
+    private static List<RecipeEntry> NormalizeEntries(
+        List<RecipeEntry>? entries,
+        string source,
+        IReadOnlyList<long> entryLines)
     {
         List<RecipeEntry> normalized = new();
         if (entries == null)
@@ -461,23 +465,23 @@ internal static class RecipeOverrideManager
         foreach (RecipeEntry entry in entries)
         {
             entryIndex++;
-            string sourceContext = DataForgeLogContext.FormatSource(source, entryIndex);
+            string sourceContext = DataForgeLogContext.FormatSource(
+                source,
+                entryIndex,
+                DataForgeLogContext.GetEntryLine(entryLines, entryIndex));
             if (string.IsNullOrWhiteSpace(entry.Recipe))
             {
                 DataForgeLogContext.Warning($"{sourceContext}: Skipping recipe entry without recipe.");
                 continue;
             }
 
-            using (DataForgeLogContext.Push(sourceContext))
+            if (!TryNormalizeRecipeHeader(entry.Recipe, out string normalizedRecipe, out string error))
             {
-                if (!TryNormalizeRecipeHeader(entry.Recipe, out string normalizedRecipe, out string error))
-                {
-                    DataForgeLogContext.Warning($"{sourceContext}: Skipping recipe entry '{entry.Recipe}'. {error}");
-                    continue;
-                }
-
-                entry.Recipe = normalizedRecipe;
+                DataForgeLogContext.Warning($"{sourceContext}: Skipping recipe entry '{entry.Recipe}'. {error}");
+                continue;
             }
+
+            entry.Recipe = normalizedRecipe;
             entry.SetLogContext($"{sourceContext} recipe={ToRecipeKey(entry.Recipe)}");
             normalized.Add(entry);
         }

@@ -14,7 +14,7 @@ namespace DataForge;
 public class DataForgePlugin : BaseUnityPlugin
 {
     internal const string ModName = "DataForge";
-    internal const string ModVersion = "1.1.4";
+    internal const string ModVersion = "1.1.5";
     internal const string Author = "sighsorry";
     internal const string ModGUID = $"{Author}.{ModName}";
 
@@ -231,7 +231,6 @@ public class DataForgePlugin : BaseUnityPlugin
         }
 
         _sourceOfTruthFileModeReady = false;
-        LocalizationOverrideManager.SetupFileWatcher();
         StatusEffectOverrideManager.SetupFileWatcher();
         ItemOverrideManager.SetupFileWatcher();
         RecipeOverrideManager.SetupFileWatcher();
@@ -246,12 +245,11 @@ public class DataForgePlugin : BaseUnityPlugin
         }
 
         _sourceOfTruthFileModeReady = true;
-        LocalizationOverrideManager.SetupFileWatcher();
+        LocalizationOverrideManager.EnsureSourceOfTruthFileMode();
         StatusEffectOverrideManager.SetupFileWatcher();
         ItemOverrideManager.SetupFileWatcher();
         RecipeOverrideManager.SetupFileWatcher();
         PieceOverrideManager.SetupFileWatcher();
-        LocalizationOverrideManager.ReloadFromDiskAndSync();
         StatusEffectOverrideManager.ReloadFromDiskAndSync();
         ItemOverrideManager.ReloadFromDiskAndSync();
         RecipeOverrideManager.ReloadFromDiskAndSync();

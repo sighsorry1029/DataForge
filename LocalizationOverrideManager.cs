@@ -2,9 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using BepInEx;
 using HarmonyLib;
 using ServerSync;
+using YamlDotNet.RepresentationModel;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -17,6 +19,13 @@ internal static class LocalizationOverrideManager
     private const string KoreanLanguageFileName = "Korean.yml";
     private const string SyncedPayloadKey = "localization";
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
+    private const int PayloadVersion = 1;
+    private const int MaxPayloadBytes = 2 * 1024 * 1024;
+    private const int MaxLanguageCount = 32;
+    private const int MaxLanguageNameLength = 64;
+    private const int MaxTokensPerLanguage = 8192;
+    private const int MaxTokenLength = 128;
+    private const int MaxTextLength = 4096;
     private static readonly (string Token, string Text)[] BuiltInEnglishTranslations =
     {
         ("$df_se_tooltip_attack_damage", "{0} attack damage: <color=orange>x{1}%</color>"),
@@ -33,91 +42,165 @@ internal static class LocalizationOverrideManager
     private static readonly object StateLock = new();
     private static readonly IDeserializer Deserializer = new DeserializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
+        .WithDuplicateKeyChecking()
         .Build();
     private static readonly ISerializer Serializer = new SerializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
         .DisableAliases()
         .Build();
 
-    private static LocalizationPayload ActivePayload = new();
+    private static LocalizationPayload ActivePayload = CreateEmptyPayload();
+    private static ConfigSync? ConfigSyncInstance;
     private static CustomSyncedValue<string>? SyncedPayload;
     private static FileSystemWatcher? Watcher;
     private static DataForgeFileWatcher.DebouncedAction? ReloadDebouncer;
     private static string? LastParsedPayload;
+    private static bool AwaitingRemotePayload;
+    private static bool LocalFileModeReady;
+    private static bool WatcherResetPending;
 
-    private static readonly Dictionary<string, Dictionary<string, string?>> OriginalTranslationsByLanguage =
-        new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, HashSet<string>> AppliedKeysByLanguage =
-        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, OriginalTranslation> OriginalTranslations =
+        new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, string> LastAppliedTranslations =
+        new(StringComparer.Ordinal);
     private static Localization? AppliedLocalization;
+    private static string AppliedLanguage = "";
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
     private static string LocalizationDirectory => Path.Combine(ConfigDirectory, DomainName);
+    private static bool HasLocalAuthority => ConfigSyncInstance?.IsSourceOfTruth == true;
 
     internal static void Initialize(ConfigSync configSync)
     {
+        ConfigSyncInstance = configSync;
         SyncedPayload = new CustomSyncedValue<string>(configSync, SyncedPayloadKey, "", priority: 100);
         SyncedPayload.ValueChanged += OnSyncedPayloadChanged;
+        configSync.SourceOfTruthChanged += OnSourceOfTruthChanged;
+        EnsureSourceOfTruthFileMode();
     }
 
     internal static void Dispose()
     {
+        RestoreAppliedTranslations();
         if (SyncedPayload != null)
         {
             SyncedPayload.ValueChanged -= OnSyncedPayloadChanged;
+            SyncedPayload = null;
+        }
+
+        if (ConfigSyncInstance != null)
+        {
+            ConfigSyncInstance.SourceOfTruthChanged -= OnSourceOfTruthChanged;
+            ConfigSyncInstance = null;
         }
 
         Watcher?.Dispose();
         Watcher = null;
         ReloadDebouncer?.Dispose();
         ReloadDebouncer = null;
+        AwaitingRemotePayload = false;
+        LocalFileModeReady = false;
+        WatcherResetPending = false;
+        lock (StateLock)
+        {
+            ActivePayload = CreateEmptyPayload();
+            LastParsedPayload = null;
+        }
     }
 
-    internal static void SetupFileWatcher()
+    internal static void EnsureSourceOfTruthFileMode()
     {
-        if (!DataForgePlugin.UsesLocalAuthorityFiles)
+        if (!HasLocalAuthority || LocalFileModeReady)
         {
+            return;
+        }
+
+        LocalFileModeReady = true;
+        try
+        {
+            SetupFileWatcher();
+            if (!ReloadFromDiskAndSync())
+            {
+                NotifyLocalizationChanged();
+            }
+        }
+        catch (Exception ex)
+        {
+            LocalFileModeReady = false;
             Watcher?.Dispose();
             Watcher = null;
             ReloadDebouncer?.Dispose();
             ReloadDebouncer = null;
+            DataForgePlugin.Log.LogError($"Failed to initialize server localization files: {ex}");
+        }
+    }
+
+    private static void SetupFileWatcher()
+    {
+        Watcher?.Dispose();
+        Watcher = null;
+        ReloadDebouncer?.Dispose();
+        ReloadDebouncer = null;
+        WatcherResetPending = false;
+        if (!HasLocalAuthority)
+        {
             return;
         }
 
         EnsureConfigDirectoryAndDefaultOverride();
-        Watcher?.Dispose();
-        ReloadDebouncer?.Dispose();
         ReloadDebouncer = DataForgeFileWatcher.CreateDebouncedAction(ReloadDelayTicks, ReloadYamlValues);
-        Watcher = DataForgeFileWatcher.Create(ConfigDirectory, "*.*", includeSubdirectories: true, ReadYamlValues);
+        CreateLocalizationWatcher();
     }
 
-    internal static void ReloadFromDiskAndSync()
+    private static void CreateLocalizationWatcher()
     {
-        if (!DataForgePlugin.UsesLocalAuthorityFiles)
+        Directory.CreateDirectory(LocalizationDirectory);
+        FileSystemWatcher watcher = new(LocalizationDirectory, "*.*")
         {
-            ApplySyncedPayload(SyncedPayload?.Value ?? "");
-            return;
+            IncludeSubdirectories = false,
+            SynchronizingObject = ThreadingHelper.SynchronizingObject
+        };
+        watcher.Changed += ReadYamlValues;
+        watcher.Created += ReadYamlValues;
+        watcher.Deleted += ReadYamlValues;
+        watcher.Renamed += (sender, args) => ReadYamlValues(sender, args);
+        watcher.Error += OnWatcherError;
+        watcher.EnableRaisingEvents = true;
+        Watcher = watcher;
+    }
+
+    private static bool ReloadFromDiskAndSync()
+    {
+        if (!HasLocalAuthority)
+        {
+            return false;
         }
 
         EnsureConfigDirectoryAndDefaultOverride();
         if (!TryLoadPayloadFromDisk(out LocalizationPayload payload))
         {
-            return;
+            return false;
         }
-        string serializedPayload = SerializePayload(payload);
+        if (!TrySerializeAndVerifyPayload(payload, out string serializedPayload, out LocalizationPayload verifiedPayload))
+        {
+            return false;
+        }
+
         lock (StateLock)
         {
-            ActivePayload = payload;
+            ActivePayload = verifiedPayload;
             LastParsedPayload = serializedPayload;
         }
 
         PublishPayload(serializedPayload);
         ApplyCurrentLocalization();
+        NotifyLocalizationChanged();
+        return true;
     }
 
     internal static void ApplyCurrentLocalization()
     {
-        Localization localization = Localization.instance;
+        Localization? localization = Localization.m_instance;
         if (localization == null)
         {
             return;
@@ -128,81 +211,66 @@ internal static class LocalizationOverrideManager
 
     internal static void ApplyCurrentLocalization(Localization localization, string? language)
     {
-        if (localization == null)
+        if (!IsLiveLocalization(localization))
         {
             return;
         }
 
-        EnsureLocalizationInstance(localization);
-
         string languageKey = NormalizeLanguage(language);
+        if (!ReferenceEquals(AppliedLocalization, localization) ||
+            !AppliedLanguage.Equals(languageKey, StringComparison.OrdinalIgnoreCase))
+        {
+            RestoreAppliedTranslations();
+            AppliedLocalization = localization;
+            AppliedLanguage = languageKey;
+        }
+
         Dictionary<string, string> translations;
         lock (StateLock)
         {
             translations = BuildTranslationsForLanguage(ActivePayload, languageKey);
         }
 
-        RestoreRemovedTranslations(localization, languageKey, translations.Keys);
+        bool changed = RestoreRemovedTranslations(localization, translations.Keys);
         foreach (KeyValuePair<string, string> translation in translations)
         {
-            ApplyTranslation(localization, languageKey, translation.Key, translation.Value);
+            changed |= ApplyTranslation(localization, translation.Key, translation.Value);
         }
 
-        AppliedKeysByLanguage[languageKey] = new HashSet<string>(translations.Keys, StringComparer.OrdinalIgnoreCase);
+        if (changed || translations.Count > 0)
+        {
+            localization.m_cache.EvictAll();
+        }
+    }
+
+    internal static void BeforeLanguageSetup(Localization localization)
+    {
+        if (IsLiveLocalization(localization))
+        {
+            RestoreAppliedTranslations(localization);
+        }
     }
 
     internal static void OnWorldShutdown()
     {
-        try
+        bool remoteClient = ConfigSyncInstance?.IsSourceOfTruth == false;
+        if (remoteClient)
         {
-            RestoreAppliedTranslations(AppliedLocalization);
+            AwaitingRemotePayload = true;
+            LocalFileModeReady = false;
+            ClearActivePayloadAndRestore();
         }
-        finally
+        else
         {
-            AppliedLocalization = null;
-            OriginalTranslationsByLanguage.Clear();
-            AppliedKeysByLanguage.Clear();
-            if (DataForgePlugin.IsRemoteServerClient)
-            {
-                lock (StateLock)
-                {
-                    ActivePayload = new LocalizationPayload();
-                    LastParsedPayload = null;
-                }
-            }
+            RestoreAppliedTranslations();
         }
     }
 
-    private static void EnsureLocalizationInstance(Localization localization)
+    private static bool IsLiveLocalization(Localization localization)
     {
-        if (ReferenceEquals(AppliedLocalization, localization))
-        {
-            return;
-        }
-
-        try
-        {
-            RestoreAppliedTranslations(AppliedLocalization);
-        }
-        catch (Exception ex)
-        {
-            DataForgePlugin.Log.LogDebug($"Could not restore translations from the previous Localization instance: {ex.Message}");
-        }
-        OriginalTranslationsByLanguage.Clear();
-        AppliedKeysByLanguage.Clear();
-        AppliedLocalization = localization;
-    }
-
-    private static void RestoreAppliedTranslations(Localization? localization)
-    {
-        if (localization == null)
-        {
-            return;
-        }
-
-        string languageKey = NormalizeLanguage(localization.GetSelectedLanguage());
-        RestoreRemovedTranslations(localization, languageKey, Array.Empty<string>());
-        AppliedKeysByLanguage.Remove(languageKey);
+        return localization != null &&
+               Localization.m_instance != null &&
+               ReferenceEquals(localization, Localization.m_instance);
     }
 
     private static void ReadYamlValues(object sender, FileSystemEventArgs e)
@@ -220,18 +288,50 @@ internal static class LocalizationOverrideManager
         try
         {
             DataForgePlugin.Log.LogDebug("Reloading localization YAML files...");
-            ReloadFromDiskAndSync();
-            DataForgePlugin.Log.LogInfo("Localization YAML reload complete.");
+            if (ReloadFromDiskAndSync())
+            {
+                DataForgePlugin.Log.LogInfo("Localization YAML reload complete.");
+            }
         }
         catch (Exception ex)
         {
             DataForgePlugin.Log.LogError($"Error reloading localization YAML files: {ex}");
         }
+        finally
+        {
+            if (WatcherResetPending && HasLocalAuthority)
+            {
+                WatcherResetPending = false;
+                try
+                {
+                    Watcher?.Dispose();
+                    Watcher = null;
+                    CreateLocalizationWatcher();
+                }
+                catch (Exception ex)
+                {
+                    DataForgePlugin.Log.LogError($"Failed to rebuild the localization file watcher: {ex}");
+                }
+            }
+        }
+    }
+
+    private static void OnWatcherError(object sender, ErrorEventArgs e)
+    {
+        if (!HasLocalAuthority)
+        {
+            return;
+        }
+
+        DataForgePlugin.Log.LogWarning(
+            $"Localization file watcher lost events and will be rebuilt: {e.GetException().Message}");
+        WatcherResetPending = true;
+        ReloadDebouncer?.Schedule();
     }
 
     private static bool ShouldReloadForFileEvent(FileSystemEventArgs e)
     {
-        if (!DataForgePlugin.UsesLocalAuthorityFiles)
+        if (!HasLocalAuthority)
         {
             return false;
         }
@@ -246,17 +346,51 @@ internal static class LocalizationOverrideManager
 
     private static void OnSyncedPayloadChanged()
     {
-        if (DataForgePlugin.UsesLocalAuthorityFiles)
+        if (HasLocalAuthority)
         {
             return;
         }
 
+        if (AwaitingRemotePayload)
+        {
+            DataForgePlugin.Log.LogDebug("Received the server localization payload after authority changed.");
+        }
+        AwaitingRemotePayload = false;
         string payload = SyncedPayload?.Value ?? "";
         ApplySyncedPayload(payload);
     }
 
+    private static void OnSourceOfTruthChanged(bool isSourceOfTruth)
+    {
+        LocalFileModeReady = false;
+        if (isSourceOfTruth)
+        {
+            AwaitingRemotePayload = false;
+            ClearActivePayloadAndRestore();
+            if (HasLocalAuthority)
+            {
+                EnsureSourceOfTruthFileMode();
+            }
+            else
+            {
+                NotifyLocalizationChanged();
+            }
+            return;
+        }
+
+        AwaitingRemotePayload = true;
+        Watcher?.Dispose();
+        Watcher = null;
+        ReloadDebouncer?.Dispose();
+        ReloadDebouncer = null;
+        WatcherResetPending = false;
+        ClearActivePayloadAndRestore();
+        NotifyLocalizationChanged();
+    }
+
     private static void ApplySyncedPayload(string payload)
     {
+        AwaitingRemotePayload = false;
         if (!string.Equals(LastParsedPayload, payload, StringComparison.Ordinal))
         {
             if (!TryDeserializePayload(payload, "synced localization payload", out LocalizationPayload localizationPayload))
@@ -272,6 +406,7 @@ internal static class LocalizationOverrideManager
         }
 
         ApplyCurrentLocalization();
+        NotifyLocalizationChanged();
     }
 
     private static void PublishPayload(string payload)
@@ -281,31 +416,49 @@ internal static class LocalizationOverrideManager
 
     private static LocalizationPayload LoadPayloadFromDisk()
     {
-        LocalizationPayload payload = new();
+        LocalizationPayload payload = CreateEmptyPayload();
 
         if (!Directory.Exists(LocalizationDirectory))
         {
             return payload;
         }
 
-        foreach (string file in Directory.GetFiles(LocalizationDirectory, "*.yml")
-                     .Concat(Directory.GetFiles(LocalizationDirectory, "*.yaml"))
-                     .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+        string[] files = Directory.GetFiles(LocalizationDirectory, "*.yml")
+            .Concat(Directory.GetFiles(LocalizationDirectory, "*.yaml"))
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (files.Length > MaxLanguageCount)
         {
-            string language = Path.GetFileNameWithoutExtension(file);
+            throw new InvalidDataException(
+                $"Localization contains {files.Length} language files; the limit is {MaxLanguageCount}.");
+        }
+
+        long totalBytes = 0;
+        HashSet<string> languages = new(StringComparer.OrdinalIgnoreCase);
+        foreach (string file in files)
+        {
+            FileInfo fileInfo = new(file);
+            totalBytes += fileInfo.Length;
+            if (fileInfo.Length > MaxPayloadBytes || totalBytes > MaxPayloadBytes)
+            {
+                throw new InvalidDataException(
+                    $"Localization files exceed the {MaxPayloadBytes}-byte safety limit.");
+            }
+
+            string language = Path.GetFileNameWithoutExtension(file).Trim();
+            if (language.Length == 0 || language.Length > MaxLanguageNameLength)
+            {
+                throw new InvalidDataException(
+                    $"Localization language names must contain from 1 to {MaxLanguageNameLength} characters.");
+            }
+            if (!languages.Add(language))
+            {
+                throw new InvalidDataException(
+                    $"Localization has more than one file for language '{language}' when compared case-insensitively.");
+            }
+
             Dictionary<string, string> translations = LoadTranslationMap(file, $"{language} localization");
-            if (translations.Count == 0)
-            {
-                continue;
-            }
-
-            if (!payload.Languages.TryGetValue(language, out Dictionary<string, string>? languageTranslations))
-            {
-                languageTranslations = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                payload.Languages[language] = languageTranslations;
-            }
-
-            MergeTranslations(languageTranslations, translations);
+            payload.Languages![language] = translations;
         }
 
         return payload;
@@ -321,7 +474,7 @@ internal static class LocalizationOverrideManager
         catch (Exception ex)
         {
             DataForgePlugin.Log.LogError($"Localization reload failed; keeping the last-known-good configuration. {ex.Message}");
-            payload = new LocalizationPayload();
+            payload = CreateEmptyPayload();
             return false;
         }
     }
@@ -330,19 +483,76 @@ internal static class LocalizationOverrideManager
     {
         if (!File.Exists(path))
         {
-            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            return new Dictionary<string, string>(StringComparer.Ordinal);
+        }
+        if (new FileInfo(path).Length > MaxPayloadBytes)
+        {
+            throw new InvalidDataException(
+                $"{source} exceeds the {MaxPayloadBytes}-byte safety limit.");
         }
 
         string yaml = File.ReadAllText(path);
         if (string.IsNullOrWhiteSpace(yaml))
         {
-            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            return new Dictionary<string, string>(StringComparer.Ordinal);
         }
 
         try
         {
-            Dictionary<string, string?>? map = Deserializer.Deserialize<Dictionary<string, string?>>(yaml);
-            return NormalizeTranslationMap(map, source);
+            YamlStream stream = new();
+            using StringReader reader = new(yaml);
+            stream.Load(reader);
+            if (stream.Documents.Count == 0)
+            {
+                return new Dictionary<string, string>(StringComparer.Ordinal);
+            }
+            if (stream.Documents.Count != 1)
+            {
+                throw new FormatException($"{source} must contain exactly one YAML document.");
+            }
+            if (stream.Documents[0].RootNode is not YamlMappingNode root)
+            {
+                throw new FormatException($"{source} must be a flat token-to-text mapping.");
+            }
+            if (root.Children.Count > MaxTokensPerLanguage)
+            {
+                throw new FormatException(
+                    $"{source} contains {root.Children.Count} tokens; the limit is {MaxTokensPerLanguage}.");
+            }
+
+            Dictionary<string, string> normalized = new(StringComparer.Ordinal);
+            HashSet<string> normalizedKeys = new(StringComparer.OrdinalIgnoreCase);
+            foreach (KeyValuePair<YamlNode, YamlNode> entry in root.Children)
+            {
+                if (entry.Key is not YamlScalarNode keyNode)
+                {
+                    throw new FormatException($"{source} has an invalid token: token keys must be scalar strings.");
+                }
+                if (!TryNormalizeToken(keyNode.Value, out string token, out string tokenError))
+                {
+                    throw new FormatException($"{source} has an invalid token: {tokenError}");
+                }
+                if (!normalizedKeys.Add(token))
+                {
+                    throw new FormatException(
+                        $"{source} has duplicate normalized token '{token}' when compared case-insensitively.");
+                }
+                if (entry.Value is not YamlScalarNode valueNode || string.IsNullOrEmpty(valueNode.Value))
+                {
+                    throw new FormatException(
+                        $"{source} token '{token}' must have a non-empty scalar string value.");
+                }
+
+                string text = valueNode.Value!;
+                if (text.Length > MaxTextLength)
+                {
+                    throw new FormatException(
+                        $"{source} token '{token}' exceeds the {MaxTextLength}-character text limit.");
+                }
+                normalized[token] = text;
+            }
+
+            return normalized;
         }
         catch (Exception ex)
         {
@@ -350,106 +560,137 @@ internal static class LocalizationOverrideManager
         }
     }
 
-    private static Dictionary<string, string> NormalizeTranslationMap(Dictionary<string, string?>? map, string source)
+    private static bool TrySerializeAndVerifyPayload(
+        LocalizationPayload payload,
+        out string serialized,
+        out LocalizationPayload verified)
     {
-        Dictionary<string, string> normalized = new(StringComparer.OrdinalIgnoreCase);
-        if (map == null)
+        serialized = "";
+        verified = CreateEmptyPayload();
+        try
         {
-            return normalized;
-        }
-
-        foreach (KeyValuePair<string, string?> pair in map)
-        {
-            string token = NormalizeToken(pair.Key);
-            if (token.Length == 0)
+            serialized = Serializer.Serialize(payload);
+            if (Encoding.UTF8.GetByteCount(serialized) > MaxPayloadBytes)
             {
-                DataForgePlugin.Log.LogWarning($"Skipping localization entry with an empty token in {source}.");
-                continue;
+                DataForgePlugin.Log.LogError(
+                    $"Localization payload exceeds the {MaxPayloadBytes}-byte safety limit; keeping the last-known-good configuration.");
+                return false;
             }
-
-            normalized[token] = pair.Value ?? "";
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogError($"Failed to serialize localization payload: {ex.Message}");
+            return false;
         }
 
-        return normalized;
+        return TryDeserializePayload(serialized, "local localization payload round-trip", out verified);
     }
 
-    private static string SerializePayload(LocalizationPayload payload)
+    private static bool TryDeserializePayload(string payload, string source, out LocalizationPayload localizationPayload)
     {
-        return Serializer.Serialize(payload);
-    }
-
-    private static LocalizationPayload DeserializePayload(string payload, string source)
-    {
+        localizationPayload = CreateEmptyPayload();
         if (string.IsNullOrWhiteSpace(payload))
         {
-            return new LocalizationPayload();
+            DataForgePlugin.Log.LogError($"{source} was rejected because the payload is empty.");
+            return false;
+        }
+        if (Encoding.UTF8.GetByteCount(payload) > MaxPayloadBytes)
+        {
+            DataForgePlugin.Log.LogError(
+                $"{source} was rejected because it exceeds the {MaxPayloadBytes}-byte safety limit.");
+            return false;
         }
 
         try
         {
             LocalizationPayload? parsed = Deserializer.Deserialize<LocalizationPayload>(payload);
-            return NormalizePayload(parsed, source);
-        }
-        catch (Exception ex)
-        {
-            throw new InvalidDataException($"Failed to parse {source}: {ex.Message}", ex);
-        }
-    }
-
-    private static bool TryDeserializePayload(string payload, string source, out LocalizationPayload localizationPayload)
-    {
-        try
-        {
-            localizationPayload = DeserializePayload(payload, source);
+            localizationPayload = NormalizePayload(parsed, source);
             return true;
         }
         catch (Exception ex)
         {
-            DataForgePlugin.Log.LogError($"Synced localization payload was rejected; keeping the last-known-good configuration. {ex.Message}");
-            localizationPayload = new LocalizationPayload();
+            DataForgePlugin.Log.LogError(
+                $"{source} was rejected; keeping the last-known-good configuration. {ex.Message}");
             return false;
         }
     }
 
     private static LocalizationPayload NormalizePayload(LocalizationPayload? payload, string source)
     {
-        LocalizationPayload normalized = new();
-        if (payload == null)
+        if (payload == null || payload.Version != PayloadVersion || payload.Languages == null)
         {
-            return normalized;
+            string actualVersion = payload == null ? "missing" : payload.Version.ToString();
+            throw new InvalidDataException(
+                $"{source} must have version {PayloadVersion} and a languages mapping; received version {actualVersion}.");
+        }
+        if (payload.Languages.Count > MaxLanguageCount)
+        {
+            throw new InvalidDataException(
+                $"{source} contains {payload.Languages.Count} languages; the limit is {MaxLanguageCount}.");
         }
 
-        MergeTranslations(normalized.All, NormalizeStringTranslationMap(payload.All, $"{source} common"));
-        foreach (KeyValuePair<string, Dictionary<string, string>> language in payload.Languages)
+        LocalizationPayload normalized = CreateEmptyPayload();
+        HashSet<string> languageNames = new(StringComparer.OrdinalIgnoreCase);
+        foreach (KeyValuePair<string, Dictionary<string, string>> languageEntry in payload.Languages)
         {
-            string languageName = NormalizeLanguage(language.Key);
-            if (languageName.Length == 0)
+            string language = languageEntry.Key?.Trim() ?? "";
+            if (language.Length == 0 || language.Length > MaxLanguageNameLength)
             {
-                continue;
+                throw new InvalidDataException(
+                    $"{source} language names must contain from 1 to {MaxLanguageNameLength} characters.");
+            }
+            if (!languageNames.Add(language))
+            {
+                throw new InvalidDataException(
+                    $"{source} has duplicate language '{language}' when compared case-insensitively.");
+            }
+            if (languageEntry.Value == null || languageEntry.Value.Count > MaxTokensPerLanguage)
+            {
+                string count = languageEntry.Value == null ? "null" : languageEntry.Value.Count.ToString();
+                throw new InvalidDataException(
+                    $"{source} language '{language}' has {count} tokens; the limit is {MaxTokensPerLanguage}.");
             }
 
-            normalized.Languages[languageName] = NormalizeStringTranslationMap(language.Value, $"{source} {languageName}");
+            Dictionary<string, string> translations = new(StringComparer.Ordinal);
+            HashSet<string> normalizedKeys = new(StringComparer.OrdinalIgnoreCase);
+            foreach (KeyValuePair<string, string> translation in languageEntry.Value)
+            {
+                if (!TryNormalizeToken(translation.Key, out string token, out string tokenError))
+                {
+                    throw new InvalidDataException(
+                        $"{source} language '{language}' has an invalid token: {tokenError}");
+                }
+                if (!normalizedKeys.Add(token))
+                {
+                    throw new InvalidDataException(
+                        $"{source} language '{language}' has duplicate normalized token '{token}' when compared case-insensitively.");
+                }
+                if (string.IsNullOrEmpty(translation.Value) || translation.Value.Length > MaxTextLength)
+                {
+                    throw new InvalidDataException(
+                        $"{source} language '{language}' token '{token}' must be non-empty and no longer than {MaxTextLength} characters.");
+                }
+                translations[token] = translation.Value;
+            }
+
+            normalized.Languages![language] = translations;
         }
 
         return normalized;
     }
 
-    private static Dictionary<string, string> NormalizeStringTranslationMap(Dictionary<string, string>? map, string source)
-    {
-        return NormalizeTranslationMap(map?.ToDictionary(pair => pair.Key, pair => (string?)pair.Value, StringComparer.OrdinalIgnoreCase), source);
-    }
-
     private static Dictionary<string, string> BuildTranslationsForLanguage(LocalizationPayload payload, string language)
     {
-        Dictionary<string, string> translations = new(StringComparer.OrdinalIgnoreCase);
-        MergeTranslations(translations, payload.All);
-        if (!language.Equals("English", StringComparison.OrdinalIgnoreCase) &&
+        Dictionary<string, string> translations = new(StringComparer.Ordinal);
+        if (payload.Languages != null &&
             payload.Languages.TryGetValue("English", out Dictionary<string, string>? englishTranslations))
         {
             MergeTranslations(translations, englishTranslations);
         }
 
-        if (payload.Languages.TryGetValue(language, out Dictionary<string, string>? languageTranslations))
+        if (!language.Equals("English", StringComparison.OrdinalIgnoreCase) &&
+            payload.Languages != null &&
+            payload.Languages.TryGetValue(language, out Dictionary<string, string>? languageTranslations))
         {
             MergeTranslations(translations, languageTranslations);
         }
@@ -461,70 +702,106 @@ internal static class LocalizationOverrideManager
     {
         foreach (KeyValuePair<string, string> pair in source)
         {
-            target[NormalizeToken(pair.Key)] = pair.Value;
+            target[pair.Key] = pair.Value;
         }
     }
 
-    private static void ApplyTranslation(Localization localization, string language, string token, string text)
+    private static bool ApplyTranslation(Localization localization, string token, string text)
     {
-        token = NormalizeToken(token);
-        if (token.Length == 0)
+        bool currentExists = localization.m_translations.TryGetValue(token, out string? current);
+        if (!OriginalTranslations.ContainsKey(token) ||
+            LastAppliedTranslations.TryGetValue(token, out string? lastApplied) &&
+            (!currentExists || !string.Equals(current, lastApplied, StringComparison.Ordinal)))
         {
-            return;
+            OriginalTranslations[token] = new OriginalTranslation(currentExists, current);
         }
 
-        Dictionary<string, string?> originalTranslations = GetOriginalTranslations(language);
-        if (!originalTranslations.ContainsKey(token))
-        {
-            originalTranslations[token] = localization.m_translations.TryGetValue(token, out string? originalText)
-                ? originalText
-                : null;
-        }
-
+        bool changed = !currentExists || !string.Equals(current, text, StringComparison.Ordinal);
         localization.m_translations[token] = text;
+        LastAppliedTranslations[token] = text;
+        return changed;
     }
 
-    private static void RestoreRemovedTranslations(
+    private static bool RestoreRemovedTranslations(
         Localization localization,
-        string language,
         IEnumerable<string> currentTokens)
     {
-        HashSet<string> current = new(currentTokens.Select(NormalizeToken), StringComparer.OrdinalIgnoreCase);
-        if (!AppliedKeysByLanguage.TryGetValue(language, out HashSet<string>? previous))
+        HashSet<string> current = new(currentTokens, StringComparer.Ordinal);
+        bool changed = false;
+        foreach (string token in LastAppliedTranslations.Keys.Where(token => !current.Contains(token)).ToArray())
         {
+            changed |= RestoreTranslationIfOwned(localization, token);
+            LastAppliedTranslations.Remove(token);
+            OriginalTranslations.Remove(token);
+        }
+
+        return changed;
+    }
+
+    private static void RestoreAppliedTranslations()
+    {
+        RestoreAppliedTranslations(AppliedLocalization);
+    }
+
+    private static void RestoreAppliedTranslations(Localization? localization)
+    {
+        if (localization == null)
+        {
+            ClearAppliedTranslationState();
             return;
         }
 
-        Dictionary<string, string?> originalTranslations = GetOriginalTranslations(language);
-        foreach (string token in previous.Where(token => !current.Contains(token)).ToArray())
+        bool changed = false;
+        foreach (string token in LastAppliedTranslations.Keys.ToArray())
         {
-            if (!originalTranslations.TryGetValue(token, out string? originalText))
-            {
-                continue;
-            }
-
-            if (originalText == null)
-            {
-                localization.m_translations.Remove(token);
-            }
-            else
-            {
-                localization.m_translations[token] = originalText;
-            }
-
-            originalTranslations.Remove(token);
+            changed |= RestoreTranslationIfOwned(localization, token);
         }
+        if (changed)
+        {
+            localization.m_cache.EvictAll();
+        }
+
+        ClearAppliedTranslationState();
     }
 
-    private static Dictionary<string, string?> GetOriginalTranslations(string language)
+    private static bool RestoreTranslationIfOwned(Localization localization, string token)
     {
-        if (!OriginalTranslationsByLanguage.TryGetValue(language, out Dictionary<string, string?>? translations))
+        if (!LastAppliedTranslations.TryGetValue(token, out string? lastApplied) ||
+            !localization.m_translations.TryGetValue(token, out string? current) ||
+            !string.Equals(current, lastApplied, StringComparison.Ordinal))
         {
-            translations = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-            OriginalTranslationsByLanguage[language] = translations;
+            return false;
         }
 
-        return translations;
+        if (OriginalTranslations.TryGetValue(token, out OriginalTranslation original) && original.Existed)
+        {
+            localization.m_translations[token] = original.Value ?? "";
+        }
+        else
+        {
+            localization.m_translations.Remove(token);
+        }
+
+        return true;
+    }
+
+    private static void ClearAppliedTranslationState()
+    {
+        AppliedLocalization = null;
+        AppliedLanguage = "";
+        OriginalTranslations.Clear();
+        LastAppliedTranslations.Clear();
+    }
+
+    private static void ClearActivePayloadAndRestore()
+    {
+        lock (StateLock)
+        {
+            ActivePayload = CreateEmptyPayload();
+            LastParsedPayload = null;
+        }
+
+        RestoreAppliedTranslations();
     }
 
     private static void EnsureConfigDirectoryAndDefaultOverride()
@@ -619,21 +896,22 @@ internal static class LocalizationOverrideManager
         IReadOnlyCollection<(string Token, string Text)> translations,
         string header)
     {
-        string yaml = File.ReadAllText(path);
-        Dictionary<string, string?> existing;
+        string yaml;
+        Dictionary<string, string> existing;
         try
         {
-            existing = Deserializer.Deserialize<Dictionary<string, string?>>(yaml) ??
-                       new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+            existing = LoadTranslationMap(path, $"built-in localization file '{Path.GetFileName(path)}'");
+            yaml = File.ReadAllText(path);
         }
         catch
         {
             return;
         }
 
-        HashSet<string> existingTokens = new(existing.Keys.Select(NormalizeToken), StringComparer.OrdinalIgnoreCase);
+        HashSet<string> existingTokens = new(existing.Keys, StringComparer.OrdinalIgnoreCase);
         List<(string Token, string Text)> missing = translations
-            .Where(entry => !existingTokens.Contains(NormalizeToken(entry.Token)))
+            .Where(entry => TryNormalizeToken(entry.Token, out string token, out _) &&
+                            !existingTokens.Contains(token))
             .ToList();
         if (missing.Count == 0)
         {
@@ -670,12 +948,36 @@ internal static class LocalizationOverrideManager
 
         string fullPath = Path.GetFullPath(path);
         string localizationRoot = Path.GetFullPath(LocalizationDirectory);
-        return fullPath.StartsWith(localizationRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        return string.Equals(
+            Path.GetDirectoryName(fullPath)?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            localizationRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string NormalizeToken(string token)
+    private static bool TryNormalizeToken(string? value, out string token, out string error)
     {
-        return (token ?? "").Trim().TrimStart('$').Trim();
+        token = value?.Trim() ?? "";
+        error = "";
+        if (token.StartsWith("$", StringComparison.Ordinal))
+        {
+            token = token.Substring(1);
+        }
+
+        if (token.Length == 0 || token.Length > MaxTokenLength)
+        {
+            error = $"token names must contain from 1 to {MaxTokenLength} characters after an optional leading '$'.";
+            return false;
+        }
+
+        const string tokenTerminators = " (){}[]+-!?/\\&%,.:-=<>\r\n\t";
+        if (token.IndexOf('$') >= 0 ||
+            token.Any(character => char.IsControl(character) || tokenTerminators.IndexOf(character) >= 0))
+        {
+            error = $"token '{token}' contains a character that terminates Valheim localization tokens.";
+            return false;
+        }
+
+        return true;
     }
 
     private static string NormalizeLanguage(string? language)
@@ -684,18 +986,101 @@ internal static class LocalizationOverrideManager
         return normalized.Length == 0 ? "English" : normalized;
     }
 
+    private static void NotifyLocalizationChanged()
+    {
+        if (Localization.m_instance == null || Localization.OnLanguageChange == null)
+        {
+            return;
+        }
+
+        foreach (Delegate subscriber in Localization.OnLanguageChange.GetInvocationList())
+        {
+            try
+            {
+                ((Action)subscriber)();
+            }
+            catch (Exception ex)
+            {
+                DataForgePlugin.Log.LogWarning(
+                    $"A localized UI subscriber failed after a DataForge localization update: {ex.Message}");
+            }
+        }
+    }
+
+    private static LocalizationPayload CreateEmptyPayload()
+    {
+        return new LocalizationPayload
+        {
+            Version = PayloadVersion,
+            Languages = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase)
+        };
+    }
+
+    private readonly struct OriginalTranslation
+    {
+        internal readonly bool Existed;
+        internal readonly string? Value;
+
+        internal OriginalTranslation(bool existed, string? value)
+        {
+            Existed = existed;
+            Value = value;
+        }
+    }
+
     internal sealed class LocalizationPayload
     {
-        public Dictionary<string, string> All { get; set; } = new(StringComparer.OrdinalIgnoreCase);
-        public Dictionary<string, Dictionary<string, string>> Languages { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        public int Version { get; set; }
+        public Dictionary<string, Dictionary<string, string>>? Languages { get; set; }
+    }
+}
+
+[HarmonyPatch(typeof(FejdStartup), nameof(FejdStartup.SetupGui))]
+internal static class DataForgeLocalizationFejdStartupPatch
+{
+    [HarmonyPriority(Priority.Last)]
+    private static void Postfix()
+    {
+        try
+        {
+            LocalizationOverrideManager.ApplyCurrentLocalization();
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogWarning(
+                $"Failed to apply DataForge localization to the startup UI: {ex.Message}");
+        }
     }
 }
 
 [HarmonyPatch(typeof(Localization), nameof(Localization.SetupLanguage))]
 internal static class DataForgeLocalizationSetupLanguagePatch
 {
+    [HarmonyPriority(Priority.First)]
+    private static void Prefix(Localization __instance)
+    {
+        try
+        {
+            LocalizationOverrideManager.BeforeLanguageSetup(__instance);
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogWarning(
+                $"Failed to prepare DataForge localization before a language change: {ex.Message}");
+        }
+    }
+
+    [HarmonyPriority(Priority.Last)]
     private static void Postfix(Localization __instance, string language)
     {
-        LocalizationOverrideManager.ApplyCurrentLocalization(__instance, language);
+        try
+        {
+            LocalizationOverrideManager.ApplyCurrentLocalization(__instance, language);
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogWarning(
+                $"Failed to apply DataForge localization for '{language}': {ex.Message}");
+        }
     }
 }
