@@ -241,6 +241,11 @@ internal static class ReferenceDefaultRules
             return IsDefaultFloatTuple(value, 0f, 0f, 0f);
         }
 
+        if (propertyName.Equals("MaxStats", StringComparison.OrdinalIgnoreCase))
+        {
+            return IsDefaultFloatTuple(value, 0f, 0f, 0f);
+        }
+
         if (propertyName.Equals("SpawnOnHit", StringComparison.OrdinalIgnoreCase))
         {
             return IsDefaultSpawnOnHitTuple(value);

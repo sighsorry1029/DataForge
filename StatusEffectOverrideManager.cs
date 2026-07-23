@@ -26,7 +26,8 @@ internal static class StatusEffectOverrideManager
     private const string ItemIconPrefix = "item:";
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
     private const string ReferenceStateKey = "effects";
-    private const string ReferenceLogicVersion = "2026-07-07-effect-reference-state-v3";
+    private const string ReferenceLogicVersion = "2026-07-23-effect-reference-state-v6";
+    private const string MagicPluginAssemblyName = "MagicPlugin";
 
     private static readonly object StateLock = new();
     private static readonly Dictionary<string, StatusEffectDefinition> Baselines = new(StringComparer.OrdinalIgnoreCase);
@@ -38,6 +39,7 @@ internal static class StatusEffectOverrideManager
     private static readonly HashSet<string> CreatedClones = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, StatusEffect> CreatedCloneEffects = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> RuntimeAppliedEffectKeys = new(StringComparer.OrdinalIgnoreCase);
+    private static Dictionary<string, MaxStatsBonus> ActiveMaxStats = new(StringComparer.OrdinalIgnoreCase);
     private static readonly MethodInfo? LoadImageMethod = ResolveLoadImageMethod();
     private static readonly IDeserializer Deserializer = new DeserializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
@@ -256,6 +258,83 @@ internal static class StatusEffectOverrideManager
                 entry.HasDefinition &&
                 string.Equals(NormalizeStatusEffectName(entry.Effect), normalized, StringComparison.OrdinalIgnoreCase));
         }
+    }
+
+    internal static bool HasConfiguredMaxStats(string? effectName)
+    {
+        if (!DataForgePlugin.StatusEffectOverridesEnabled || string.IsNullOrWhiteSpace(effectName))
+        {
+            return false;
+        }
+
+        Dictionary<string, MaxStatsBonus> maxStats = ActiveMaxStats;
+        return maxStats.ContainsKey(NormalizeStatusEffectName(effectName));
+    }
+
+    internal static void ApplyActiveMaxStats(Player player, ref float health, ref float stamina, ref float eitr)
+    {
+        if (!DataForgePlugin.StatusEffectOverridesEnabled || player == null)
+        {
+            return;
+        }
+
+        Dictionary<string, MaxStatsBonus> maxStats = ActiveMaxStats;
+        if (maxStats.Count == 0)
+        {
+            return;
+        }
+
+        SEMan seMan = player.GetSEMan();
+        if (seMan == null)
+        {
+            return;
+        }
+
+        float healthBonus = 0f;
+        float staminaBonus = 0f;
+        float eitrBonus = 0f;
+        foreach (StatusEffect statusEffect in seMan.GetStatusEffects())
+        {
+            if (statusEffect == null ||
+                !maxStats.TryGetValue(NormalizeStatusEffectName(statusEffect.name), out MaxStatsBonus bonus))
+            {
+                continue;
+            }
+
+            healthBonus += bonus.Health;
+            staminaBonus += bonus.Stamina;
+            eitrBonus += bonus.Eitr;
+        }
+
+        health = Mathf.Max(1f, health + healthBonus);
+        stamina = Mathf.Max(0f, stamina + staminaBonus);
+        eitr = Mathf.Max(0f, eitr + eitrBonus);
+    }
+
+    internal static bool TryGetConfiguredMaxStats(
+        StatusEffect statusEffect,
+        out float health,
+        out float stamina,
+        out float eitr)
+    {
+        health = 0f;
+        stamina = 0f;
+        eitr = 0f;
+        if (!DataForgePlugin.StatusEffectOverridesEnabled || statusEffect == null)
+        {
+            return false;
+        }
+
+        Dictionary<string, MaxStatsBonus> maxStats = ActiveMaxStats;
+        if (!maxStats.TryGetValue(NormalizeStatusEffectName(statusEffect.name), out MaxStatsBonus bonus))
+        {
+            return false;
+        }
+
+        health = bonus.Health;
+        stamina = bonus.Stamina;
+        eitr = bonus.Eitr;
+        return true;
     }
 
     internal static void RefreshItemIconReferences()
@@ -503,9 +582,114 @@ internal static class StatusEffectOverrideManager
         return applied;
     }
 
-    private static string NormalizeStatusEffectName(string statusEffectName)
+    private static string NormalizeStatusEffectName(string? statusEffectName)
     {
         return (statusEffectName ?? "").Replace("(Clone)", "").Trim();
+    }
+
+    private static string? GetMagicPluginMaxStats(StatusEffect statusEffect)
+    {
+        if (!TryGetMagicPluginEitrField(statusEffect, out FieldInfo eitrField))
+        {
+            return null;
+        }
+
+        try
+        {
+            return eitrField.GetValue(statusEffect) is float eitr
+                ? FormatFloatTuple(0f, 0f, eitr)
+                : null;
+        }
+        catch (Exception exception)
+        {
+            DataForgePlugin.Log.LogDebug(
+                $"Could not read MagicPlugin max Eitr from '{statusEffect.name}': {exception.Message}");
+            return null;
+        }
+    }
+
+    private static StatsDefinition? GetMagicPluginStats(StatusEffect statusEffect)
+    {
+        if (!TryGetMagicPluginEitrRegenField(statusEffect, out FieldInfo eitrRegenField))
+        {
+            return null;
+        }
+
+        try
+        {
+            if (eitrRegenField.GetValue(statusEffect) is not float eitrRegenPercent)
+            {
+                return null;
+            }
+
+            return new StatsDefinition
+            {
+                RegenMultiplier = FormatFloatTuple(1f, 1f, 1f + eitrRegenPercent / 100f)
+            };
+        }
+        catch (Exception exception)
+        {
+            DataForgePlugin.Log.LogDebug(
+                $"Could not read MagicPlugin Eitr regen from '{statusEffect.name}': {exception.Message}");
+            return null;
+        }
+    }
+
+    private static StatsDefinition? GetStatsDefinition(StatusEffect statusEffect)
+    {
+        StatsDefinition? definition = statusEffect is SE_Stats stats
+            ? StatsDefinition.From(stats)
+            : GetMagicPluginStats(statusEffect);
+        string? maxStats = GetMagicPluginMaxStats(statusEffect);
+        if (maxStats != null)
+        {
+            definition ??= new StatsDefinition();
+            definition.MaxStats = maxStats;
+        }
+
+        return definition;
+    }
+
+    internal static bool IsMagicPluginMaxStatsEffect(StatusEffect statusEffect)
+    {
+        return statusEffect != null && TryGetMagicPluginEitrField(statusEffect, out _);
+    }
+
+    private static bool TryGetMagicPluginEitrField(StatusEffect statusEffect, out FieldInfo eitrField)
+    {
+        return TryGetMagicPluginFloatField(statusEffect, "m_eitr", out eitrField);
+    }
+
+    private static bool TryGetMagicPluginEitrRegenField(StatusEffect statusEffect, out FieldInfo eitrRegenField)
+    {
+        return TryGetMagicPluginFloatField(statusEffect, "m_eitrRegen", out eitrRegenField);
+    }
+
+    private static bool TryGetMagicPluginFloatField(
+        StatusEffect statusEffect,
+        string fieldName,
+        out FieldInfo field)
+    {
+        field = null!;
+        Type effectType = statusEffect.GetType();
+        if (!string.Equals(
+                effectType.Assembly.GetName().Name,
+                MagicPluginAssemblyName,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        FieldInfo? candidate = effectType.GetField(
+            fieldName,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (candidate?.FieldType != typeof(float))
+        {
+            return false;
+        }
+
+        field = candidate;
+        return true;
     }
 
     private static void ReadYamlValues(object sender, FileSystemEventArgs e)
@@ -589,6 +773,29 @@ internal static class StatusEffectOverrideManager
     {
         EntryChanges.SetEntries(entries);
         ActiveEntries = entries;
+        ActiveMaxStats = BuildMaxStatsOverrides(entries);
+    }
+
+    private static Dictionary<string, MaxStatsBonus> BuildMaxStatsOverrides(IEnumerable<StatusEffectEntry> entries)
+    {
+        Dictionary<string, MaxStatsBonus> maxStats = new(StringComparer.OrdinalIgnoreCase);
+        foreach (StatusEffectEntry entry in entries)
+        {
+            if (!entry.Override || entry.Stats?.MaxStats == null)
+            {
+                continue;
+            }
+
+            using (DataForgeLogContext.Push(entry.LogContext))
+            {
+                if (TryParseMaxStats(entry.Stats.MaxStats, out MaxStatsBonus bonus))
+                {
+                    maxStats[NormalizeStatusEffectName(entry.Effect)] = bonus;
+                }
+            }
+        }
+
+        return maxStats;
     }
 
     private static List<StatusEffectEntry> FilterEntries(List<StatusEffectEntry> entries, HashSet<string>? effectKeys)
@@ -745,12 +952,15 @@ internal static class StatusEffectOverrideManager
             "#   repeatMessageType: TopLeft            # TopLeft => show repeatMessage in the top-left feed.",
             "#   attributes: None                      # ColdResistance => grant that StatusAttribute flag.",
             "#   stats:",
+            "#     maxStats: 0, 0, 0                  # 25, 50, 75 => max health +25, stamina +50, eitr +75 while active; multiple effects stack.",
+            "#                                         # On a MagicPlugin effect, this replaces that effect's native max Eitr bonus instead of stacking.",
             "#     upFront: 0, 0, 0, 0                 # 50, 40, 25, 20 => instantly give 50 health, 40 stamina, 25 eitr, 20 adrenaline on start.",
             "#     healthPerTick: 0, 0, Undefined      # -5, 0.1, Poison => deal 5 Poison damage each existing effect tick, stopping below 10% health; hitType is mostly meaningful for damage, not healing.",
             "#     healthOverTime: 0, 0, 5             # 100, 20, 5 => heal 100 total health over 20s, every 5s.",
             "#     staminaOverTime: 0, 0, false        # 60, 10, false => restore 60 stamina over 10s; 0.5, 10, true => restore 50% max stamina over 10s.",
             "#     eitrOverTime: 0, 0                  # 60, 6 => restore 60 eitr over 6s.",
             "#     regenMultiplier: 1, 1, 1            # 1.5, 0.5, 0 => health regen +50%, stamina regen x0.5, eitr regen disabled.",
+            "#                                         # MagicPlugin's custom Eitr regen effects use the third value too: 1.2 means +20%.",
             "#     staminaDrainPerSec: 0               # 2 => drain 2 stamina per second.",
             "#     adrenalineModifier: 0               # 0.25 => adrenaline gain/use value +25%.",
             "#     speedModifier: 0                    # 0.2 => movement speed +20%.",
@@ -820,9 +1030,6 @@ internal static class StatusEffectOverrideManager
             "#   rested:",
             "#     baseTtl: 0                          # 480 => rested starts at 8 minutes.",
             "#     ttlPerComfortLevel: 0               # 60 => each comfort level adds 60 seconds.",
-            "#   healthUpgrade:",
-            "#     moreHealth: 0                       # 25 => max/current health +25 while active.",
-            "#     moreStamina: 0                      # 25 => max/current stamina +25 while active.",
             "#",
             "# Example:",
             "# - effect: Rested",
@@ -1132,6 +1339,8 @@ internal static class StatusEffectOverrideManager
 
     private static void ApplyDefinition(StatusEffect statusEffect, StatusEffectDefinition definition, bool applyEffectLists = true)
     {
+        ApplyMagicPluginMaxStats(statusEffect, definition.Stats?.MaxStats);
+        ApplyMagicPluginEitrRegen(statusEffect, definition.Stats);
         ApplyBase(statusEffect, definition.Base, applyEffectLists);
 
         if (statusEffect is SE_Stats stats)
@@ -1162,14 +1371,12 @@ internal static class StatusEffectOverrideManager
             ApplyRested(rested, definition.Rested);
         }
 
-        if (statusEffect is SE_HealthUpgrade healthUpgrade)
-        {
-            ApplyHealthUpgrade(healthUpgrade, definition.HealthUpgrade);
-        }
     }
 
     private static void ApplyLiveSafeDefinition(StatusEffect statusEffect, StatusEffectDefinition definition)
     {
+        ApplyMagicPluginMaxStats(statusEffect, definition.Stats?.MaxStats);
+        ApplyMagicPluginEitrRegen(statusEffect, definition.Stats);
         ApplyLiveSafeBase(statusEffect, definition.Base);
 
         if (statusEffect is SE_Stats stats)
@@ -1178,6 +1385,93 @@ internal static class StatusEffectOverrideManager
             ApplyStaminaDrainModifier(stats, definition.StaminaDrainModifier);
             ApplyDamageTakenModifiers(stats.m_mods, definition.DamageTakenModifiers);
             ApplyDamage(stats.m_percentigeDamageModifiers, definition.PercentageDamageModifiers);
+        }
+    }
+
+    private static void ApplyMagicPluginMaxStats(StatusEffect statusEffect, string? value)
+    {
+        if (value == null ||
+            !TryGetMagicPluginEitrField(statusEffect, out FieldInfo eitrField) ||
+            !TryParseMaxStats(value, out MaxStatsBonus bonus))
+        {
+            return;
+        }
+
+        try
+        {
+            MethodInfo? setEitr = statusEffect.GetType().GetMethod(
+                "SetEitr",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                binder: null,
+                types: new[] { typeof(float) },
+                modifiers: null);
+            if (setEitr != null)
+            {
+                setEitr.Invoke(statusEffect, new object[] { bonus.Eitr });
+            }
+            else
+            {
+                eitrField.SetValue(statusEffect, bonus.Eitr);
+            }
+        }
+        catch (Exception exception)
+        {
+            DataForgeLogContext.Warning(
+                $"Could not apply MagicPlugin max Eitr to '{statusEffect.name}': {exception.GetBaseException().Message}");
+        }
+    }
+
+    private static void ApplyMagicPluginEitrRegen(StatusEffect statusEffect, StatsDefinition? definition)
+    {
+        if (definition?.RegenMultiplier == null ||
+            !TryGetMagicPluginEitrRegenField(statusEffect, out FieldInfo eitrRegenField))
+        {
+            return;
+        }
+
+        string[] parts = SplitTuple(definition.RegenMultiplier);
+        if (parts.Length > 3)
+        {
+            DataForgeLogContext.Warning(
+                $"Could not parse regenMultiplier value '{definition.RegenMultiplier}'. Expected health, stamina, eitr.");
+            return;
+        }
+
+        if (!TryParseFloatPart(parts, 0, 1f, "regenMultiplier", out float healthMultiplier) ||
+            !TryParseFloatPart(parts, 1, 1f, "regenMultiplier", out float staminaMultiplier) ||
+            !TryParseFloatPart(parts, 2, 1f, "regenMultiplier", out float eitrMultiplier))
+        {
+            return;
+        }
+
+        if (!Mathf.Approximately(healthMultiplier, 1f) || !Mathf.Approximately(staminaMultiplier, 1f))
+        {
+            DataForgeLogContext.Warning(
+                $"'{statusEffect.name}' is a MagicPlugin Eitr regen effect; only the third regenMultiplier value is supported.");
+        }
+
+        float eitrRegenPercent = (Math.Max(0f, eitrMultiplier) - 1f) * 100f;
+        try
+        {
+            MethodInfo? setEitrRegen = statusEffect.GetType().GetMethod(
+                "SetEitrRegen",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                binder: null,
+                types: new[] { typeof(float) },
+                modifiers: null);
+            if (setEitrRegen != null)
+            {
+                setEitrRegen.Invoke(statusEffect, new object[] { eitrRegenPercent });
+            }
+            else
+            {
+                eitrRegenField.SetValue(statusEffect, eitrRegenPercent);
+            }
+        }
+        catch (Exception exception)
+        {
+            DataForgeLogContext.Warning(
+                $"Could not apply MagicPlugin Eitr regen to '{statusEffect.name}': {exception.GetBaseException().Message}");
         }
     }
 
@@ -1924,17 +2218,6 @@ internal static class StatusEffectOverrideManager
         Copy(definition.TtlPerComfortLevel, value => rested.m_TTLPerComfortLevel = Math.Max(0f, value));
     }
 
-    private static void ApplyHealthUpgrade(SE_HealthUpgrade healthUpgrade, HealthUpgradeDefinition? definition)
-    {
-        if (definition == null)
-        {
-            return;
-        }
-
-        Copy(definition.MoreHealth, value => healthUpgrade.m_moreHealth = value);
-        Copy(definition.MoreStamina, value => healthUpgrade.m_moreStamina = value);
-    }
-
     private static void ApplyDamage(HitData.DamageTypes target, StatusDamageDefinition? damage)
     {
         if (damage == null)
@@ -2119,6 +2402,27 @@ internal static class StatusEffectOverrideManager
         assignFirst(first);
         assignSecond(second);
         assignThird?.Invoke(third);
+    }
+
+    private static bool TryParseMaxStats(string value, out MaxStatsBonus bonus)
+    {
+        bonus = default;
+        string[] parts = SplitTuple(value);
+        if (parts.Length > 3)
+        {
+            DataForgeLogContext.Warning($"Could not parse maxStats value '{value}'. Expected health, stamina, eitr.");
+            return false;
+        }
+
+        if (!TryParseFloatPart(parts, 0, 0f, "maxStats", out float health) ||
+            !TryParseFloatPart(parts, 1, 0f, "maxStats", out float stamina) ||
+            !TryParseFloatPart(parts, 2, 0f, "maxStats", out float eitr))
+        {
+            return false;
+        }
+
+        bonus = new MaxStatsBonus(health, stamina, eitr);
+        return true;
     }
 
     private static void CopyFloatTuple(string? value, Action<float> assignFirst, Action<float> assignSecond, Action<float> assignThird, Action<float> assignFourth, string fieldName, float defaultFirst, float defaultSecond, float defaultThird, float defaultFourth)
@@ -2388,7 +2692,6 @@ internal static class StatusEffectOverrideManager
         public ShieldStatusDefinition? Shield { get; set; }
         public FrostDefinition? Frost { get; set; }
         public RestedDefinition? Rested { get; set; }
-        public HealthUpgradeDefinition? HealthUpgrade { get; set; }
 
         internal void SetLogContext(string value)
         {
@@ -2404,8 +2707,7 @@ internal static class StatusEffectOverrideManager
             Poison != null ||
             Shield != null ||
             Frost != null ||
-            Rested != null ||
-            HealthUpgrade != null;
+            Rested != null;
 
         private bool HasBaseDefinition =>
             DisplayName != null ||
@@ -2437,8 +2739,7 @@ internal static class StatusEffectOverrideManager
                 Poison = Poison,
                 Shield = Shield,
                 Frost = Frost,
-                Rested = Rested,
-                HealthUpgrade = HealthUpgrade
+                Rested = Rested
             };
         }
 
@@ -2500,8 +2801,7 @@ internal static class StatusEffectOverrideManager
                 Poison = definition.Poison,
                 Shield = definition.Shield,
                 Frost = definition.Frost,
-                Rested = definition.Rested,
-                HealthUpgrade = definition.HealthUpgrade
+                Rested = definition.Rested
             };
         }
     }
@@ -2533,7 +2833,6 @@ internal static class StatusEffectOverrideManager
         public ShieldStatusDefinition? Shield { get; set; }
         public FrostDefinition? Frost { get; set; }
         public RestedDefinition? Rested { get; set; }
-        public HealthUpgradeDefinition? HealthUpgrade { get; set; }
 
         internal static StatusEffectReferenceEntry From(string name, StatusEffectDefinition definition)
         {
@@ -2547,8 +2846,7 @@ internal static class StatusEffectOverrideManager
                 Poison = definition.Poison,
                 Shield = definition.Shield,
                 Frost = definition.Frost,
-                Rested = definition.Rested,
-                HealthUpgrade = definition.HealthUpgrade
+                Rested = definition.Rested
             };
             entry.ApplyBase(ToReferenceBase(definition.Base));
             return ReferenceValue.ClonePruned(entry) ?? new StatusEffectReferenceEntry { Effect = name };
@@ -2608,22 +2906,20 @@ internal static class StatusEffectOverrideManager
         public ShieldStatusDefinition? Shield { get; set; }
         public FrostDefinition? Frost { get; set; }
         public RestedDefinition? Rested { get; set; }
-        public HealthUpgradeDefinition? HealthUpgrade { get; set; }
 
         internal static StatusEffectDefinition From(StatusEffect statusEffect)
         {
             return new StatusEffectDefinition
             {
                 Base = StatusEffectBaseDefinition.From(statusEffect),
-                Stats = statusEffect is SE_Stats stats ? StatsDefinition.From(stats) : null,
+                Stats = GetStatsDefinition(statusEffect),
                 StaminaDrainModifier = statusEffect is SE_Stats staminaStats ? StaminaDrainModifierDefinition.From(staminaStats) : null,
                 DamageTakenModifiers = statusEffect is SE_Stats damageTakenStats ? DamageTakenModifierDefinition.From(damageTakenStats.m_mods) : null,
                 PercentageDamageModifiers = statusEffect is SE_Stats percentageStats ? StatusDamageDefinition.From(percentageStats.m_percentigeDamageModifiers) : null,
                 Poison = statusEffect is SE_Poison poison ? PoisonDefinition.From(poison) : null,
                 Shield = statusEffect is SE_Shield shield ? ShieldStatusDefinition.From(shield) : null,
                 Frost = statusEffect is SE_Frost frost ? FrostDefinition.From(frost) : null,
-                Rested = statusEffect is SE_Rested rested ? RestedDefinition.From(rested) : null,
-                HealthUpgrade = statusEffect is SE_HealthUpgrade healthUpgrade ? HealthUpgradeDefinition.From(healthUpgrade) : null
+                Rested = statusEffect is SE_Rested rested ? RestedDefinition.From(rested) : null
             };
         }
     }
@@ -2672,6 +2968,7 @@ internal static class StatusEffectOverrideManager
 
     internal sealed class StatsDefinition
     {
+        public string? MaxStats { get; set; }
         public string? UpFront { get; set; }
         public string? HealthPerTick { get; set; }
         public string? HealthOverTime { get; set; }
@@ -2830,21 +3127,6 @@ internal static class StatusEffectOverrideManager
         }
     }
 
-    internal sealed class HealthUpgradeDefinition
-    {
-        public float? MoreHealth { get; set; }
-        public float? MoreStamina { get; set; }
-
-        internal static HealthUpgradeDefinition From(SE_HealthUpgrade healthUpgrade)
-        {
-            return new HealthUpgradeDefinition
-            {
-                MoreHealth = healthUpgrade.m_moreHealth,
-                MoreStamina = healthUpgrade.m_moreStamina
-            };
-        }
-    }
-
     internal sealed class StatusDamageDefinition
     {
         public float? Blunt { get; set; }
@@ -2911,6 +3193,20 @@ internal static class StatusEffectOverrideManager
     }
 
 
+    private readonly struct MaxStatsBonus
+    {
+        internal MaxStatsBonus(float health, float stamina, float eitr)
+        {
+            Health = health;
+            Stamina = stamina;
+            Eitr = eitr;
+        }
+
+        internal float Health { get; }
+        internal float Stamina { get; }
+        internal float Eitr { get; }
+    }
+
     private sealed class IconCacheEntry
     {
         public IconCacheEntry(DateTime lastWriteTimeUtc, Sprite sprite)
@@ -2924,6 +3220,57 @@ internal static class StatusEffectOverrideManager
     }
 }
 
+[HarmonyPatch(typeof(Player), nameof(Player.GetTotalFoodValue))]
+internal static class DataForgePlayerMaxStatsPatch
+{
+    [HarmonyPriority(Priority.Last)]
+    private static void Postfix(Player __instance, ref float hp, ref float stamina, ref float eitr)
+    {
+        StatusEffectOverrideManager.ApplyActiveMaxStats(__instance, ref hp, ref stamina, ref eitr);
+    }
+}
+
+[HarmonyPatch]
+internal static class DataForgeMagicPluginMaxStatsCompatibilityPatch
+{
+    private const string MagicPluginPlayerPatchType = "MagicPlugin.Patches.PlayerPatch";
+    private static MethodBase? SetEitrMethod;
+
+    private static bool Prepare()
+    {
+        Type? type = AccessTools.TypeByName(MagicPluginPlayerPatchType);
+        SetEitrMethod = type == null ? null : AccessTools.Method(type, "SetEitr");
+        return SetEitrMethod != null;
+    }
+
+    private static MethodBase TargetMethod()
+    {
+        return SetEitrMethod!;
+    }
+
+    [HarmonyPriority(Priority.First)]
+    private static bool Prefix(string __1)
+    {
+        return !StatusEffectOverrideManager.HasConfiguredMaxStats(__1);
+    }
+}
+
+[HarmonyPatch(typeof(StatusEffect), nameof(StatusEffect.GetTooltipString))]
+internal static class DataForgeStatusEffectMaxStatsTooltipPatch
+{
+    private static void Postfix(StatusEffect __instance, ref string __result)
+    {
+        try
+        {
+            DataForgeSeStatsTooltipPatch.AppendMaxStats(__instance, ref __result);
+        }
+        catch (Exception exception)
+        {
+            DataForgePlugin.Log.LogWarning($"Failed to append DataForge maxStats tooltip lines: {exception.Message}");
+        }
+    }
+}
+
 [HarmonyPatch(typeof(SE_Stats), nameof(SE_Stats.GetTooltipString))]
 internal static class DataForgeSeStatsTooltipPatch
 {
@@ -2931,6 +3278,12 @@ internal static class DataForgeSeStatsTooltipPatch
     private const string AttackDamageFallback = "{0} attack damage: <color=orange>x{1}%</color>";
     private const string RaiseSkillToken = "$df_se_tooltip_raise_skill";
     private const string RaiseSkillFallback = "{0} skill XP: <color=orange>{1}</color>";
+    private const string MaxHealthToken = "$df_se_tooltip_max_health";
+    private const string MaxHealthFallback = "Max health: <color=orange>{0}</color>";
+    private const string MaxStaminaToken = "$df_se_tooltip_max_stamina";
+    private const string MaxStaminaFallback = "Max stamina: <color=orange>{0}</color>";
+    private const string MaxEitrToken = "$df_se_tooltip_max_eitr";
+    private const string MaxEitrFallback = "Max eitr: <color=orange>{0}</color>";
 
     private static void Postfix(SE_Stats __instance, ref string __result)
     {
@@ -2959,10 +3312,40 @@ internal static class DataForgeSeStatsTooltipPatch
                         LocalizeSkill(__instance.m_raiseSkill),
                         FormatSignedPercent(__instance.m_raiseSkillModifier)));
             }
+
+            AppendMaxStats(__instance, ref __result);
         }
         catch (Exception exception)
         {
             DataForgePlugin.Log.LogWarning($"Failed to append DataForge status effect tooltip lines: {exception.Message}");
+        }
+    }
+
+    internal static void AppendMaxStats(StatusEffect statusEffect, ref string tooltip)
+    {
+        if (!StatusEffectOverrideManager.TryGetConfiguredMaxStats(
+                statusEffect,
+                out float health,
+                out float stamina,
+                out float eitr))
+        {
+            return;
+        }
+
+        if (!Mathf.Approximately(health, 0f))
+        {
+            AppendLine(ref tooltip, FormatLocalized(MaxHealthToken, MaxHealthFallback, FormatSignedNumber(health)));
+        }
+
+        if (!Mathf.Approximately(stamina, 0f))
+        {
+            AppendLine(ref tooltip, FormatLocalized(MaxStaminaToken, MaxStaminaFallback, FormatSignedNumber(stamina)));
+        }
+
+        if (!Mathf.Approximately(eitr, 0f) &&
+            !StatusEffectOverrideManager.IsMagicPluginMaxStatsEffect(statusEffect))
+        {
+            AppendLine(ref tooltip, FormatLocalized(MaxEitrToken, MaxEitrFallback, FormatSignedNumber(eitr)));
         }
     }
 
@@ -3020,6 +3403,11 @@ internal static class DataForgeSeStatsTooltipPatch
     private static string FormatSignedPercent(float modifier)
     {
         return (modifier * 100f).ToString("+0.###;-0.###;0", CultureInfo.InvariantCulture) + "%";
+    }
+
+    private static string FormatSignedNumber(float value)
+    {
+        return value.ToString("+0.###;-0.###;0", CultureInfo.InvariantCulture);
     }
 
     private static string FormatNumber(float value)

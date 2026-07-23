@@ -30,12 +30,18 @@ internal static class LocalizationOverrideManager
     {
         ("$df_se_tooltip_attack_damage", "{0} attack damage: <color=orange>x{1}%</color>"),
         ("$df_se_tooltip_raise_skill", "{0} skill XP: <color=orange>{1}</color>"),
+        ("$df_se_tooltip_max_health", "Max health: <color=orange>{0}</color>"),
+        ("$df_se_tooltip_max_stamina", "Max stamina: <color=orange>{0}</color>"),
+        ("$df_se_tooltip_max_eitr", "Max eitr: <color=orange>{0}</color>"),
         ("$df_skill_all", "All")
     };
     private static readonly (string Token, string Text)[] BuiltInKoreanTranslations =
     {
         ("$df_se_tooltip_attack_damage", "{0} 공격 피해: <color=orange>x{1}%</color>"),
         ("$df_se_tooltip_raise_skill", "{0} 기술 경험치: <color=orange>{1}</color>"),
+        ("$df_se_tooltip_max_health", "최대 체력: <color=orange>{0}</color>"),
+        ("$df_se_tooltip_max_stamina", "최대 스태미나: <color=orange>{0}</color>"),
+        ("$df_se_tooltip_max_eitr", "최대 에이트르: <color=orange>{0}</color>"),
         ("$df_skill_all", "전체")
     };
 
@@ -847,6 +853,9 @@ internal static class LocalizationOverrideManager
             "# Built-in DataForge tooltip tokens. You can edit these texts.",
             "$df_se_tooltip_attack_damage: \"{0} attack damage: <color=orange>x{1}%</color>\"",
             "$df_se_tooltip_raise_skill: \"{0} skill XP: <color=orange>{1}</color>\"",
+            "$df_se_tooltip_max_health: \"Max health: <color=orange>{0}</color>\"",
+            "$df_se_tooltip_max_stamina: \"Max stamina: <color=orange>{0}</color>\"",
+            "$df_se_tooltip_max_eitr: \"Max eitr: <color=orange>{0}</color>\"",
             "$df_skill_all: \"All\"",
             "#",
             "# Example item override:",
@@ -880,6 +889,9 @@ internal static class LocalizationOverrideManager
             "# DataForge 기본 툴팁 토큰입니다. 원하는 문구로 수정할 수 있습니다.",
             "$df_se_tooltip_attack_damage: \"{0} 공격 피해: <color=orange>x{1}%</color>\"",
             "$df_se_tooltip_raise_skill: \"{0} 기술 경험치: <color=orange>{1}</color>\"",
+            "$df_se_tooltip_max_health: \"최대 체력: <color=orange>{0}</color>\"",
+            "$df_se_tooltip_max_stamina: \"최대 스태미나: <color=orange>{0}</color>\"",
+            "$df_se_tooltip_max_eitr: \"최대 에이트르: <color=orange>{0}</color>\"",
             "$df_skill_all: \"전체\"",
             "#",
             "# 예시 item override:",

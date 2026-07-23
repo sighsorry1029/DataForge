@@ -11,10 +11,11 @@ using ServerSync;
 namespace DataForge;
 
 [BepInPlugin(ModGUID, ModName, ModVersion)]
+[BepInDependency("blacks7ar.MagicPlugin", BepInDependency.DependencyFlags.SoftDependency)]
 public class DataForgePlugin : BaseUnityPlugin
 {
     internal const string ModName = "DataForge";
-    internal const string ModVersion = "1.1.5";
+    internal const string ModVersion = "1.1.6";
     internal const string Author = "sighsorry";
     internal const string ModGUID = $"{Author}.{ModName}";
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.6
+
+- Added `stats.maxStats: health, stamina, eitr` for stackable maximum-stat bonuses on any active status effect, with localized tooltip lines and zero-value reference pruning.
+- Added MagicPlugin compatibility that maps native maximum-Eitr and Eitr-regeneration bonuses into `stats.maxStats` and `stats.regenMultiplier`, while preserving native behavior until explicitly overridden.
+- Removed the specialized `healthUpgrade` status-effect schema in favor of the generic `stats.maxStats` field.
+
 ## 1.1.5
 
 - Hardened server-synced localization across language changes, reconnects, world transitions, and live YAML reloads while preserving later token changes made by other mods.

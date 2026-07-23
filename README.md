@@ -173,9 +173,13 @@ Component example:
 
 ### Status Effects
 
-Status effects can be edited or cloned with compact fields for duration, cooldown, icons, messages, stats, skill modifiers, damage modifiers, and effect prefabs.
+Status effects can be edited or cloned with compact fields for duration, cooldown, icons, messages, maximum-stat bonuses, skill modifiers, damage modifiers, and effect prefabs.
 
-DataForge also adds tooltip lines for `attackDamage` and `raiseSkill`, using localization tokens from `localization/English.yml`.
+`stats.maxStats: health, stamina, eitr` adds maximum stats while the effect is active. Bonuses from different effects stack and remain stable through Valheim's food-stat recalculation. For MagicPlugin effects, an explicit `maxStats` replaces that effect's native maximum-Eitr bonus; omitting it preserves MagicPlugin behavior.
+
+MagicPlugin effects with a native Eitr-regeneration bonus use the existing `stats.regenMultiplier` field. DataForge converts MagicPlugin's percentage internally, so `regenMultiplier: 1, 1, 1.2` means `+20%` Eitr regeneration in both reference output and overrides.
+
+DataForge adds localized tooltip lines for `maxStats`, `attackDamage`, and `raiseSkill`, using tokens from `localization/English.yml`.
 
 Example:
 
@@ -184,6 +188,7 @@ Example:
   override: true
   time: 600, 0
   stats:
+    maxStats: 25, 0, 50
     regenMultiplier: 1, 1.5, 1
     raiseSkill: Swords, 1.0
     attackDamage: Swords, 1.25
