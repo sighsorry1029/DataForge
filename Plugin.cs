@@ -15,7 +15,7 @@ namespace DataForge;
 public class DataForgePlugin : BaseUnityPlugin
 {
     internal const string ModName = "DataForge";
-    internal const string ModVersion = "1.1.6";
+    internal const string ModVersion = "1.1.7";
     internal const string Author = "sighsorry";
     internal const string ModGUID = $"{Author}.{ModName}";
 
@@ -48,6 +48,7 @@ public class DataForgePlugin : BaseUnityPlugin
     private static ConfigEntry<Toggle> _enablePieceOverrides = null!;
     private static ConfigEntry<int> _stackableStackMultiplier = null!;
     private static ConfigEntry<float> _itemWeightMultiplier = null!;
+    private static ConfigEntry<UpgradeMaterialScalingMode> _upgradeMaterialScaling = null!;
     private static ConfigEntry<Toggle> _showPieceComfortInHammer = null!;
     private static ConfigEntry<Toggle> _highlightStationExtensionsInHammer = null!;
     private static ConfigEntry<Toggle> _ignoreStationExtensionSpacing = null!;
@@ -57,6 +58,13 @@ public class DataForgePlugin : BaseUnityPlugin
     {
         On = 1,
         Off = 0
+    }
+
+    public enum UpgradeMaterialScalingMode
+    {
+        Vanilla,
+        Flat,
+        Reduced
     }
 
     internal static bool IsSourceOfTruth => ConfigSync.IsSourceOfTruth;
@@ -81,6 +89,7 @@ public class DataForgePlugin : BaseUnityPlugin
     internal static bool PieceOverridesEnabled => _enablePieceOverrides.Value.IsOn();
     internal static int StackableStackMultiplier => Math.Min(10, Math.Max(1, _stackableStackMultiplier.Value));
     internal static float ItemWeightMultiplier => Math.Min(2f, Math.Max(0f, _itemWeightMultiplier.Value));
+    internal static UpgradeMaterialScalingMode UpgradeMaterialScaling => _upgradeMaterialScaling.Value;
     internal static bool ShowPieceComfortInHammer => _showPieceComfortInHammer.Value.IsOn();
     internal static bool HighlightStationExtensionsInHammer => _highlightStationExtensionsInHammer.Value.IsOn();
     internal static bool IgnoreStationExtensionSpacing => _ignoreStationExtensionSpacing.Value.IsOn();
@@ -150,6 +159,14 @@ public class DataForgePlugin : BaseUnityPlugin
                 new AcceptableValueRange<float>(0f, 2f)),
             order: 400);
         _itemWeightMultiplier.SettingChanged += (_, _) => ApplyConfigChange(ItemOverrideManager.ApplyCurrentConfiguration);
+
+        _upgradeMaterialScaling = ConfigEntry(
+            "2 - Misc",
+            "Upgrade Material Scaling",
+            UpgradeMaterialScalingMode.Vanilla,
+            "Controls standard per-level upgrade material costs globally. Vanilla uses amount x (target quality - 1), Flat always uses the configured upgrade amount, and Reduced uses ceil(amount x target quality / 2). Exact-quality requirements are unchanged.",
+            order: 350);
+        _upgradeMaterialScaling.SettingChanged += (_, _) => ApplyConfigChange(RecipeOverrideManager.RefreshComputedRequirementState);
 
         _showPieceComfortInHammer = ConfigEntry(
             "2 - Misc",
@@ -310,6 +327,7 @@ public class DataForgePlugin : BaseUnityPlugin
                 bool pieceOverridesEnabled = PieceOverridesEnabled;
                 int stackMultiplier = StackableStackMultiplier;
                 float weightMultiplier = ItemWeightMultiplier;
+                UpgradeMaterialScalingMode upgradeMaterialScaling = UpgradeMaterialScaling;
 
                 _configReloadInProgress = true;
                 try
@@ -337,6 +355,10 @@ public class DataForgePlugin : BaseUnityPlugin
                 if (recipeOverridesEnabled != RecipeOverridesEnabled)
                 {
                     RecipeOverrideManager.ApplyCurrentConfiguration();
+                }
+                else if (upgradeMaterialScaling != UpgradeMaterialScaling)
+                {
+                    RecipeOverrideManager.RefreshComputedRequirementState();
                 }
 
                 if (pieceOverridesEnabled != PieceOverridesEnabled)

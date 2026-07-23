@@ -93,6 +93,7 @@ DataForge supports:
 - recipe amount
 - recipe removal
 - one-of ingredient recipes
+- exact-quality upgrade materials used by ItemManager-style recipes
 - quality-based output bonus fields
 
 Example:
@@ -103,8 +104,13 @@ Example:
   craftingStation: forge, 2
   resources:
   - Iron: 20, 10
+  - SurtlingCore: 0, 5, 2
   - Wood: 5
 ```
+
+Resource tuples use `craft amount, upgrade amount, exact quality`. With two values, upgrade cost follows vanilla `(quality - 1)` scaling. A third value makes that upgrade amount apply only when upgrading to the specified quality, so `SurtlingCore: 0, 5, 2` requires five Surtling Cores only for quality 2.
+
+The synced `Upgrade Material Scaling` config can globally keep vanilla costs (`10 / 20 / 30`), flatten them (`10 / 10 / 10`), or use reduced scaling (`10 / 15 / 20`). Exact-quality requirements keep their explicitly configured amount.
 
 ### Pieces
 

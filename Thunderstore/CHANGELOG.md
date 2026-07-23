@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.7
+
+- Replaced the rarely used `extraAmountOnlyOneIngredient` recipe resource value with an exact-quality upgrade field, allowing requirements such as `SurtlingCore: 0, 5, 2`.
+- Added automatic reference and full-scaffold detection for exact-quality requirements supplied by compatible recipe frameworks.
+- Added the synced `Upgrade Material Scaling` setting with Vanilla, Flat, and Reduced modes while leaving exact-quality and custom-calculated requirements unchanged.
+
 ## 1.1.6
 
 - Added `stats.maxStats: health, stamina, eitr` for stackable maximum-stat bonuses on any active status effect, with localized tooltip lines and zero-value reference pruning.
