@@ -222,7 +222,6 @@ internal static class DataForgeOwnerResolver
     {
         HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
         AddIfNew(normalizedName);
-        AddIfNew(TrimCloneSuffix(normalizedName));
 
         int aliasSeparatorIndex = normalizedName.IndexOf(':');
         if (aliasSeparatorIndex > 0)
@@ -250,13 +249,6 @@ internal static class DataForgeOwnerResolver
         return (name ?? "").Replace("(Clone)", "").Trim();
     }
 
-    private static string TrimCloneSuffix(string name)
-    {
-        const string cloneSuffix = "(Clone)";
-        return name.EndsWith(cloneSuffix, StringComparison.Ordinal)
-            ? name.Substring(0, name.Length - cloneSuffix.Length).TrimEnd()
-            : name;
-    }
 }
 
 internal static class DataForgeVanillaAssetCatalog

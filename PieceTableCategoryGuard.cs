@@ -596,11 +596,32 @@ internal static class PieceTableCategoryGuard
 
     internal static void PruneCategoryIfUnused(PieceTable? pieceTable, Piece.PieceCategory category)
     {
-        if (!pieceTable ||
-            pieceTable.m_categories == null ||
-            IsCategoryUsed(pieceTable, category))
+        RemoveCategoryIfUnused(pieceTable, category, rememberForCurrentApply: true);
+    }
+
+    internal static bool RemoveOwnedCategoryIfUnused(PieceTable? pieceTable, Piece.PieceCategory category)
+    {
+        return RemoveCategoryIfUnused(pieceTable, category, rememberForCurrentApply: false);
+    }
+
+    private static bool RemoveCategoryIfUnused(
+        PieceTable? pieceTable,
+        Piece.PieceCategory category,
+        bool rememberForCurrentApply)
+    {
+        if (!pieceTable || pieceTable.m_categories == null)
         {
-            return;
+            return true;
+        }
+
+        if (IsCategoryUsed(pieceTable, category))
+        {
+            return false;
+        }
+
+        if (!pieceTable.m_categories.Contains(category))
+        {
+            return true;
         }
 
         CaptureCategorySnapshotIfNeeded(pieceTable);
@@ -616,13 +637,17 @@ internal static class PieceTableCategoryGuard
             string label = index < pieceTable.m_categoryLabels.Count
                 ? pieceTable.m_categoryLabels[index]
                 : GetLabel(category);
-            if (!TemporarilyPrunedCategories.TryGetValue(pieceTable, out List<RemovedCategorySlot>? slots))
+            if (rememberForCurrentApply)
             {
-                slots = new List<RemovedCategorySlot>();
-                TemporarilyPrunedCategories[pieceTable] = slots;
+                if (!TemporarilyPrunedCategories.TryGetValue(pieceTable, out List<RemovedCategorySlot>? slots))
+                {
+                    slots = new List<RemovedCategorySlot>();
+                    TemporarilyPrunedCategories[pieceTable] = slots;
+                }
+
+                slots.Add(new RemovedCategorySlot(index, category, label));
             }
 
-            slots.Add(new RemovedCategorySlot(index, category, label));
             pieceTable.m_categories.RemoveAt(index);
             if (index < pieceTable.m_categoryLabels.Count)
             {
@@ -637,6 +662,8 @@ internal static class PieceTableCategoryGuard
             NormalizationStamps.Remove(pieceTable);
             Normalize(pieceTable);
         }
+
+        return true;
     }
 
     private static bool IsCategoryUsed(PieceTable pieceTable, Piece.PieceCategory category)

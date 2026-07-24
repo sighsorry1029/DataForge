@@ -15,7 +15,7 @@ namespace DataForge;
 public class DataForgePlugin : BaseUnityPlugin
 {
     internal const string ModName = "DataForge";
-    internal const string ModVersion = "1.1.7";
+    internal const string ModVersion = "1.1.8";
     internal const string Author = "sighsorry";
     internal const string ModGUID = $"{Author}.{ModName}";
 
@@ -230,6 +230,7 @@ public class DataForgePlugin : BaseUnityPlugin
         _watcher = null;
         _configReloadDebouncer?.Dispose();
         _configReloadDebouncer = null;
+        DataForgeRuntimeCleanup.RunOnce();
         LocalizationOverrideManager.Dispose();
         StatusEffectOverrideManager.Dispose();
         ItemOverrideManager.Dispose();

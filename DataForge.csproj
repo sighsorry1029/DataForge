@@ -193,7 +193,7 @@
     <Target Name="KeyManager" AfterTargets="ILRepack" Condition="'$(AfterTargets)' == 'KeyManager'">
         <Seal DLL="$(TargetPath)"/>
     </Target>
-    <Target Name="GetAssemblyVersion" AfterTargets="$(AfterTargets)">
+    <Target Name="GetAssemblyVersion">
         <GetAssemblyIdentity AssemblyFiles="$(TargetPath)">
             <Output TaskParameter="Assemblies" ItemName="Targets"/>
         </GetAssemblyIdentity>
@@ -209,78 +209,84 @@
             <PackageName>$(AssemblyName)_v$(Major).$(Minor).$(Patch)</PackageName>
             <PackageVersion>$(Major).$(Minor).$(Patch)</PackageVersion>
             <VersionString>$(Major).$(Minor).$(Patch)</VersionString>
-            <PackageDir>$(ProjectDir)\Thunderstore\$(PackageName)</PackageDir>
+            <PackageStagingRoot Condition="'$(PackageStagingRoot)' == ''">$(IntermediateOutputPath)PackageStaging</PackageStagingRoot>
+            <ThunderstorePackageOutputDir Condition="'$(ThunderstorePackageOutputDir)' == ''">$(ProjectDir)Thunderstore</ThunderstorePackageOutputDir>
+            <NexusPackageOutputDir Condition="'$(NexusPackageOutputDir)' == ''">$(ProjectDir)Nexus</NexusPackageOutputDir>
+            <ThunderstorePackageStagingDir>$(PackageStagingRoot)\Thunderstore\$(PackageName)</ThunderstorePackageStagingDir>
+            <NexusPackageStagingDir>$(PackageStagingRoot)\Nexus\$(PackageName)</NexusPackageStagingDir>
+            <PackageArtifactStagingDir>$(PackageStagingRoot)\Artifacts</PackageArtifactStagingDir>
+            <ThunderstorePackageArtifact>$(PackageArtifactStagingDir)\Thunderstore\$(PackageName).zip</ThunderstorePackageArtifact>
+            <NexusPackageArtifact>$(PackageArtifactStagingDir)\Nexus\$(PackageName).zip</NexusPackageArtifact>
+            <ThunderstorePackageDestination>$(ThunderstorePackageOutputDir)\$(PackageName).zip</ThunderstorePackageDestination>
+            <NexusPackageDestination>$(NexusPackageOutputDir)\$(PackageName).zip</NexusPackageDestination>
+            <PowerShellExe Condition="'$(PowerShellExe)' == ''">powershell.exe</PowerShellExe>
         </PropertyGroup>
     </Target>
-    <Target Name="CopyOutputDLL" AfterTargets="GetAssemblyVersion">
+
+    <Target Name="DeployToGame" DependsOnTargets="Build">
         <Error Text="DLL not found in target directory." Condition="!Exists('$(TargetDir)$(AssemblyName).dll')"/>
+        <Error Text="CopyOutputDLLPath is not configured." Condition="'$(CopyOutputDLLPath)' == ''"/>
+        <Error Text="Configured game plugin directory '$(CopyOutputDLLPath)' does not exist." Condition="!Exists('$(CopyOutputDLLPath)')"/>
         <Copy SourceFiles="$(TargetDir)$(AssemblyName).dll" DestinationFolder="$(CopyOutputDLLPath)" OverwriteReadOnlyFiles="true"/>
         <Copy SourceFiles="$(TargetDir)$(AssemblyName).dll" DestinationFolder="$(CopyOutputDLLPath2)" OverwriteReadOnlyFiles="true" Condition="Exists('$(CopyOutputDLLPath2)')"/>
         <Copy SourceFiles="$(TargetDir)$(AssemblyName).dll" DestinationFolder="$(CopyOutputDLLPath3)" OverwriteReadOnlyFiles="true" Condition="Exists('$(CopyOutputDLLPath3)')"/>
     </Target>
-    <Target Name="CopyReadMeToTSFolder" AfterTargets="CopyOutputDLL" Condition=" ('$(Configuration)|$(Platform)' == 'Release|AnyCPU') And ('$(OS)' == 'Windows_NT') ">
-        <Warning Text="README.md not found in project directory. A default README.md file will be created for the Thunderstore package" Condition="!Exists('README.md')"/>
-        <WriteLinesToFile File="README.md" Lines="Default Readme file from one of Azumatt's Templates. Replace this with actual content." Overwrite="false" Condition="!Exists('README.md')"/>
-        <Copy SourceFiles="README.md" DestinationFolder="$(PackageDir)" OverwriteReadOnlyFiles="true"/>
-    </Target>
-    <UsingTask TaskName="WriteManifestFile" TaskFactory="CodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.v4.0.dll">
-        <ParameterGroup>
-            <ManifestFile ParameterType="System.String" Required="true"/>
-            <AssemblyName ParameterType="System.String" Required="true"/>
-        </ParameterGroup>
-        <Task>
-            <Code Type="Fragment" Language="cs">
-                <![CDATA[
-if (!System.IO.File.Exists(ManifestFile))
-{
-string content = @"{
-  ""name"": """ + AssemblyName + @""",
-  ""version_number"": ""1.0.0"",
-  ""website_url"": ""https://discord.gg/pdHgy6Bsng"",
-  ""description"": ""Your mod description goes here. Do not forget to replace the icon.png file with your own. Must be 256x256. Your Readme.md file will be copied from the one in your project folder."",
-  ""dependencies"": [
-    ""denikson-BepInExPack_Valheim-5.4.2105""
-]
-}";
-System.IO.File.WriteAllText(ManifestFile, content);
-}
-]]>
 
-            </Code>
-        </Task>
-    </UsingTask>
-    <Target Name="UpdateManifestVersion" AfterTargets="CopyReadMeToTSFolder" Condition=" ('$(Configuration)|$(Platform)' == 'Release|AnyCPU') And ('$(OS)' == 'Windows_NT') ">
-        <WriteManifestFile ManifestFile="$(ProjectDir)Thunderstore\manifest.json" AssemblyName="$(AssemblyName)"/>
-        <ItemGroup>
-            <ManifestFile Include="$(ProjectDir)Thunderstore\manifest.json"/>
-        </ItemGroup>
-        <Message Text="ManifestFile is @(ManifestFile)"/>
-        <Message Text="Updating version number in Thunderstore\manifest.json" Condition="Exists(@(ManifestFile))"/>
-        <Exec Command="powershell.exe -ExecutionPolicy Bypass -Command &quot;&amp; { &amp; '$(ProjectDir)UpdateManifest.ps1' -manifestFile '@(ManifestFile)' -versionString '$(PackageVersion)' }&quot;"/>
+    <Target Name="ValidatePackageReleaseInputs">
+        <Error Text="PackageRelease requires Configuration=Release." Condition="'$(Configuration)' != 'Release'"/>
+        <Error Text="README.md not found in project directory." Condition="!Exists('$(ProjectDir)README.md')"/>
+        <Error Text="Thunderstore manifest.json not found in project directory." Condition="!Exists('$(ProjectDir)Thunderstore\manifest.json')"/>
+        <Error Text="Thunderstore icon.png not found in project directory." Condition="!Exists('$(ProjectDir)Thunderstore\icon.png')"/>
+        <Error Text="Thunderstore CHANGELOG.md not found in project directory." Condition="!Exists('$(ProjectDir)Thunderstore\CHANGELOG.md')"/>
+        <Error Text="UpdateManifest.ps1 not found in project directory." Condition="!Exists('$(ProjectDir)UpdateManifest.ps1')"/>
     </Target>
-    <Target Name="MakeThunderstorePackage" AfterTargets="UpdateManifestVersion" Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-        <Error Text="manifest.json not found in Thunderstore directory." Condition="!Exists('$(ProjectDir)\Thunderstore\manifest.json')"/>
-        <Error Text="icon.png not found in Thunderstore directory. Please note that Thunderstore requires this image to be 256x256 in dimension" Condition="!Exists('$(ProjectDir)\Thunderstore\icon.png')"/>
+
+    <Target Name="PreparePackageStaging">
+        <Error Text="DLL not found in target directory." Condition="!Exists('$(TargetDir)$(AssemblyName).dll')"/>
+        <RemoveDir Directories="$(ThunderstorePackageStagingDir);$(NexusPackageStagingDir);$(PackageArtifactStagingDir)"/>
+        <MakeDir Directories="$(ThunderstorePackageStagingDir);$(NexusPackageStagingDir)"/>
         <ItemGroup>
-            <PackageFiles Include="$(TargetDir)$(AssemblyName).dll" Condition="Exists('$(TargetDir)$(AssemblyName).dll')"/>
-            <PackageFiles Include="$(ProjectDir)\Thunderstore\CHANGELOG.md" Condition="Exists('$(ProjectDir)\Thunderstore\CHANGELOG.md')"/>
-            <PackageFiles Include="$(ProjectDir)\Thunderstore\manifest.json" Condition="Exists('$(ProjectDir)\Thunderstore\manifest.json')"/>
-            <PackageFiles Include="$(ProjectDir)\Thunderstore\icon.png" Condition="Exists('$(ProjectDir)\Thunderstore\icon.png')"/>
+            <ThunderstorePackageFiles Include="$(TargetDir)$(AssemblyName).dll"/>
+            <ThunderstorePackageFiles Include="$(ProjectDir)README.md"/>
+            <ThunderstorePackageFiles Include="$(ProjectDir)Thunderstore\CHANGELOG.md"/>
+            <ThunderstorePackageFiles Include="$(ProjectDir)Thunderstore\manifest.json"/>
+            <ThunderstorePackageFiles Include="$(ProjectDir)Thunderstore\icon.png"/>
+            <NexusPackageFiles Include="$(TargetDir)$(AssemblyName).dll"/>
         </ItemGroup>
-        <MakeDir Directories="$(PackageDir)"/>
-        <Copy SourceFiles="@(PackageFiles)" DestinationFolder="$(PackageDir)"/>
-        <ZipDirectory SourceDirectory="$(PackageDir)" DestinationFile="Thunderstore\$(PackageName).zip" Overwrite="true"/>
-        <RemoveDir Directories="$(PackageDir)"/>
+        <Copy SourceFiles="@(ThunderstorePackageFiles)" DestinationFolder="$(ThunderstorePackageStagingDir)"/>
+        <Copy SourceFiles="@(NexusPackageFiles)" DestinationFolder="$(NexusPackageStagingDir)"/>
     </Target>
-    <Target Name="MakeNexusPackage" AfterTargets="MakeThunderstorePackage" Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
-        <MakeDir Directories="$(ProjectDir)\Nexus"/>
-        <ItemGroup>
-            <NexusPackageFiles Include="$(TargetDir)$(AssemblyName).dll;"/>
-        </ItemGroup>
-        <MakeDir Directories="$(PackageDir)"/>
-        <Copy SourceFiles="@(NexusPackageFiles)" DestinationFolder="$(PackageDir)"/>
-        <ZipDirectory SourceDirectory="$(PackageDir)" DestinationFile="Nexus\$(PackageName).zip" Overwrite="true"/>
-        <RemoveDir Directories="$(PackageDir)"/>
+
+    <Target Name="UpdateStagedManifestVersion">
+        <Message Text="Updating staged Thunderstore manifest to version $(PackageVersion)."/>
+        <Exec Command="&quot;$(PowerShellExe)&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(ProjectDir)UpdateManifest.ps1&quot; -Mode UpdateManifest -ManifestFile &quot;$(ThunderstorePackageStagingDir)\manifest.json&quot; -VersionString &quot;$(PackageVersion)&quot; -ExpectedName &quot;$(AssemblyName)&quot;"/>
+    </Target>
+
+    <Target Name="MakeThunderstorePackage">
+        <MakeDir Directories="$(PackageArtifactStagingDir)\Thunderstore"/>
+        <ZipDirectory SourceDirectory="$(ThunderstorePackageStagingDir)" DestinationFile="$(ThunderstorePackageArtifact)" Overwrite="true"/>
+    </Target>
+
+    <Target Name="MakeNexusPackage">
+        <MakeDir Directories="$(PackageArtifactStagingDir)\Nexus"/>
+        <ZipDirectory SourceDirectory="$(NexusPackageStagingDir)" DestinationFile="$(NexusPackageArtifact)" Overwrite="true"/>
+    </Target>
+
+    <Target Name="ValidateStagedPackages">
+        <Exec Command="&quot;$(PowerShellExe)&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(ProjectDir)UpdateManifest.ps1&quot; -Mode ValidatePackage -ManifestFile &quot;$(ThunderstorePackageStagingDir)\manifest.json&quot; -VersionString &quot;$(PackageVersion)&quot; -ExpectedName &quot;$(AssemblyName)&quot; -IconFile &quot;$(ThunderstorePackageStagingDir)\icon.png&quot; -ThunderstoreZip &quot;$(ThunderstorePackageArtifact)&quot; -NexusZip &quot;$(NexusPackageArtifact)&quot; -DllFileName &quot;$(AssemblyName).dll&quot;"/>
+    </Target>
+
+    <Target Name="PromotePackageRelease">
+        <Exec Command="&quot;$(PowerShellExe)&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(ProjectDir)UpdateManifest.ps1&quot; -Mode PromotePackages -ThunderstoreZip &quot;$(ThunderstorePackageArtifact)&quot; -NexusZip &quot;$(NexusPackageArtifact)&quot; -ThunderstoreDestination &quot;$(ThunderstorePackageDestination)&quot; -NexusDestination &quot;$(NexusPackageDestination)&quot;"/>
+    </Target>
+
+    <Target Name="CleanPackageStaging">
+        <RemoveDir Directories="$(ThunderstorePackageStagingDir);$(NexusPackageStagingDir);$(PackageArtifactStagingDir)"/>
+    </Target>
+
+    <Target Name="PackageRelease"
+            DependsOnTargets="ValidatePackageReleaseInputs;Build;GetAssemblyVersion;PreparePackageStaging;UpdateStagedManifestVersion;MakeThunderstorePackage;MakeNexusPackage;ValidateStagedPackages;PromotePackageRelease;CleanPackageStaging">
+        <Message Text="Created Thunderstore and Nexus packages for $(PackageName)." Importance="high"/>
     </Target>
 
 </Project>

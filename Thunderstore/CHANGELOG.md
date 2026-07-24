@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.8
+
+- **Breaking:** Removed item `visual.color` and `visual.emission`. Existing item YAML must remove these keys and select an existing donor with `visual.material` instead.
+- Hardened cloned-item and status-effect reloads by ordering clone dependencies, blocking cycles, rebinding dependent references, and deferring network-unsafe clone identity changes until the next world.
+- Made startup, shutdown, and world transitions fault-isolated and ownership-safe across overrides, localization, icons, and VNEI refreshes.
+- Improved piece reload cleanup and visual ownership so DataForge-managed components are removed only when unused and later visual changes made by other mods are preserved.
+- Corrected generated reference defaults, ObjectDB cache invalidation, and station-extension spacing behavior.
+- Reworked Thunderstore and Nexus packaging to stage, validate, and atomically promote release archives.
+
 ## 1.1.7
 
 - Replaced the rarely used `extraAmountOnlyOneIngredient` recipe resource value with an exact-quality upgrade field, allowing requirements such as `SurtlingCore: 0, 5, 2`.

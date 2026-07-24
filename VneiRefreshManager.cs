@@ -32,9 +32,50 @@ internal static class VneiRefreshManager
         PendingReason = "";
     }
 
-    internal static void RequestRefresh(string reason)
+    internal static void OnWorldShutdown()
+    {
+        PendingReason = "";
+        if (!Initialized)
+        {
+            return;
+        }
+
+        RefreshDebouncer?.Dispose();
+        RefreshDebouncer = DataForgeFileWatcher.CreateDebouncedAction(RefreshDelayTicks, RefreshNow);
+    }
+
+    internal static void InvalidateForNewWorld()
     {
         if (IsDedicatedServer())
+        {
+            return;
+        }
+
+        try
+        {
+            Type? indexingType = DataForgeVneiTypes.Get("VNEI.Logic.Indexing");
+            Type? recipeInfoType = DataForgeVneiTypes.Get("VNEI.Logic.RecipeInfo");
+            if (indexingType == null || recipeInfoType == null)
+            {
+                return;
+            }
+
+            ClearDictionaryProperty(indexingType, "Items");
+            ClearDictionaryProperty(indexingType, "ItemsByPreLocalizedName");
+            ClearDictionaryProperty(indexingType, "ItemsByLocalizedName");
+            ClearListProperty(recipeInfoType, "Recipes");
+            AccessTools.Field(indexingType, "currentKnownCount")?.SetValue(null, -1);
+            AccessTools.Field(indexingType, "currentShowOnlyKnown")?.SetValue(null, false);
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogWarning($"Could not invalidate the VNEI index for the new world: {ex.Message}");
+        }
+    }
+
+    internal static void RequestRefresh(string reason)
+    {
+        if (DataForgeWorldLifecycle.IsShuttingDown || IsDedicatedServer())
         {
             return;
         }
@@ -45,7 +86,7 @@ internal static class VneiRefreshManager
 
     private static void RefreshNow()
     {
-        if (IsDedicatedServer())
+        if (DataForgeWorldLifecycle.IsShuttingDown || IsDedicatedServer())
         {
             return;
         }
@@ -74,10 +115,18 @@ internal static class VneiRefreshManager
                 return;
             }
 
-            backup = ClearIndex(indexingType, recipeInfoType);
+            backup = new IndexBackup();
+            ClearIndex(indexingType, recipeInfoType, backup);
             VneiPrefabCleanupGuard.RemoveInvalidEntriesBeforeVnei();
             indexAllMethod.Invoke(null, Array.Empty<object>());
+            bool indexedAfterRefresh = (bool)(hasIndexedMethod.Invoke(null, Array.Empty<object>()) ?? false);
+            if (!indexedAfterRefresh)
+            {
+                throw new InvalidOperationException("VNEI IndexAll completed without producing an indexed state.");
+            }
+
             updateKnownMethod?.Invoke(null, Array.Empty<object>());
+            backup = null;
             DataForgePlugin.Log.LogInfo($"Refreshed VNEI index after DataForge {PendingReason} changes.");
         }
         catch (Exception ex)
@@ -91,16 +140,15 @@ internal static class VneiRefreshManager
         }
     }
 
-    private static IndexBackup ClearIndex(Type indexingType, Type recipeInfoType)
+    private static void ClearIndex(Type indexingType, Type recipeInfoType, IndexBackup backup)
     {
-        IndexBackup backup = new();
         ClearDictionaryProperty(indexingType, "Items", backup);
         ClearDictionaryProperty(indexingType, "ItemsByPreLocalizedName", backup);
         ClearDictionaryProperty(indexingType, "ItemsByLocalizedName", backup);
         ClearListProperty(recipeInfoType, "Recipes", backup);
-        AccessTools.Field(indexingType, "currentKnownCount")?.SetValue(null, -1);
-        AccessTools.Field(indexingType, "currentShowOnlyKnown")?.SetValue(null, false);
-        return backup;
+        SetStaticField(indexingType, "currentKnownCount", -1, backup);
+        SetStaticField(indexingType, "currentShowOnlyKnown", false, backup);
+        TrackPluginStationFields(backup);
     }
 
     private static void ClearDictionaryProperty(Type type, string name, IndexBackup backup)
@@ -112,12 +160,61 @@ internal static class VneiRefreshManager
         }
     }
 
+    private static void ClearDictionaryProperty(Type type, string name)
+    {
+        if (AccessTools.Property(type, name)?.GetValue(null, null) is IDictionary dictionary)
+        {
+            dictionary.Clear();
+        }
+    }
+
     private static void ClearListProperty(Type type, string name, IndexBackup backup)
     {
         if (AccessTools.Property(type, name)?.GetValue(null, null) is IList list)
         {
             backup.Track(list);
             list.Clear();
+        }
+    }
+
+    private static void ClearListProperty(Type type, string name)
+    {
+        if (AccessTools.Property(type, name)?.GetValue(null, null) is IList list)
+        {
+            list.Clear();
+        }
+    }
+
+    private static void SetStaticField(Type type, string name, object value, IndexBackup backup)
+    {
+        FieldInfo? field = AccessTools.Field(type, name);
+        if (field == null)
+        {
+            return;
+        }
+
+        backup.Track(field, null);
+        field.SetValue(null, value);
+    }
+
+    private static void TrackPluginStationFields(IndexBackup backup)
+    {
+        Type? pluginType = DataForgeVneiTypes.Get("VNEI.Plugin");
+        object? plugin = pluginType == null
+            ? null
+            : AccessTools.Property(pluginType, "Instance")?.GetValue(null, null);
+        if (pluginType == null || plugin == null)
+        {
+            return;
+        }
+
+        foreach (string fieldName in new[] { "allStations", "handStation", "noStation" })
+        {
+            FieldInfo? field = AccessTools.Field(pluginType, fieldName);
+            if (field != null)
+            {
+                backup.Track(field, plugin);
+            }
         }
     }
 
@@ -137,6 +234,7 @@ internal static class VneiRefreshManager
     {
         private readonly List<DictionaryBackup> Dictionaries = new();
         private readonly List<ListBackup> Lists = new();
+        private readonly List<FieldBackup> Fields = new();
 
         internal void Track(IDictionary dictionary)
         {
@@ -160,6 +258,11 @@ internal static class VneiRefreshManager
             Lists.Add(new ListBackup(list, entries));
         }
 
+        internal void Track(FieldInfo field, object? target)
+        {
+            Fields.Add(new FieldBackup(field, target, field.GetValue(target)));
+        }
+
         internal void Restore()
         {
             foreach (DictionaryBackup backup in Dictionaries)
@@ -178,6 +281,11 @@ internal static class VneiRefreshManager
                 {
                     backup.List.Add(entry);
                 }
+            }
+
+            foreach (FieldBackup backup in Fields)
+            {
+                backup.Field.SetValue(backup.Target, backup.Value);
             }
         }
     }
@@ -204,5 +312,19 @@ internal static class VneiRefreshManager
 
         internal IList List { get; }
         internal List<object?> Entries { get; }
+    }
+
+    private sealed class FieldBackup
+    {
+        internal FieldBackup(FieldInfo field, object? target, object? value)
+        {
+            Field = field;
+            Target = target;
+            Value = value;
+        }
+
+        internal FieldInfo Field { get; }
+        internal object? Target { get; }
+        internal object? Value { get; }
     }
 }

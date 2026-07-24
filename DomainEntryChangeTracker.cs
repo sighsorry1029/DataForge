@@ -115,3 +115,94 @@ internal sealed class DomainEntryChangeTracker<TEntry>
         return changedKeys;
     }
 }
+
+internal static class DataForgeCloneDependencyOrder
+{
+    internal static List<TEntry> GetAcyclicOrder<TEntry>(
+        IReadOnlyDictionary<string, TEntry> entriesByTarget,
+        Func<TEntry, string> sourceKeySelector,
+        Action<TEntry, string> reportBlocked)
+    {
+        Dictionary<string, int> visitStates = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string> blockedReasons = new(StringComparer.OrdinalIgnoreCase);
+        List<string> visitPath = new();
+        List<TEntry> ordered = new();
+
+        foreach (string targetKey in entriesByTarget.Keys)
+        {
+            Visit(targetKey);
+        }
+
+        foreach (KeyValuePair<string, string> blocked in blockedReasons)
+        {
+            reportBlocked(entriesByTarget[blocked.Key], blocked.Value);
+        }
+
+        return ordered;
+
+        bool Visit(string targetKey)
+        {
+            if (visitStates.TryGetValue(targetKey, out int state))
+            {
+                if (state == 2)
+                {
+                    return !blockedReasons.ContainsKey(targetKey);
+                }
+
+                int cycleStart = visitPath.FindIndex(
+                    key => key.Equals(targetKey, StringComparison.OrdinalIgnoreCase));
+                if (cycleStart < 0)
+                {
+                    cycleStart = visitPath.Count - 1;
+                }
+
+                string cycle = BuildCycleDescription(visitPath, cycleStart, targetKey);
+                for (int index = Math.Max(0, cycleStart); index < visitPath.Count; index++)
+                {
+                    blockedReasons[visitPath[index]] = $"cloneFrom cycle detected: {cycle}.";
+                }
+
+                blockedReasons[targetKey] = $"cloneFrom cycle detected: {cycle}.";
+                return false;
+            }
+
+            visitStates[targetKey] = 1;
+            visitPath.Add(targetKey);
+            TEntry entry = entriesByTarget[targetKey];
+            string sourceKey = sourceKeySelector(entry);
+            if (entriesByTarget.ContainsKey(sourceKey) && !Visit(sourceKey))
+            {
+                if (!blockedReasons.ContainsKey(targetKey))
+                {
+                    blockedReasons[targetKey] =
+                        $"cloneFrom dependency '{sourceKey}' reaches a cycle.";
+                }
+            }
+
+            visitPath.RemoveAt(visitPath.Count - 1);
+            visitStates[targetKey] = 2;
+            if (blockedReasons.ContainsKey(targetKey))
+            {
+                return false;
+            }
+
+            ordered.Add(entry);
+            return true;
+        }
+    }
+
+    private static string BuildCycleDescription(
+        IReadOnlyList<string> visitPath,
+        int cycleStart,
+        string targetKey)
+    {
+        List<string> cycle = new();
+        for (int index = Math.Max(0, cycleStart); index < visitPath.Count; index++)
+        {
+            cycle.Add(visitPath[index]);
+        }
+
+        cycle.Add(targetKey);
+        return string.Join(" -> ", cycle);
+    }
+}

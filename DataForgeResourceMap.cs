@@ -20,6 +20,7 @@ internal static class DataForgeResourceMap
     private static readonly Dictionary<string, int> ItemTierSortValueCache = new(StringComparer.OrdinalIgnoreCase);
     private static DateTime LoadedWriteTimeUtc = DateTime.MinValue;
     private static bool Loaded;
+    private static ObjectDB? CachedObjectDb;
     private static int CachedObjectDbItemCount = -1;
     private static int CachedObjectDbRecipeCount = -1;
 
@@ -46,11 +47,6 @@ internal static class DataForgeResourceMap
             Math.Max(0, tierSortValue).ToString("D6", CultureInfo.InvariantCulture),
             name ?? ""
         });
-    }
-
-    internal static string BuildTierSortKey(int tierSortValue, string name)
-    {
-        return BuildSortKey(0, tierSortValue, name);
     }
 
     internal static string BuildItemSortKey(string? itemName, int tierSortValue, string name)
@@ -221,15 +217,27 @@ internal static class DataForgeResourceMap
 
     private static void EnsureObjectDbCacheFresh()
     {
-        int itemCount = ObjectDB.instance?.m_items?.Count ?? -1;
-        int recipeCount = ObjectDB.instance?.m_recipes?.Count ?? -1;
-        if (itemCount == CachedObjectDbItemCount && recipeCount == CachedObjectDbRecipeCount)
+        ObjectDB? objectDb = ObjectDB.instance;
+        int itemCount = objectDb?.m_items?.Count ?? -1;
+        int recipeCount = objectDb?.m_recipes?.Count ?? -1;
+        if (ReferenceEquals(objectDb, CachedObjectDb) &&
+            itemCount == CachedObjectDbItemCount &&
+            recipeCount == CachedObjectDbRecipeCount)
         {
             return;
         }
 
+        CachedObjectDb = objectDb;
         CachedObjectDbItemCount = itemCount;
         CachedObjectDbRecipeCount = recipeCount;
+        ClearSortCaches();
+    }
+
+    internal static void InvalidateObjectDbCaches()
+    {
+        CachedObjectDb = null;
+        CachedObjectDbItemCount = -1;
+        CachedObjectDbRecipeCount = -1;
         ClearSortCaches();
     }
 

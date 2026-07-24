@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.Linq;
+using static DataForge.DataForgeValue;
 
 namespace DataForge;
 
@@ -60,12 +61,6 @@ internal static class ReferenceDefaultRules
             return IsDefaultFloatTuple(trimmed, 23f, 51f, 25.8f);
         }
 
-        if (propertyName.Equals("Category", StringComparison.OrdinalIgnoreCase) &&
-            trimmed.Equals("Misc", StringComparison.OrdinalIgnoreCase))
-        {
-            return true;
-        }
-
         return propertyName.Equals("MaterialType", StringComparison.OrdinalIgnoreCase) &&
                trimmed.Equals("Wood", StringComparison.OrdinalIgnoreCase);
     }
@@ -93,28 +88,9 @@ internal static class ReferenceDefaultRules
             : 0;
     }
 
-    internal static bool IsDefaultFloat(float value, string propertyName)
+    internal static bool IsDefaultFloat(float value, string _)
     {
-        float defaultValue = 0f;
-        if (propertyName.EndsWith("Multiplier", StringComparison.OrdinalIgnoreCase) ||
-            propertyName.Equals("RaiseSkillAmount", StringComparison.OrdinalIgnoreCase))
-        {
-            defaultValue = 1f;
-        }
-        else if (propertyName.Equals("TimedBlockBonus", StringComparison.OrdinalIgnoreCase))
-        {
-            defaultValue = 2f;
-        }
-        else if (propertyName.Equals("LastChainDamageMultiplier", StringComparison.OrdinalIgnoreCase))
-        {
-            defaultValue = 2f;
-        }
-        else if (propertyName.Equals("Scale", StringComparison.OrdinalIgnoreCase))
-        {
-            defaultValue = 1f;
-        }
-
-        return Math.Abs(value - defaultValue) <= FloatEpsilon;
+        return Math.Abs(value) <= FloatEpsilon;
     }
 
     private static bool IsDefaultCraftingStationTuple(string value, string propertyName)
@@ -599,10 +575,4 @@ internal static class ReferenceDefaultRules
                (bool.TryParse(parts[2], out parsedValue) && parsedValue == defaultThird);
     }
 
-    private static string[] SplitTuple(string value)
-    {
-        return value.Split(new[] { ',' }, StringSplitOptions.None)
-            .Select(part => part.Trim())
-            .ToArray();
-    }
 }

@@ -34,6 +34,81 @@ internal static class DataForgeWorldLifecycle
     }
 }
 
+internal static class DataForgeLifecycleStep
+{
+    internal static bool Run(string name, System.Action action)
+    {
+        try
+        {
+            action();
+            return true;
+        }
+        catch (System.Exception ex)
+        {
+            DataForgePlugin.Log.LogWarning($"DataForge {name} failed: {ex}");
+            return false;
+        }
+    }
+}
+
+internal static class DataForgeRuntimeCleanup
+{
+    private static bool CleanupCompleted;
+    private static bool CleanupRunning;
+
+    internal static bool RunOnce()
+    {
+        if (CleanupCompleted || CleanupRunning)
+        {
+            return CleanupCompleted;
+        }
+
+        CleanupRunning = true;
+        try
+        {
+            DataForgeWorldLifecycle.MarkShuttingDown();
+            bool cleanupSucceeded = true;
+            cleanupSucceeded &= DataForgeLifecycleStep.Run(
+                "VNEI refresh cleanup",
+                VneiRefreshManager.OnWorldShutdown);
+            cleanupSucceeded &= DataForgeLifecycleStep.Run(
+                "recipe cleanup",
+                RecipeOverrideManager.OnWorldShutdown);
+            cleanupSucceeded &= DataForgeLifecycleStep.Run(
+                "status-effect cleanup",
+                StatusEffectOverrideManager.OnWorldShutdown);
+            cleanupSucceeded &= DataForgeLifecycleStep.Run(
+                "item cleanup",
+                ItemOverrideManager.OnWorldShutdown);
+            cleanupSucceeded &= DataForgeLifecycleStep.Run(
+                "piece cleanup",
+                PieceOverrideManager.OnWorldShutdown);
+            cleanupSucceeded &= DataForgeLifecycleStep.Run(
+                "localization cleanup",
+                LocalizationOverrideManager.OnWorldShutdown);
+            cleanupSucceeded &= DataForgeLifecycleStep.Run(
+                "item-visual cleanup",
+                ItemVisualOverrides.ResetWorldState);
+            CleanupCompleted = cleanupSucceeded;
+            return cleanupSucceeded;
+        }
+        finally
+        {
+            CleanupRunning = false;
+        }
+    }
+
+    internal static void PrepareForNewWorld()
+    {
+        if (DataForgeWorldLifecycle.IsShuttingDown && !CleanupCompleted)
+        {
+            RunOnce();
+        }
+
+        CleanupCompleted = false;
+    }
+}
+
 [HarmonyPatch(typeof(ObjectDB), nameof(ObjectDB.Awake))]
 internal static class DataForgeObjectDBAwakePatch
 {
@@ -50,11 +125,21 @@ internal static class DataForgeObjectDBAwakePatch
             return;
         }
 
-        DataForgePlugin.EnsureSourceOfTruthFileMode();
-        StatusEffectOverrideManager.OnObjectDBReady(writeGeneratedArtifacts);
-        ItemOverrideManager.OnObjectDBReady(writeGeneratedArtifacts);
-        RecipeOverrideManager.OnObjectDBReady(writeGeneratedArtifacts);
-        PieceOverrideManager.OnObjectDBReady(writeGeneratedArtifacts);
+        DataForgeLifecycleStep.Run(
+            "ObjectDB source-of-truth setup",
+            DataForgePlugin.EnsureSourceOfTruthFileMode);
+        DataForgeLifecycleStep.Run(
+            "status-effect ObjectDB setup",
+            () => StatusEffectOverrideManager.OnObjectDBReady(writeGeneratedArtifacts));
+        DataForgeLifecycleStep.Run(
+            "item ObjectDB setup",
+            () => ItemOverrideManager.OnObjectDBReady(writeGeneratedArtifacts));
+        DataForgeLifecycleStep.Run(
+            "recipe ObjectDB setup",
+            () => RecipeOverrideManager.OnObjectDBReady(writeGeneratedArtifacts));
+        DataForgeLifecycleStep.Run(
+            "piece ObjectDB setup",
+            () => PieceOverrideManager.OnObjectDBReady(writeGeneratedArtifacts));
     }
 }
 
@@ -74,16 +159,37 @@ internal static class DataForgeZNetSceneAwakePatch
 {
     private static void Postfix()
     {
-        if (DataForgeWorldLifecycle.MarkStarting() && ObjectDB.instance != null)
+        DataForgeRuntimeCleanup.PrepareForNewWorld();
+        bool startingAfterShutdown = DataForgeWorldLifecycle.MarkStarting();
+        if (startingAfterShutdown)
         {
-            DataForgeObjectDBAwakePatch.NotifyObjectDBReady(writeGeneratedArtifacts: false);
+            DataForgeLifecycleStep.Run(
+                "new-world VNEI invalidation",
+                VneiRefreshManager.InvalidateForNewWorld);
         }
 
-        DataForgePlugin.EnsureSourceOfTruthFileMode();
-        RecipeOverrideManager.OnZNetSceneReady();
-        StatusEffectOverrideManager.OnZNetSceneReady();
-        ItemOverrideManager.OnZNetSceneReady();
-        PieceOverrideManager.OnGameDataReady();
+        if (startingAfterShutdown && ObjectDB.instance != null)
+        {
+            DataForgeLifecycleStep.Run(
+                "new-world ObjectDB setup",
+                () => DataForgeObjectDBAwakePatch.NotifyObjectDBReady(writeGeneratedArtifacts: false));
+        }
+
+        DataForgeLifecycleStep.Run(
+            "ZNetScene source-of-truth setup",
+            DataForgePlugin.EnsureSourceOfTruthFileMode);
+        DataForgeLifecycleStep.Run(
+            "recipe ZNetScene setup",
+            RecipeOverrideManager.OnZNetSceneReady);
+        DataForgeLifecycleStep.Run(
+            "status-effect ZNetScene setup",
+            StatusEffectOverrideManager.OnZNetSceneReady);
+        DataForgeLifecycleStep.Run(
+            "item ZNetScene setup",
+            ItemOverrideManager.OnZNetSceneReady);
+        DataForgeLifecycleStep.Run(
+            "piece game-data setup",
+            PieceOverrideManager.OnGameDataReady);
     }
 }
 
@@ -98,7 +204,9 @@ internal static class DataForgeMaterialReferenceZNetSceneAwakePatch
             return;
         }
 
-        MaterialReferenceWriter.WriteReferenceIfReady();
+        DataForgeLifecycleStep.Run(
+            "material-reference ZNetScene setup",
+            MaterialReferenceWriter.WriteReferenceIfReady);
     }
 }
 
@@ -113,8 +221,12 @@ internal static class DataForgePieceDungeonDbStartPatch
             return;
         }
 
-        PieceOverrideManager.OnPieceTablesReady();
-        RecipeOverrideManager.ApplyCurrentConfiguration();
+        DataForgeLifecycleStep.Run(
+            "piece-table DungeonDB setup",
+            PieceOverrideManager.OnPieceTablesReady);
+        DataForgeLifecycleStep.Run(
+            "recipe DungeonDB apply",
+            RecipeOverrideManager.ApplyCurrentConfiguration);
     }
 }
 
@@ -130,9 +242,15 @@ internal static class DataForgeGameStartPatch
         }
 
         DataForgeWorldLifecycle.MarkGameStarted();
-        LocalizationOverrideManager.ApplyCurrentLocalization();
-        StatusEffectOverrideManager.ApplyCurrentConfiguration();
-        ItemOverrideManager.ApplyCurrentConfiguration();
+        DataForgeLifecycleStep.Run(
+            "localization game-start apply",
+            LocalizationOverrideManager.ApplyCurrentLocalization);
+        DataForgeLifecycleStep.Run(
+            "status-effect game-start apply",
+            StatusEffectOverrideManager.ApplyCurrentConfiguration);
+        DataForgeLifecycleStep.Run(
+            "item game-start apply",
+            ItemOverrideManager.ApplyCurrentConfiguration);
     }
 }
 
@@ -142,24 +260,6 @@ internal static class DataForgeZNetShutdownCleanupPatch
     [HarmonyPriority(Priority.First)]
     private static void Prefix()
     {
-        DataForgeWorldLifecycle.MarkShuttingDown();
-        RunCleanup("recipes", RecipeOverrideManager.OnWorldShutdown);
-        RunCleanup("status effects", StatusEffectOverrideManager.OnWorldShutdown);
-        RunCleanup("items", ItemOverrideManager.OnWorldShutdown);
-        RunCleanup("pieces", PieceOverrideManager.OnWorldShutdown);
-        RunCleanup("localization", LocalizationOverrideManager.OnWorldShutdown);
-        RunCleanup("item visuals", ItemVisualOverrides.ResetWorldState);
-    }
-
-    private static void RunCleanup(string name, System.Action cleanup)
-    {
-        try
-        {
-            cleanup();
-        }
-        catch (System.Exception ex)
-        {
-            DataForgePlugin.Log.LogWarning($"Failed to clean up DataForge {name} during world shutdown: {ex}");
-        }
+        DataForgeRuntimeCleanup.RunOnce();
     }
 }

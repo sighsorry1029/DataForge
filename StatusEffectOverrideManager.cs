@@ -26,18 +26,15 @@ internal static class StatusEffectOverrideManager
     private const string ItemIconPrefix = "item:";
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
     private const string ReferenceStateKey = "effects";
-    private const string ReferenceLogicVersion = "2026-07-23-effect-reference-state-v6";
+    private const string ReferenceLogicVersion = "2026-07-24-effect-reference-state-v7";
     private const string MagicPluginAssemblyName = "MagicPlugin";
 
     private static readonly object StateLock = new();
-    private static readonly Dictionary<string, StatusEffectDefinition> Baselines = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, StatusEffect> BaselineEffects = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, Sprite?> BaselineIcons = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, EffectList> BaselineStartEffects = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, EffectList> BaselineStopEffects = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, BaselineSnapshot> Baselines = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, IconCacheEntry> IconCache = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly HashSet<string> CreatedClones = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, StatusEffect> CreatedCloneEffects = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> PendingIconCacheInvalidations = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, OwnedClone> CreatedClones = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly List<StatusEffect> RetiredEffectClones = new();
     private static readonly HashSet<string> RuntimeAppliedEffectKeys = new(StringComparer.OrdinalIgnoreCase);
     private static Dictionary<string, MaxStatsBonus> ActiveMaxStats = new(StringComparer.OrdinalIgnoreCase);
     private static readonly MethodInfo? LoadImageMethod = ResolveLoadImageMethod();
@@ -56,7 +53,7 @@ internal static class StatusEffectOverrideManager
 
     private static List<StatusEffectEntry> ActiveEntries = new();
     private static readonly DomainEntryChangeTracker<StatusEffectEntry> EntryChanges = new(
-        entry => entry.Effect,
+        entry => NormalizeStatusEffectName(entry.Effect),
         entries => SparseSerializer.Serialize(entries));
     private static CustomSyncedValue<string>? SyncedPayload;
     private static string? LastAppliedSyncedPayload;
@@ -64,7 +61,6 @@ internal static class StatusEffectOverrideManager
     private static DataForgeFileWatcher.DebouncedAction? ReloadDebouncer;
     private static bool ObjectDbReady;
     private static bool ZNetSceneReady;
-    private static bool RuntimeStateWasApplied;
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
     private static string IconDirectory => Path.Combine(ConfigDirectory, "icon");
@@ -86,6 +82,48 @@ internal static class StatusEffectOverrideManager
         Watcher = null;
         ReloadDebouncer?.Dispose();
         ReloadDebouncer = null;
+        lock (StateLock)
+        {
+            PendingIconCacheInvalidations.Clear();
+        }
+
+        bool safeToClearIconCache = true;
+        try
+        {
+            if (ObjectDbReady)
+            {
+                RestoreBaselineEffects(RuntimeAppliedEffectKeys.ToArray());
+                ApplyLiveSafeToActiveStatusEffects(
+                    new Dictionary<string, List<StatusEffectEntry>>(StringComparer.OrdinalIgnoreCase),
+                    new HashSet<string>(RuntimeAppliedEffectKeys, StringComparer.OrdinalIgnoreCase));
+            }
+        }
+        catch (Exception ex)
+        {
+            safeToClearIconCache = false;
+            DataForgePlugin.Log.LogWarning($"Failed to restore status effects during plugin shutdown: {ex}");
+        }
+        finally
+        {
+            try
+            {
+                CleanupCreatedClonesForWorldTransition();
+            }
+            catch (Exception ex)
+            {
+                safeToClearIconCache = false;
+                DataForgePlugin.Log.LogWarning($"Failed to remove cloned status effects during plugin shutdown: {ex}");
+            }
+            finally
+            {
+                RuntimeAppliedEffectKeys.Clear();
+                ActiveMaxStats = new Dictionary<string, MaxStatsBonus>(StringComparer.OrdinalIgnoreCase);
+                if (safeToClearIconCache)
+                {
+                    ClearIconCache();
+                }
+            }
+        }
     }
 
     internal static void SetupFileWatcher()
@@ -119,6 +157,8 @@ internal static class StatusEffectOverrideManager
         {
             return;
         }
+
+        InvalidatePendingIconCacheEntries();
         lock (StateLock)
         {
             SetActiveEntries(entries);
@@ -136,6 +176,11 @@ internal static class StatusEffectOverrideManager
         }
 
         ObjectDbReady = true;
+        lock (StateLock)
+        {
+            ActiveMaxStats = BuildMaxStatsOverrides(ActiveEntries);
+        }
+
         if (ShouldSkipRemoteClientBaselineWork())
         {
             return;
@@ -187,27 +232,32 @@ internal static class StatusEffectOverrideManager
             return;
         }
 
+        HashSet<string>? affectedEffectKeys = CanonicalizeEffectKeys(changedEffectKeys);
         List<StatusEffectEntry> entriesToApply = FilterEntries(entries, changedEffectKeys);
         Dictionary<string, List<StatusEffectEntry>> entriesToApplyByEffect = BuildEnabledDefinitionEntriesByEffect(entriesToApply);
         Dictionary<string, List<StatusEffectEntry>> activeEntriesByEffect = changedEffectKeys == null
             ? entriesToApplyByEffect
             : BuildEnabledDefinitionEntriesByEffect(entries);
-        HashSet<string> runtimeEffectKeys = GetRuntimeApplyEffectKeys(activeEntriesByEffect, changedEffectKeys);
+        HashSet<string> runtimeEffectKeys = GetRuntimeApplyEffectKeys(activeEntriesByEffect, affectedEffectKeys);
 
         DataForgeStatusEffectOwnership.NotifyStatusEffectOverridesWillApply();
         try
         {
             CaptureBaselinesForEntriesIfNeeded(entriesToApply);
-            CleanupCreatedEffects(entries);
-            EnsureCloneEffects(entries);
             RestoreBaselineEffects(runtimeEffectKeys);
+            ApplyLiveSafeToActiveStatusEffects(
+                new Dictionary<string, List<StatusEffectEntry>>(StringComparer.OrdinalIgnoreCase),
+                affectedEffectKeys);
 
             if (!DataForgePlugin.StatusEffectOverridesEnabled)
             {
-                ApplyLiveSafeToActiveStatusEffects(entriesToApplyByEffect, changedEffectKeys);
-                UpdateRuntimeAppliedEffectState(new Dictionary<string, List<StatusEffectEntry>>(StringComparer.OrdinalIgnoreCase));
+                CleanupCreatedEffects(Array.Empty<StatusEffectEntry>());
+                RuntimeAppliedEffectKeys.Clear();
                 return;
             }
+
+            CleanupCreatedEffects(entries);
+            EnsureCloneEffects(entries);
 
             foreach (StatusEffectEntry entry in entriesToApply)
             {
@@ -229,12 +279,21 @@ internal static class StatusEffectOverrideManager
                 }
             }
 
-            ApplyLiveSafeToActiveStatusEffects(entriesToApplyByEffect, changedEffectKeys);
+            ApplyLiveSafeToActiveStatusEffects(entriesToApplyByEffect, affectedEffectKeys, restoreBaselines: false);
             UpdateRuntimeAppliedEffectState(activeEntriesByEffect);
         }
         finally
         {
             DataForgeStatusEffectOwnership.NotifyStatusEffectOverridesApplied();
+            try
+            {
+                ItemOverrideManager.OnStatusEffectDefinitionsChanged();
+            }
+            catch (Exception ex)
+            {
+                DataForgePlugin.Log.LogWarning(
+                    $"Could not refresh item status-effect references after effect changes: {ex.Message}");
+            }
         }
     }
 
@@ -245,7 +304,7 @@ internal static class StatusEffectOverrideManager
             return false;
         }
 
-        string normalized = NormalizeStatusEffectName(Utils.GetPrefabName(effectName));
+        string normalized = GetCanonicalEffectKey(effectName);
         if (normalized.Length == 0)
         {
             return false;
@@ -256,7 +315,7 @@ internal static class StatusEffectOverrideManager
             return ActiveEntries.Any(entry =>
                 entry.Override &&
                 entry.HasDefinition &&
-                string.Equals(NormalizeStatusEffectName(entry.Effect), normalized, StringComparison.OrdinalIgnoreCase));
+                string.Equals(GetCanonicalEffectKey(entry.Effect), normalized, StringComparison.OrdinalIgnoreCase));
         }
     }
 
@@ -268,7 +327,7 @@ internal static class StatusEffectOverrideManager
         }
 
         Dictionary<string, MaxStatsBonus> maxStats = ActiveMaxStats;
-        return maxStats.ContainsKey(NormalizeStatusEffectName(effectName));
+        return maxStats.ContainsKey(GetCanonicalEffectKey(effectName));
     }
 
     internal static void ApplyActiveMaxStats(Player player, ref float health, ref float stamina, ref float eitr)
@@ -397,10 +456,16 @@ internal static class StatusEffectOverrideManager
                 continue;
             }
 
-            if (!entriesByEffect.TryGetValue(entry.Effect, out List<StatusEffectEntry> effectEntries))
+            string effectKey = GetCanonicalEffectKey(entry.Effect);
+            if (effectKey.Length == 0)
+            {
+                continue;
+            }
+
+            if (!entriesByEffect.TryGetValue(effectKey, out List<StatusEffectEntry> effectEntries))
             {
                 effectEntries = new List<StatusEffectEntry>();
-                entriesByEffect[entry.Effect] = effectEntries;
+                entriesByEffect[effectKey] = effectEntries;
             }
 
             effectEntries.Add(entry);
@@ -411,20 +476,17 @@ internal static class StatusEffectOverrideManager
 
     private static HashSet<string> GetRuntimeApplyEffectKeys(
         Dictionary<string, List<StatusEffectEntry>> entriesByEffect,
-        HashSet<string>? changedEffectKeys)
+        HashSet<string>? affectedEffectKeys)
     {
-        if (changedEffectKeys != null)
+        if (affectedEffectKeys != null)
         {
-            return new HashSet<string>(changedEffectKeys, StringComparer.OrdinalIgnoreCase);
+            return new HashSet<string>(affectedEffectKeys, StringComparer.OrdinalIgnoreCase);
         }
 
         HashSet<string> keys = new(entriesByEffect.Keys, StringComparer.OrdinalIgnoreCase);
-        if (RuntimeStateWasApplied)
+        foreach (string key in RuntimeAppliedEffectKeys)
         {
-            foreach (string key in RuntimeAppliedEffectKeys)
-            {
-                keys.Add(key);
-            }
+            keys.Add(key);
         }
 
         return keys;
@@ -437,13 +499,12 @@ internal static class StatusEffectOverrideManager
         {
             RuntimeAppliedEffectKeys.Add(key);
         }
-
-        RuntimeStateWasApplied = RuntimeAppliedEffectKeys.Count > 0;
     }
 
     private static void ApplyLiveSafeToActiveStatusEffects(
         Dictionary<string, List<StatusEffectEntry>> entriesByEffect,
-        HashSet<string>? affectedEffectKeys = null)
+        HashSet<string>? affectedEffectKeys = null,
+        bool restoreBaselines = true)
     {
         if (Player.s_players == null)
         {
@@ -471,7 +532,11 @@ internal static class StatusEffectOverrideManager
                     continue;
                 }
 
-                if (ApplyLiveSafeToActiveStatusEffect(statusEffect, entriesByEffect, affectedEffectKeys))
+                if (ApplyLiveSafeToActiveStatusEffect(
+                        statusEffect,
+                        entriesByEffect,
+                        affectedEffectKeys,
+                        restoreBaselines))
                 {
                     applied++;
                 }
@@ -493,7 +558,7 @@ internal static class StatusEffectOverrideManager
 
         Dictionary<string, StatusEffectEntry> entriesByEffect = entries
             .Where(entry => !string.IsNullOrWhiteSpace(entry.Effect))
-            .GroupBy(entry => NormalizeStatusEffectName(entry.Effect), StringComparer.OrdinalIgnoreCase)
+            .GroupBy(entry => GetCanonicalEffectKey(entry.Effect), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
         if (entriesByEffect.Count == 0)
         {
@@ -535,7 +600,8 @@ internal static class StatusEffectOverrideManager
     private static bool ApplyLiveSafeToActiveStatusEffect(
         StatusEffect statusEffect,
         Dictionary<string, List<StatusEffectEntry>> entriesByEffect,
-        HashSet<string>? affectedEffectKeys)
+        HashSet<string>? affectedEffectKeys,
+        bool restoreBaseline)
     {
         string statusEffectName = NormalizeStatusEffectName(statusEffect.name);
         if (statusEffectName.Length == 0)
@@ -549,13 +615,11 @@ internal static class StatusEffectOverrideManager
         }
 
         bool applied = false;
-        if (Baselines.TryGetValue(statusEffectName, out StatusEffectDefinition? baseline))
+        if (restoreBaseline &&
+            Baselines.TryGetValue(statusEffectName, out BaselineSnapshot? baseline))
         {
-            ApplyLiveSafeDefinition(statusEffect, baseline);
-            if (BaselineIcons.TryGetValue(statusEffectName, out Sprite? baselineIcon))
-            {
-                statusEffect.m_icon = baselineIcon;
-            }
+            ApplyLiveSafeDefinition(statusEffect, baseline.Definition);
+            statusEffect.m_icon = baseline.Icon;
 
             applied = true;
         }
@@ -584,7 +648,52 @@ internal static class StatusEffectOverrideManager
 
     private static string NormalizeStatusEffectName(string? statusEffectName)
     {
-        return (statusEffectName ?? "").Replace("(Clone)", "").Trim();
+        return (statusEffectName ?? "").Trim();
+    }
+
+    private static string GetCanonicalEffectKey(string? configuredName)
+    {
+        string normalized = NormalizeStatusEffectName(configuredName);
+        if (normalized.Length == 0)
+        {
+            return "";
+        }
+
+        StatusEffect? resolved = ResolveStatusEffect(configuredName);
+        if (resolved != null)
+        {
+            return NormalizeStatusEffectName(resolved.name);
+        }
+
+        if (Baselines.TryGetValue(normalized, out BaselineSnapshot? knownBaseline))
+        {
+            return NormalizeStatusEffectName(knownBaseline.Effect.name);
+        }
+
+        BaselineSnapshot? baseline = Baselines.Values.FirstOrDefault(snapshot =>
+            string.Equals(
+                NormalizeStatusEffectName(snapshot.Effect.name),
+                normalized,
+                StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(
+                snapshot.Definition.Base?.DisplayName,
+                configuredName?.Trim(),
+                StringComparison.OrdinalIgnoreCase));
+        return baseline != null
+            ? NormalizeStatusEffectName(baseline.Effect.name)
+            : normalized;
+    }
+
+    private static HashSet<string>? CanonicalizeEffectKeys(HashSet<string>? effectKeys)
+    {
+        if (effectKeys == null)
+        {
+            return null;
+        }
+
+        return new HashSet<string>(
+            effectKeys.Select(GetCanonicalEffectKey).Where(key => key.Length > 0),
+            StringComparer.OrdinalIgnoreCase);
     }
 
     private static string? GetMagicPluginMaxStats(StatusEffect statusEffect)
@@ -699,6 +808,16 @@ internal static class StatusEffectOverrideManager
             return;
         }
 
+        if (IsIconFile(e.FullPath))
+        {
+            QueueIconCacheInvalidation(e.FullPath);
+        }
+
+        if (e is RenamedEventArgs renamed && IsIconFile(renamed.OldFullPath))
+        {
+            QueueIconCacheInvalidation(renamed.OldFullPath);
+        }
+
         ReloadDebouncer?.Schedule();
     }
 
@@ -790,7 +909,7 @@ internal static class StatusEffectOverrideManager
             {
                 if (TryParseMaxStats(entry.Stats.MaxStats, out MaxStatsBonus bonus))
                 {
-                    maxStats[NormalizeStatusEffectName(entry.Effect)] = bonus;
+                    maxStats[GetCanonicalEffectKey(entry.Effect)] = bonus;
                 }
             }
         }
@@ -802,7 +921,7 @@ internal static class StatusEffectOverrideManager
     {
         return effectKeys == null
             ? entries
-            : entries.Where(entry => effectKeys.Contains(entry.Effect)).ToList();
+            : entries.Where(entry => effectKeys.Contains(NormalizeStatusEffectName(entry.Effect))).ToList();
     }
 
     private static void PublishPayload(string payload)
@@ -905,15 +1024,7 @@ internal static class StatusEffectOverrideManager
 
     private static bool IsIconFile(string path)
     {
-        string extension = Path.GetExtension(path);
-        if (!extension.Equals(".png", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        string fullPath = Path.GetFullPath(path);
-        string iconRoot = Path.GetFullPath(IconDirectory);
-        return fullPath.StartsWith(iconRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+        return ItemVisualOverrides.IsIconFile(path);
     }
 
     private static void EnsureConfigDirectoryAndDefaultOverride()
@@ -1079,7 +1190,8 @@ internal static class StatusEffectOverrideManager
         HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
         foreach (StatusEffectEntry entry in entries)
         {
-            if (!entry.Override || string.IsNullOrWhiteSpace(entry.Effect) || !seen.Add(entry.Effect))
+            string effectKey = GetCanonicalEffectKey(entry.Effect);
+            if (!entry.Override || effectKey.Length == 0 || !seen.Add(effectKey))
             {
                 continue;
             }
@@ -1105,23 +1217,18 @@ internal static class StatusEffectOverrideManager
             return;
         }
 
-        string statusEffectName = statusEffect.name.Trim();
-        bool hasBaseline = Baselines.ContainsKey(statusEffectName);
-        bool objectChanged = !BaselineEffects.TryGetValue(statusEffectName, out StatusEffect? existing) ||
-                             !ReferenceEquals(existing, statusEffect);
+        string statusEffectName = NormalizeStatusEffectName(statusEffect.name);
+        bool hasBaseline = Baselines.TryGetValue(statusEffectName, out BaselineSnapshot? existing);
+        bool objectChanged = existing == null || !ReferenceEquals(existing.Effect, statusEffect);
         if (!hasBaseline || objectChanged)
         {
-            Baselines[statusEffectName] = StatusEffectDefinition.From(statusEffect);
-            BaselineIcons[statusEffectName] = statusEffect.m_icon;
-            BaselineStartEffects[statusEffectName] = CloneEffectList(statusEffect.m_startEffects);
-            BaselineStopEffects[statusEffectName] = CloneEffectList(statusEffect.m_stopEffects);
-            BaselineEffects[statusEffectName] = statusEffect;
+            Baselines[statusEffectName] = BaselineSnapshot.Capture(statusEffect);
             added = !hasBaseline;
             refreshed = hasBaseline;
         }
     }
 
-    private static void CleanupCreatedEffects(List<StatusEffectEntry> entries)
+    private static void CleanupCreatedEffects(IReadOnlyCollection<StatusEffectEntry> entries)
     {
         if (ObjectDB.instance == null)
         {
@@ -1131,55 +1238,57 @@ internal static class StatusEffectOverrideManager
         HashSet<string> activeCloneNames = new(
             entries
                 .Where(entry => entry.Override && !string.IsNullOrWhiteSpace(entry.CloneFrom))
-                .Select(entry => entry.Effect),
+                .Select(entry => NormalizeStatusEffectName(entry.Effect)),
             StringComparer.OrdinalIgnoreCase);
 
-        foreach (string cloneName in CreatedClones.ToList())
+        foreach (string cloneName in CreatedClones.Keys.ToList())
         {
             if (activeCloneNames.Contains(cloneName))
             {
                 continue;
             }
 
-            RemoveCreatedEffectClone(cloneName, destroy: false);
+            RemoveCreatedEffectClone(cloneName);
         }
     }
 
     internal static void CleanupCreatedClonesForWorldTransition()
     {
-        if (ObjectDB.instance == null)
+        foreach (string cloneName in CreatedClones.Keys.ToList())
         {
-            CreatedClones.Clear();
-            CreatedCloneEffects.Clear();
-            return;
-        }
-
-        foreach (string cloneName in CreatedClones.ToList())
-        {
-            RemoveCreatedEffectClone(cloneName, destroy: true);
+            RemoveCreatedEffectClone(cloneName);
         }
     }
 
     internal static void OnWorldShutdown()
     {
+        bool restoreCompleted = false;
+        bool cloneCleanupCompleted = false;
         try
         {
             RestoreBaselineEffects(RuntimeAppliedEffectKeys.ToArray());
+            restoreCompleted = true;
         }
         finally
         {
             try
             {
                 CleanupCreatedClonesForWorldTransition();
+                cloneCleanupCompleted = true;
             }
             finally
             {
+                DestroyRetiredEffectClones();
                 ObjectDbReady = false;
                 ZNetSceneReady = false;
-                RuntimeStateWasApplied = false;
                 RuntimeAppliedEffectKeys.Clear();
+                if (restoreCompleted && cloneCleanupCompleted)
+                {
+                    ClearIconCache();
+                }
                 lock (StateLock)
                 {
+                    PendingIconCacheInvalidations.Clear();
                     if (DataForgePlugin.IsRemoteServerClient)
                     {
                         SetActiveEntries(new List<StatusEffectEntry>());
@@ -1192,36 +1301,51 @@ internal static class StatusEffectOverrideManager
         }
     }
 
-    private static void RemoveCreatedEffectClone(string cloneName, bool destroy)
+    private static void RemoveCreatedEffectClone(string cloneName)
     {
-        CreatedCloneEffects.TryGetValue(cloneName, out StatusEffect? clone);
-        if (clone != null && ObjectDB.instance != null)
+        if (!CreatedClones.TryGetValue(cloneName, out OwnedClone? ownedClone))
         {
-            ObjectDB.instance.m_StatusEffects.Remove(clone);
-            if (destroy)
-            {
-                UnityEngine.Object.Destroy(clone);
-            }
+            return;
         }
 
+        StatusEffect clone = ownedClone.Effect;
+        if (ObjectDB.instance != null)
+        {
+            ObjectDB.instance.m_StatusEffects.Remove(clone);
+        }
+
+        bool referencesRebound = ItemOverrideManager.RebindStatusEffectReferences(clone, null);
+        RetireOrDestroyEffectClone(clone, referencesRebound);
         CreatedClones.Remove(cloneName);
-        CreatedCloneEffects.Remove(cloneName);
-        Baselines.Remove(cloneName);
-        BaselineEffects.Remove(cloneName);
-        BaselineIcons.Remove(cloneName);
-        BaselineStartEffects.Remove(cloneName);
-        BaselineStopEffects.Remove(cloneName);
+        if (Baselines.TryGetValue(cloneName, out BaselineSnapshot? baseline) &&
+            ReferenceEquals(baseline.Effect, clone))
+        {
+            Baselines.Remove(cloneName);
+        }
     }
 
     private static void EnsureCloneEffects(List<StatusEffectEntry> entries)
     {
-        foreach (StatusEffectEntry entry in entries)
-        {
-            if (!entry.Override || string.IsNullOrWhiteSpace(entry.CloneFrom))
+        Dictionary<string, StatusEffectEntry> cloneEntries = entries
+            .Where(entry =>
+                entry.Override &&
+                !string.IsNullOrWhiteSpace(entry.Effect) &&
+                !string.IsNullOrWhiteSpace(entry.CloneFrom))
+            .GroupBy(entry => NormalizeStatusEffectName(entry.Effect), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
+        List<StatusEffectEntry> orderedEntries = DataForgeCloneDependencyOrder.GetAcyclicOrder(
+            cloneEntries,
+            entry => NormalizeStatusEffectName(entry.CloneFrom),
+            (entry, reason) =>
             {
-                continue;
-            }
-
+                using (DataForgeLogContext.Push(entry.LogContext))
+                {
+                    DataForgeLogContext.Warning(
+                        $"Could not apply cloned status effect '{entry.Effect}': {reason} Keeping the previous clone if one exists.");
+                }
+            });
+        foreach (StatusEffectEntry entry in orderedEntries)
+        {
             using (DataForgeLogContext.Push(entry.LogContext))
             {
                 EnsureCloneEffect(entry);
@@ -1236,35 +1360,67 @@ internal static class StatusEffectOverrideManager
             return;
         }
 
-        StatusEffect? existing = ResolveStatusEffect(entry.Effect);
-        if (existing != null)
+        string effectKey = NormalizeStatusEffectName(entry.Effect);
+        string sourceKey = NormalizeStatusEffectName(entry.CloneFrom);
+        if (effectKey.Length == 0 || sourceKey.Length == 0)
         {
-            if (CreatedCloneEffects.TryGetValue(entry.Effect, out StatusEffect? ownedClone) &&
-                ReferenceEquals(existing, ownedClone))
+            return;
+        }
+
+        StatusEffect? existing = ResolveStatusEffect(entry.Effect);
+        if (CreatedClones.TryGetValue(effectKey, out OwnedClone? ownedClone))
+        {
+            if (ReferenceEquals(existing, ownedClone.Effect) &&
+                string.Equals(ownedClone.SourceKey, sourceKey, StringComparison.OrdinalIgnoreCase) &&
+                ReferenceEquals(ResolveStatusEffect(entry.CloneFrom), ownedClone.SourceEffect))
             {
                 return;
             }
 
-            if (ownedClone != null)
+            if (!ReferenceEquals(existing, ownedClone.Effect))
             {
-                ObjectDB.instance.m_StatusEffects.Remove(ownedClone);
-                UnityEngine.Object.Destroy(ownedClone);
+                RemoveCreatedEffectClone(effectKey);
+                return;
             }
 
-            CreatedClones.Remove(entry.Effect);
-            CreatedCloneEffects.Remove(entry.Effect);
+            StatusEffect? replacementSource = ResolveStatusEffect(entry.CloneFrom);
+            if (replacementSource == null || ReferenceEquals(replacementSource, ownedClone.Effect))
+            {
+                DataForgeLogContext.Warning(
+                    $"Could not change cloned status effect '{entry.Effect}' to source '{entry.CloneFrom}'. Keeping the previous clone.");
+                return;
+            }
+
+            StatusEffect? replacement = CreateEffectClone(entry, replacementSource);
+            if (replacement == null)
+            {
+                return;
+            }
+
+            BaselineSnapshot replacementBaseline = BaselineSnapshot.Capture(replacement);
+            int cloneIndex = ObjectDB.instance.m_StatusEffects.IndexOf(ownedClone.Effect);
+            if (cloneIndex >= 0)
+            {
+                ObjectDB.instance.m_StatusEffects[cloneIndex] = replacement;
+            }
+            else
+            {
+                ObjectDB.instance.m_StatusEffects.Add(replacement);
+            }
+
+            StatusEffect previousEffect = ownedClone.Effect;
+            Baselines[effectKey] = replacementBaseline;
+            CreatedClones[effectKey] = new OwnedClone(replacement, sourceKey, replacementSource);
+            bool referencesRebound =
+                ItemOverrideManager.RebindStatusEffectReferences(previousEffect, replacement);
+            RetireOrDestroyEffectClone(previousEffect, referencesRebound);
+            DataForgePlugin.Log.LogInfo($"Changed cloned status effect '{entry.Effect}' source to '{entry.CloneFrom}'.");
             return;
         }
 
-        if (CreatedClones.Contains(entry.Effect))
+        if (existing != null)
         {
-            CreatedClones.Remove(entry.Effect);
-            CreatedCloneEffects.Remove(entry.Effect);
-            Baselines.Remove(entry.Effect);
-            BaselineEffects.Remove(entry.Effect);
-            BaselineIcons.Remove(entry.Effect);
-            BaselineStartEffects.Remove(entry.Effect);
-            BaselineStopEffects.Remove(entry.Effect);
+            return;
         }
 
         StatusEffect? source = ResolveStatusEffect(entry.CloneFrom);
@@ -1274,47 +1430,80 @@ internal static class StatusEffectOverrideManager
             return;
         }
 
-        StatusEffect clone = UnityEngine.Object.Instantiate(source);
-        clone.name = entry.Effect;
-        clone.m_nameHash = entry.Effect.GetStableHashCode();
-        UnityEngine.Object.DontDestroyOnLoad(clone);
+        StatusEffect? clone = CreateEffectClone(entry, source);
+        if (clone == null)
+        {
+            return;
+        }
 
+        BaselineSnapshot cloneBaseline = BaselineSnapshot.Capture(clone);
         ObjectDB.instance.m_StatusEffects.Add(clone);
-        Baselines[entry.Effect] = StatusEffectDefinition.From(clone);
-        BaselineEffects[entry.Effect] = clone;
-        BaselineIcons[entry.Effect] = clone.m_icon;
-        BaselineStartEffects[entry.Effect] = CloneEffectList(clone.m_startEffects);
-        BaselineStopEffects[entry.Effect] = CloneEffectList(clone.m_stopEffects);
-        CreatedClones.Add(entry.Effect);
-        CreatedCloneEffects[entry.Effect] = clone;
+        Baselines[effectKey] = cloneBaseline;
+        CreatedClones[effectKey] = new OwnedClone(clone, sourceKey, source);
         DataForgePlugin.Log.LogInfo($"Cloned status effect '{entry.CloneFrom}' as '{entry.Effect}'.");
+    }
+
+    private static void RetireOrDestroyEffectClone(StatusEffect effect, bool referencesRebound)
+    {
+        if (referencesRebound || DataForgeWorldLifecycle.IsShuttingDown)
+        {
+            UnityEngine.Object.Destroy(effect);
+            return;
+        }
+
+        RetiredEffectClones.Add(effect);
+    }
+
+    private static void DestroyRetiredEffectClones()
+    {
+        foreach (StatusEffect effect in RetiredEffectClones)
+        {
+            if (effect != null)
+            {
+                UnityEngine.Object.Destroy(effect);
+            }
+        }
+
+        RetiredEffectClones.Clear();
+    }
+
+    private static StatusEffect? CreateEffectClone(StatusEffectEntry entry, StatusEffect source)
+    {
+        StatusEffect? clone = null;
+        try
+        {
+            clone = UnityEngine.Object.Instantiate(source);
+            clone.name = entry.Effect;
+            clone.m_nameHash = entry.Effect.GetStableHashCode();
+            UnityEngine.Object.DontDestroyOnLoad(clone);
+            return clone;
+        }
+        catch (Exception ex)
+        {
+            if (clone != null)
+            {
+                UnityEngine.Object.Destroy(clone);
+            }
+
+            DataForgeLogContext.Warning(
+                $"Could not clone status effect '{entry.Effect}' from '{entry.CloneFrom}': {ex.GetBaseException().Message}");
+            return null;
+        }
     }
 
     private static void RestoreBaselineEffects(IReadOnlyCollection<string> effectNames)
     {
         foreach (string effectName in effectNames)
         {
-            if (!BaselineEffects.TryGetValue(effectName, out StatusEffect? statusEffect) ||
-                !Baselines.TryGetValue(effectName, out StatusEffectDefinition? baseline))
+            if (!Baselines.TryGetValue(effectName, out BaselineSnapshot? baseline))
             {
                 continue;
             }
 
-            ApplyDefinition(statusEffect, baseline, applyEffectLists: false);
-            if (BaselineIcons.TryGetValue(effectName, out Sprite? baselineIcon))
-            {
-                statusEffect.m_icon = baselineIcon;
-            }
-
-            if (BaselineStartEffects.TryGetValue(effectName, out EffectList? startEffects))
-            {
-                statusEffect.m_startEffects = CloneEffectList(startEffects);
-            }
-
-            if (BaselineStopEffects.TryGetValue(effectName, out EffectList? stopEffects))
-            {
-                statusEffect.m_stopEffects = CloneEffectList(stopEffects);
-            }
+            ApplyDefinition(baseline.Effect, baseline.Definition, applyEffectLists: false);
+            baseline.Effect.m_icon = baseline.Icon;
+            baseline.Effect.m_startEffects = CloneEffectList(baseline.StartEffects);
+            baseline.Effect.m_stopEffects = CloneEffectList(baseline.StopEffects);
         }
     }
 
@@ -1496,22 +1685,18 @@ internal static class StatusEffectOverrideManager
             return;
         }
 
-        Copy(definition.DisplayName, value => statusEffect.m_name = value);
-        Copy(definition.Tooltip, value => statusEffect.m_tooltip = value);
-        ApplyBaseIcon(statusEffect, definition.Icon);
+        ApplyLiveSafeBase(statusEffect, definition);
         if (applyEffectLists)
         {
             ApplyEffectList(statusEffect.name, definition.StartEffects, value => statusEffect.m_startEffects = value, "startEffects");
             ApplyEffectList(statusEffect.name, definition.StopEffects, value => statusEffect.m_stopEffects = value, "stopEffects");
         }
 
-        Copy(definition.Category, value => statusEffect.m_category = value);
         CopyBaseTime(definition.Time, statusEffect);
         Copy(definition.RepeatInterval, value => statusEffect.m_repeatInterval = Math.Max(0f, value));
         Copy(definition.StartMessage, value => statusEffect.m_startMessage = value);
         Copy(definition.StopMessage, value => statusEffect.m_stopMessage = value);
         Copy(definition.RepeatMessage, value => statusEffect.m_repeatMessage = value);
-        CopyIconFlags(definition.IconFlags, statusEffect);
         CopyEnum<MessageHud.MessageType>(definition.StartMessageType, value => statusEffect.m_startMessageType = value, "startMessageType");
         CopyEnum<MessageHud.MessageType>(definition.StopMessageType, value => statusEffect.m_stopMessageType = value, "stopMessageType");
         CopyEnum<MessageHud.MessageType>(definition.RepeatMessageType, value => statusEffect.m_repeatMessageType = value, "repeatMessageType");
@@ -1661,37 +1846,120 @@ internal static class StatusEffectOverrideManager
 
         DateTime lastWriteTimeUtc = File.GetLastWriteTimeUtc(iconPath);
         if (IconCache.TryGetValue(iconPath, out IconCacheEntry? cached) &&
-            cached.LastWriteTimeUtc == lastWriteTimeUtc)
+            cached.LastWriteTimeUtc == lastWriteTimeUtc &&
+            !cached.ReloadRequired)
         {
             return cached.Sprite;
         }
 
+        Texture2D? newTexture = null;
         try
         {
-            Texture2D texture = new(2, 2, TextureFormat.RGBA32, mipChain: false)
+            newTexture = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false)
             {
                 name = Path.GetFileNameWithoutExtension(iconPath)
             };
 
-            if (!TryLoadImage(texture, File.ReadAllBytes(iconPath)))
+            if (!TryLoadImage(newTexture, File.ReadAllBytes(iconPath)))
             {
-                UnityEngine.Object.Destroy(texture);
-                return null;
+                UnityEngine.Object.Destroy(newTexture);
+                return cached?.Sprite;
             }
 
             Sprite sprite = Sprite.Create(
-                texture,
-                new Rect(0f, 0f, texture.width, texture.height),
+                newTexture,
+                new Rect(0f, 0f, newTexture.width, newTexture.height),
                 new Vector2(0.5f, 0.5f),
                 100f);
             sprite.name = Path.GetFileNameWithoutExtension(iconPath);
             IconCache[iconPath] = new IconCacheEntry(lastWriteTimeUtc, sprite);
+            if (cached != null)
+            {
+                DestroyIconCacheEntry(cached);
+            }
+
             return sprite;
         }
         catch (Exception ex)
         {
+            if (newTexture != null)
+            {
+                UnityEngine.Object.Destroy(newTexture);
+            }
+
             DataForgeLogContext.Warning($"Could not load status effect icon '{iconName}' from '{iconPath}': {ex.Message}");
-            return null;
+            return cached?.Sprite;
+        }
+    }
+
+    private static void InvalidateIconCache(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        if (!IconCache.TryGetValue(fullPath, out IconCacheEntry? cached))
+        {
+            return;
+        }
+
+        IconCache.Remove(fullPath);
+        DestroyIconCacheEntry(cached);
+    }
+
+    private static void QueueIconCacheInvalidation(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        lock (StateLock)
+        {
+            PendingIconCacheInvalidations.Add(fullPath);
+            EntryChanges.RequireFullApply();
+        }
+    }
+
+    private static void InvalidatePendingIconCacheEntries()
+    {
+        string[] paths;
+        lock (StateLock)
+        {
+            paths = PendingIconCacheInvalidations.ToArray();
+            PendingIconCacheInvalidations.Clear();
+        }
+
+        foreach (string path in paths)
+        {
+            if (!File.Exists(path))
+            {
+                InvalidateIconCache(path);
+                continue;
+            }
+
+            if (IconCache.TryGetValue(path, out IconCacheEntry? cached))
+            {
+                cached.RequireReload();
+            }
+        }
+    }
+
+    private static void ClearIconCache()
+    {
+        foreach (IconCacheEntry cached in IconCache.Values)
+        {
+            DestroyIconCacheEntry(cached);
+        }
+
+        IconCache.Clear();
+    }
+
+    private static void DestroyIconCacheEntry(IconCacheEntry cached)
+    {
+        Sprite sprite = cached.Sprite;
+        Texture? texture = sprite != null ? sprite.texture : null;
+        if (sprite != null)
+        {
+            UnityEngine.Object.Destroy(sprite);
+        }
+
+        if (texture != null)
+        {
+            UnityEngine.Object.Destroy(texture);
         }
     }
 
@@ -1980,80 +2248,7 @@ internal static class StatusEffectOverrideManager
             0f,
             0f,
             null);
-        CopyFloatTuple(
-            definition.RegenMultiplier,
-            value => stats.m_healthRegenMultiplier = Math.Max(0f, value),
-            value => stats.m_staminaRegenMultiplier = Math.Max(0f, value),
-            value => stats.m_eitrRegenMultiplier = Math.Max(0f, value),
-            "regenMultiplier",
-            1f,
-            1f,
-            1f);
-        Copy(definition.StaminaDrainPerSec, value => stats.m_staminaDrainPerSec = value);
-        Copy(definition.AdrenalineModifier, value => stats.m_adrenalineModifier = value);
-        Copy(definition.SpeedModifier, value => stats.m_speedModifier = value);
-        Copy(definition.SwimSpeedModifier, value => stats.m_swimSpeedModifier = value);
-        CopyFloatTuple(
-            definition.JumpModifier,
-            value => stats.m_jumpModifier.x = value,
-            value => stats.m_jumpModifier.y = value,
-            value => stats.m_jumpModifier.z = value,
-            "jumpModifier",
-            0f,
-            0f,
-            0f);
-        CopyFloatTuple(
-            definition.WindRun,
-            value => stats.m_windMovementModifier = value,
-            value => stats.m_windRunStaminaModifier = value,
-            null,
-            "windRun",
-            0f,
-            0f,
-            null);
-        CopyFloatTuple(
-            definition.Sneak,
-            value => stats.m_stealthModifier = value,
-            value => stats.m_noiseModifier = value,
-            null,
-            "sneak",
-            0f,
-            0f,
-            null);
-        CopyFloatTuple(
-            definition.Fall,
-            value => stats.m_fallDamageModifier = value,
-            value => stats.m_maxMaxFallSpeed = Math.Max(0f, value),
-            null,
-            "fall",
-            0f,
-            0f,
-            null);
-        CopyFloatTuple(
-            definition.Armor,
-            value => stats.m_addArmor = value,
-            value => stats.m_armorMultiplier = value,
-            null,
-            "armor",
-            0f,
-            0f,
-            null);
-        CopyFloatTuple(
-            definition.Block,
-            value => stats.m_timedBlockBonus = value,
-            value => stats.m_blockStaminaUseFlatValue = value,
-            null,
-            "block",
-            0f,
-            0f,
-            null);
-        Copy(definition.StaggerModifier, value => stats.m_staggerModifier = value);
-        Copy(definition.AddMaxCarryWeight, value => stats.m_addMaxCarryWeight = value);
-        // Pheromone fields are intentionally held for a separate domain.
-        CopySkillValuePair(definition.AttackDamage, value => stats.m_modifyAttackSkill = value, value => stats.m_damageModifier = value, "attackDamage", 1f);
-        CopySkillValuePair(definition.RaiseSkill, value => stats.m_raiseSkill = value, value => stats.m_raiseSkillModifier = value, "raiseSkill", 0f);
-        CopySkillValuePair(definition.SkillLevel, value => stats.m_skillLevel = value, value => stats.m_skillLevelModifier = value, "skillLevel", 0f);
-        CopySkillValuePair(definition.SkillLevel2, value => stats.m_skillLevel2 = value, value => stats.m_skillLevelModifier2 = value, "skillLevel2", 0f);
+        ApplyLiveSafeStats(stats, definition);
     }
 
     private static void ApplyLiveSafeStats(SE_Stats stats, StatsDefinition? definition)
@@ -2154,16 +2349,6 @@ internal static class StatusEffectOverrideManager
         Copy(definition.Swim, value => stats.m_swimStaminaUseModifier = value);
         Copy(definition.HomeItem, value => stats.m_homeItemStaminaUseModifier = value);
     }
-
-    /*
-    Pheromone support belongs in a separate domain because it targets creature spawn/love/flee behavior,
-    not ordinary player stat overrides.
-
-    private static void ApplyPheromone(SE_Stats stats, PheromoneDefinition? definition)
-    {
-        ...
-    }
-    */
 
     private static void ApplyPoison(SE_Poison poison, PoisonDefinition? definition)
     {
@@ -2571,13 +2756,17 @@ internal static class StatusEffectOverrideManager
                 EnsureConfigDirectoryAndDefaultOverride();
                 CaptureAllBaselinesIfNeeded();
                 var fullEntries = Baselines
-                    .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
-                    .Select(pair => new
+                    .Select(pair =>
                     {
-                        Entry = StatusEffectEntry.FromDefinition(pair.Key, pair.Value, overrideEntry: true),
-                        OwnerKey = pair.Key,
-                        SortKey = pair.Key
+                        string effectName = pair.Value.Effect.name.Trim();
+                        return new
+                        {
+                            Entry = StatusEffectEntry.FromDefinition(effectName, pair.Value.Definition, overrideEntry: true),
+                            OwnerKey = effectName,
+                            SortKey = effectName
+                        };
                     })
+                    .OrderBy(entry => entry.SortKey, StringComparer.OrdinalIgnoreCase)
                     .ToList();
 
                 return GeneratedArtifactWriter.GeneratedHeader(DomainName, OverrideFileName, "full scaffold") +
@@ -2624,8 +2813,8 @@ internal static class StatusEffectOverrideManager
     private static string BuildReferenceArtifactContent()
     {
         List<StatusEffectReferenceEntry> referenceEntries = Baselines
-            .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
-            .Select(pair => StatusEffectReferenceEntry.From(pair.Key, pair.Value))
+            .Select(pair => StatusEffectReferenceEntry.From(pair.Value.Effect.name.Trim(), pair.Value.Definition))
+            .OrderBy(entry => entry.Effect, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
         return DataForgeReferenceSections.SerializeReferenceSections(
@@ -2699,6 +2888,7 @@ internal static class StatusEffectOverrideManager
         }
 
         internal bool HasDefinition =>
+            !string.IsNullOrWhiteSpace(CloneFrom) ||
             HasBaseDefinition ||
             Stats != null ||
             StaminaDrainModifier != null ||
@@ -2809,21 +2999,10 @@ internal static class StatusEffectOverrideManager
     internal sealed class StatusEffectReferenceEntry
     {
         public string Effect { get; set; } = "";
-        public string? DisplayName { get; set; }
-        public string? Tooltip { get; set; }
-        public string? Icon { get; set; }
-        public string? StartEffects { get; set; }
         public string? StopEffects { get; set; }
         public string? Category { get; set; }
         public string? Time { get; set; }
         public string? IconFlags { get; set; }
-        public float? RepeatInterval { get; set; }
-        public string? StartMessage { get; set; }
-        public string? StopMessage { get; set; }
-        public string? RepeatMessage { get; set; }
-        public string? StartMessageType { get; set; }
-        public string? StopMessageType { get; set; }
-        public string? RepeatMessageType { get; set; }
         public string? Attributes { get; set; }
         public StatsDefinition? Stats { get; set; }
         public StaminaDrainModifierDefinition? StaminaDrainModifier { get; set; }
@@ -2836,9 +3015,15 @@ internal static class StatusEffectOverrideManager
 
         internal static StatusEffectReferenceEntry From(string name, StatusEffectDefinition definition)
         {
+            StatusEffectBaseDefinition? baseDefinition = definition.Base;
             StatusEffectReferenceEntry entry = new()
             {
                 Effect = name,
+                StopEffects = baseDefinition?.StopEffects,
+                Category = baseDefinition?.Category,
+                Time = baseDefinition?.Time,
+                IconFlags = baseDefinition?.IconFlags,
+                Attributes = baseDefinition?.Attributes,
                 Stats = definition.Stats,
                 StaminaDrainModifier = definition.StaminaDrainModifier,
                 DamageTakenModifiers = definition.DamageTakenModifiers,
@@ -2848,50 +3033,7 @@ internal static class StatusEffectOverrideManager
                 Frost = definition.Frost,
                 Rested = definition.Rested
             };
-            entry.ApplyBase(ToReferenceBase(definition.Base));
             return ReferenceValue.ClonePruned(entry) ?? new StatusEffectReferenceEntry { Effect = name };
-        }
-
-        private void ApplyBase(StatusEffectBaseDefinition? definition)
-        {
-            if (definition == null)
-            {
-                return;
-            }
-
-            DisplayName = definition.DisplayName;
-            Tooltip = definition.Tooltip;
-            Icon = definition.Icon;
-            StartEffects = definition.StartEffects;
-            StopEffects = definition.StopEffects;
-            Category = definition.Category;
-            Time = definition.Time;
-            IconFlags = definition.IconFlags;
-            RepeatInterval = definition.RepeatInterval;
-            StartMessage = definition.StartMessage;
-            StopMessage = definition.StopMessage;
-            RepeatMessage = definition.RepeatMessage;
-            StartMessageType = definition.StartMessageType;
-            StopMessageType = definition.StopMessageType;
-            RepeatMessageType = definition.RepeatMessageType;
-            Attributes = definition.Attributes;
-        }
-
-        private static StatusEffectBaseDefinition? ToReferenceBase(StatusEffectBaseDefinition? definition)
-        {
-            if (definition == null)
-            {
-                return null;
-            }
-
-            return new StatusEffectBaseDefinition
-            {
-                Category = definition.Category,
-                StopEffects = definition.StopEffects,
-                Time = definition.Time,
-                IconFlags = definition.IconFlags,
-                Attributes = definition.Attributes
-            };
         }
     }
 
@@ -3207,6 +3349,53 @@ internal static class StatusEffectOverrideManager
         internal float Eitr { get; }
     }
 
+    private sealed class BaselineSnapshot
+    {
+        private BaselineSnapshot(
+            StatusEffect effect,
+            StatusEffectDefinition definition,
+            Sprite? icon,
+            EffectList startEffects,
+            EffectList stopEffects)
+        {
+            Effect = effect;
+            Definition = definition;
+            Icon = icon;
+            StartEffects = startEffects;
+            StopEffects = stopEffects;
+        }
+
+        internal StatusEffect Effect { get; }
+        internal StatusEffectDefinition Definition { get; }
+        internal Sprite? Icon { get; }
+        internal EffectList StartEffects { get; }
+        internal EffectList StopEffects { get; }
+
+        internal static BaselineSnapshot Capture(StatusEffect effect)
+        {
+            return new BaselineSnapshot(
+                effect,
+                StatusEffectDefinition.From(effect),
+                effect.m_icon,
+                CloneEffectList(effect.m_startEffects),
+                CloneEffectList(effect.m_stopEffects));
+        }
+    }
+
+    private sealed class OwnedClone
+    {
+        internal OwnedClone(StatusEffect effect, string sourceKey, StatusEffect sourceEffect)
+        {
+            Effect = effect;
+            SourceKey = sourceKey;
+            SourceEffect = sourceEffect;
+        }
+
+        internal StatusEffect Effect { get; }
+        internal string SourceKey { get; }
+        internal StatusEffect SourceEffect { get; }
+    }
+
     private sealed class IconCacheEntry
     {
         public IconCacheEntry(DateTime lastWriteTimeUtc, Sprite sprite)
@@ -3217,6 +3406,12 @@ internal static class StatusEffectOverrideManager
 
         public DateTime LastWriteTimeUtc { get; }
         public Sprite Sprite { get; }
+        public bool ReloadRequired { get; private set; }
+
+        internal void RequireReload()
+        {
+            ReloadRequired = true;
+        }
     }
 }
 

@@ -61,13 +61,10 @@ internal static class LocalizationOverrideManager
     private static FileSystemWatcher? Watcher;
     private static DataForgeFileWatcher.DebouncedAction? ReloadDebouncer;
     private static string? LastParsedPayload;
-    private static bool AwaitingRemotePayload;
     private static bool LocalFileModeReady;
     private static bool WatcherResetPending;
 
-    private static readonly Dictionary<string, OriginalTranslation> OriginalTranslations =
-        new(StringComparer.Ordinal);
-    private static readonly Dictionary<string, string> LastAppliedTranslations =
+    private static readonly Dictionary<string, TranslationLease> AppliedTranslations =
         new(StringComparer.Ordinal);
     private static Localization? AppliedLocalization;
     private static string AppliedLanguage = "";
@@ -104,7 +101,6 @@ internal static class LocalizationOverrideManager
         Watcher = null;
         ReloadDebouncer?.Dispose();
         ReloadDebouncer = null;
-        AwaitingRemotePayload = false;
         LocalFileModeReady = false;
         WatcherResetPending = false;
         lock (StateLock)
@@ -262,7 +258,6 @@ internal static class LocalizationOverrideManager
         bool remoteClient = ConfigSyncInstance?.IsSourceOfTruth == false;
         if (remoteClient)
         {
-            AwaitingRemotePayload = true;
             LocalFileModeReady = false;
             ClearActivePayloadAndRestore();
         }
@@ -357,11 +352,6 @@ internal static class LocalizationOverrideManager
             return;
         }
 
-        if (AwaitingRemotePayload)
-        {
-            DataForgePlugin.Log.LogDebug("Received the server localization payload after authority changed.");
-        }
-        AwaitingRemotePayload = false;
         string payload = SyncedPayload?.Value ?? "";
         ApplySyncedPayload(payload);
     }
@@ -371,7 +361,6 @@ internal static class LocalizationOverrideManager
         LocalFileModeReady = false;
         if (isSourceOfTruth)
         {
-            AwaitingRemotePayload = false;
             ClearActivePayloadAndRestore();
             if (HasLocalAuthority)
             {
@@ -384,7 +373,6 @@ internal static class LocalizationOverrideManager
             return;
         }
 
-        AwaitingRemotePayload = true;
         Watcher?.Dispose();
         Watcher = null;
         ReloadDebouncer?.Dispose();
@@ -396,7 +384,6 @@ internal static class LocalizationOverrideManager
 
     private static void ApplySyncedPayload(string payload)
     {
-        AwaitingRemotePayload = false;
         if (!string.Equals(LastParsedPayload, payload, StringComparison.Ordinal))
         {
             if (!TryDeserializePayload(payload, "synced localization payload", out LocalizationPayload localizationPayload))
@@ -715,16 +702,17 @@ internal static class LocalizationOverrideManager
     private static bool ApplyTranslation(Localization localization, string token, string text)
     {
         bool currentExists = localization.m_translations.TryGetValue(token, out string? current);
-        if (!OriginalTranslations.ContainsKey(token) ||
-            LastAppliedTranslations.TryGetValue(token, out string? lastApplied) &&
-            (!currentExists || !string.Equals(current, lastApplied, StringComparison.Ordinal)))
+        if (!AppliedTranslations.TryGetValue(token, out TranslationLease? lease) ||
+            !currentExists ||
+            !string.Equals(current, lease.LastAppliedValue, StringComparison.Ordinal))
         {
-            OriginalTranslations[token] = new OriginalTranslation(currentExists, current);
+            lease = new TranslationLease(currentExists, current);
+            AppliedTranslations[token] = lease;
         }
 
         bool changed = !currentExists || !string.Equals(current, text, StringComparison.Ordinal);
         localization.m_translations[token] = text;
-        LastAppliedTranslations[token] = text;
+        lease.LastAppliedValue = text;
         return changed;
     }
 
@@ -734,11 +722,10 @@ internal static class LocalizationOverrideManager
     {
         HashSet<string> current = new(currentTokens, StringComparer.Ordinal);
         bool changed = false;
-        foreach (string token in LastAppliedTranslations.Keys.Where(token => !current.Contains(token)).ToArray())
+        foreach (string token in AppliedTranslations.Keys.Where(token => !current.Contains(token)).ToArray())
         {
             changed |= RestoreTranslationIfOwned(localization, token);
-            LastAppliedTranslations.Remove(token);
-            OriginalTranslations.Remove(token);
+            AppliedTranslations.Remove(token);
         }
 
         return changed;
@@ -758,7 +745,7 @@ internal static class LocalizationOverrideManager
         }
 
         bool changed = false;
-        foreach (string token in LastAppliedTranslations.Keys.ToArray())
+        foreach (string token in AppliedTranslations.Keys.ToArray())
         {
             changed |= RestoreTranslationIfOwned(localization, token);
         }
@@ -772,16 +759,16 @@ internal static class LocalizationOverrideManager
 
     private static bool RestoreTranslationIfOwned(Localization localization, string token)
     {
-        if (!LastAppliedTranslations.TryGetValue(token, out string? lastApplied) ||
+        if (!AppliedTranslations.TryGetValue(token, out TranslationLease? lease) ||
             !localization.m_translations.TryGetValue(token, out string? current) ||
-            !string.Equals(current, lastApplied, StringComparison.Ordinal))
+            !string.Equals(current, lease.LastAppliedValue, StringComparison.Ordinal))
         {
             return false;
         }
 
-        if (OriginalTranslations.TryGetValue(token, out OriginalTranslation original) && original.Existed)
+        if (lease.OriginalExisted)
         {
-            localization.m_translations[token] = original.Value ?? "";
+            localization.m_translations[token] = lease.OriginalValue ?? "";
         }
         else
         {
@@ -795,8 +782,7 @@ internal static class LocalizationOverrideManager
     {
         AppliedLocalization = null;
         AppliedLanguage = "";
-        OriginalTranslations.Clear();
-        LastAppliedTranslations.Clear();
+        AppliedTranslations.Clear();
     }
 
     private static void ClearActivePayloadAndRestore()
@@ -851,12 +837,7 @@ internal static class LocalizationOverrideManager
             "# $df_item_meadhealthtest_description: \"A test item cloned from major healing mead.\"",
             "",
             "# Built-in DataForge tooltip tokens. You can edit these texts.",
-            "$df_se_tooltip_attack_damage: \"{0} attack damage: <color=orange>x{1}%</color>\"",
-            "$df_se_tooltip_raise_skill: \"{0} skill XP: <color=orange>{1}</color>\"",
-            "$df_se_tooltip_max_health: \"Max health: <color=orange>{0}</color>\"",
-            "$df_se_tooltip_max_stamina: \"Max stamina: <color=orange>{0}</color>\"",
-            "$df_se_tooltip_max_eitr: \"Max eitr: <color=orange>{0}</color>\"",
-            "$df_skill_all: \"All\"",
+            FormatBuiltInTranslationLines(BuiltInEnglishTranslations),
             "#",
             "# Example item override:",
             "# - item: MeadHealthtest",
@@ -865,6 +846,14 @@ internal static class LocalizationOverrideManager
             "#   description: Direct text override without localization",
             ""
         });
+    }
+
+    private static string FormatBuiltInTranslationLines(
+        IEnumerable<(string Token, string Text)> translations)
+    {
+        return string.Join(
+            Environment.NewLine,
+            translations.Select(entry => $"{entry.Token}: {QuoteYaml(entry.Text)}"));
     }
 
     private static string DefaultKoreanLocalizationTemplate()
@@ -887,12 +876,7 @@ internal static class LocalizationOverrideManager
             "# $df_item_meadhealthtest_description: \"대형 체력 벌꿀주를 복제한 테스트 아이템입니다.\"",
             "",
             "# DataForge 기본 툴팁 토큰입니다. 원하는 문구로 수정할 수 있습니다.",
-            "$df_se_tooltip_attack_damage: \"{0} 공격 피해: <color=orange>x{1}%</color>\"",
-            "$df_se_tooltip_raise_skill: \"{0} 기술 경험치: <color=orange>{1}</color>\"",
-            "$df_se_tooltip_max_health: \"최대 체력: <color=orange>{0}</color>\"",
-            "$df_se_tooltip_max_stamina: \"최대 스태미나: <color=orange>{0}</color>\"",
-            "$df_se_tooltip_max_eitr: \"최대 에이트르: <color=orange>{0}</color>\"",
-            "$df_skill_all: \"전체\"",
+            FormatBuiltInTranslationLines(BuiltInKoreanTranslations),
             "#",
             "# 예시 item override:",
             "# - item: MeadHealthtest",
@@ -1028,16 +1012,17 @@ internal static class LocalizationOverrideManager
         };
     }
 
-    private readonly struct OriginalTranslation
+    private sealed class TranslationLease
     {
-        internal readonly bool Existed;
-        internal readonly string? Value;
-
-        internal OriginalTranslation(bool existed, string? value)
+        internal TranslationLease(bool originalExisted, string? originalValue)
         {
-            Existed = existed;
-            Value = value;
+            OriginalExisted = originalExisted;
+            OriginalValue = originalValue;
         }
+
+        internal bool OriginalExisted { get; }
+        internal string? OriginalValue { get; }
+        internal string LastAppliedValue { get; set; } = "";
     }
 
     internal sealed class LocalizationPayload

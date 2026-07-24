@@ -28,20 +28,16 @@ internal static class ItemOverrideManager
     private const string ReferenceLogicVersion = "2026-06-24-item-reference-state-v2";
 
     private static readonly object StateLock = new();
-    private static readonly Dictionary<string, ItemDefinition> Baselines = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, ItemDrop> BaselineItems = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, GlobalItemMultiplierBaseline> GlobalMultiplierBaselines =
-        new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, ItemDrop> GlobalMultiplierBaselineItems =
-        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, ItemBaseline> Baselines = new(StringComparer.OrdinalIgnoreCase);
     private static readonly MethodInfo? MemberwiseCloneMethod =
         typeof(object).GetMethod("MemberwiseClone", BindingFlags.Instance | BindingFlags.NonPublic);
     private static readonly MethodInfo? SetupEquipmentMethod =
         AccessTools.Method(typeof(Humanoid), "SetupEquipment");
     private static GameObject? CloneRoot;
     private static readonly HashSet<string> ReferenceVisiblePrefabs = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly HashSet<string> CreatedClones = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, GameObject> CreatedClonePrefabs = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, CreatedCloneState> CreatedCloneStates = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> DeferredCloneRemovals = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly List<GameObject> RetiredClonePrefabs = new();
     private static readonly HashSet<string> RuntimeAppliedItemKeys = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> LiveSafeAppliedItemKeys = new(StringComparer.OrdinalIgnoreCase);
     private static readonly IDeserializer Deserializer = new DeserializerBuilder()
@@ -68,13 +64,14 @@ internal static class ItemOverrideManager
     private static DataForgeFileWatcher.DebouncedAction? ReloadDebouncer;
     private static bool ObjectDbReady;
     private static bool ZNetSceneReady;
-    private static bool RuntimeStateWasApplied;
-    private static bool GlobalMultiplierStateWasApplied;
+    private static int CreatedCloneRevision;
+    private static bool StatusEffectEquipmentRefreshPending;
     private static bool GlobalStackMultiplierStateWasApplied;
     private static bool GlobalWeightMultiplierStateWasApplied;
-    private static bool LiveSafeStateWasApplied;
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
+    private static bool GlobalMultiplierStateWasApplied =>
+        GlobalStackMultiplierStateWasApplied || GlobalWeightMultiplierStateWasApplied;
 
     internal static void Initialize(ConfigSync configSync)
     {
@@ -131,7 +128,7 @@ internal static class ItemOverrideManager
             SetActiveEntries(entries);
         }
 
-        PublishPayload(SerializeEntries(entries));
+        PublishPayload(SerializeEntries(BuildWorldCompatibleCloneEntries(entries, logDeferrals: true)));
         ApplyCurrentConfiguration();
     }
 
@@ -143,6 +140,17 @@ internal static class ItemOverrideManager
         }
 
         ObjectDbReady = true;
+        if (DataForgePlugin.UsesLocalAuthorityFiles)
+        {
+            List<ItemEntry> entries;
+            lock (StateLock)
+            {
+                entries = ActiveEntries.ToList();
+            }
+
+            PublishPayload(SerializeEntries(BuildWorldCompatibleCloneEntries(entries, logDeferrals: false)));
+        }
+
         if (ShouldSkipRemoteClientBaselineWork())
         {
             return;
@@ -163,58 +171,7 @@ internal static class ItemOverrideManager
         }
 
         ZNetSceneReady = true;
-        if (!ObjectDbReady ||
-            !DataForgeWorldLifecycle.IsGameStarted ||
-            ObjectDB.instance == null)
-        {
-            return;
-        }
-
-        List<ItemEntry> entries;
-        HashSet<string>? changedItemKeys;
-        lock (StateLock)
-        {
-            entries = ActiveEntries.ToList();
-            changedItemKeys = EntryChanges.ConsumeChangedKeys();
-        }
-
-        if (changedItemKeys is { Count: 0 })
-        {
-            return;
-        }
-
-        CleanupCreatedPrefabs(entries, destroy: true);
-        EnsureClonePrefabs(entries, warnIfMissingSource: true);
-        Dictionary<string, List<ItemEntry>> entriesByItem = BuildEnabledEntriesByItem(entries);
-        bool globalMultiplierActive = ShouldApplyGlobalItemMultiplierOverrides();
-        bool shouldApplyAllItems = globalMultiplierActive || GlobalMultiplierStateWasApplied;
-        HashSet<string> runtimeApplyKeys = GetRuntimeApplyKeys(entriesByItem, changedItemKeys);
-        HashSet<string>? applyItemKeys = shouldApplyAllItems
-            ? null
-            : runtimeApplyKeys;
-        if (shouldApplyAllItems)
-        {
-            CaptureGlobalMultiplierBaselinesIfNeeded();
-            CaptureBaselinesForItemsIfNeeded(runtimeApplyKeys);
-        }
-        else
-        {
-            CaptureBaselinesForItemsIfNeeded(applyItemKeys);
-        }
-
-        ApplyToItemPrefabs(entriesByItem, applyItemKeys);
-        RepairDropPrefabs(applyItemKeys);
-        bool shouldRefreshExistingItems = ShouldRefreshExistingItems(entriesByItem, shouldApplyAllItems);
-        if (shouldRefreshExistingItems)
-        {
-            ApplyLiveSafeToExistingItems(entriesByItem, applyItemKeys);
-        }
-
-        ObjectDB.instance.UpdateRegisters();
-        UpdateRuntimeAppliedItemState(entriesByItem, globalMultiplierActive);
-        UpdateLiveSafeItemState(entriesByItem, shouldRefreshExistingItems);
-        StatusEffectOverrideManager.RefreshItemIconReferences();
-        VneiRefreshManager.RequestRefresh(DomainName);
+        ApplyCurrentConfiguration();
     }
 
     internal static void ApplyCurrentConfiguration()
@@ -241,13 +198,20 @@ internal static class ItemOverrideManager
             changedItemKeys = EntryChanges.ConsumeChangedKeys();
         }
 
+        entries = BuildWorldCompatibleCloneEntries(entries, logDeferrals: false);
         if (changedItemKeys is { Count: 0 })
         {
             return;
         }
 
-        CleanupCreatedPrefabs(entries, destroy: true);
+        int cloneRevisionBeforeApply = CreatedCloneRevision;
+        bool hasLocalAuthority = DataForgePlugin.UsesLocalAuthorityFiles;
+        CleanupCreatedPrefabs(
+            entries,
+            destroy: hasLocalAuthority,
+            deferUntilWorldShutdown: hasLocalAuthority);
         EnsureClonePrefabs(entries, warnIfMissingSource: ZNetSceneReady);
+        bool cloneSetChanged = cloneRevisionBeforeApply != CreatedCloneRevision;
         Dictionary<string, List<ItemEntry>> entriesByItem = BuildEnabledEntriesByItem(entries);
         bool globalMultiplierActive = ShouldApplyGlobalItemMultiplierOverrides();
         bool shouldApplyAllItems = globalMultiplierActive || GlobalMultiplierStateWasApplied;
@@ -274,10 +238,78 @@ internal static class ItemOverrideManager
         }
 
         ObjectDB.instance.UpdateRegisters();
+        DataForgeResourceMap.InvalidateObjectDbCaches();
         UpdateRuntimeAppliedItemState(entriesByItem, globalMultiplierActive);
-        UpdateLiveSafeItemState(entriesByItem, shouldRefreshExistingItems);
+        UpdateLiveSafeItemState(entriesByItem);
         StatusEffectOverrideManager.RefreshItemIconReferences();
+        if (cloneSetChanged)
+        {
+            try
+            {
+                PieceOverrideManager.OnItemPrefabsChanged();
+            }
+            catch (Exception ex)
+            {
+                DataForgePlugin.Log.LogWarning(
+                    $"Could not refresh piece definitions after item clone changes: {ex.Message}");
+            }
+
+            try
+            {
+                RecipeOverrideManager.OnItemPrefabsChanged();
+            }
+            catch (Exception ex)
+            {
+                DataForgePlugin.Log.LogWarning(
+                    $"Could not refresh recipe definitions after item clone changes: {ex.Message}");
+            }
+        }
         VneiRefreshManager.RequestRefresh(DomainName);
+    }
+
+    internal static void OnStatusEffectDefinitionsChanged()
+    {
+        if (!DataForgeWorldLifecycle.IsShuttingDown)
+        {
+            StatusEffectEquipmentRefreshPending = true;
+        }
+
+        lock (StateLock)
+        {
+            EntryChanges.RequireFullApply();
+        }
+
+        try
+        {
+            ApplyCurrentConfiguration();
+        }
+        finally
+        {
+            RefreshEquipmentAfterStatusEffectChanges();
+        }
+    }
+
+    private static void RefreshEquipmentAfterStatusEffectChanges()
+    {
+        if (!StatusEffectEquipmentRefreshPending || DataForgeWorldLifecycle.IsShuttingDown)
+        {
+            StatusEffectEquipmentRefreshPending = false;
+            return;
+        }
+
+        StatusEffectEquipmentRefreshPending = false;
+        if (Player.s_players == null)
+        {
+            return;
+        }
+
+        foreach (Player player in Player.s_players)
+        {
+            if (player != null)
+            {
+                RefreshPlayerEquipment(player);
+            }
+        }
     }
 
     private static bool ShouldSkipRemoteClientBaselineWork()
@@ -291,7 +323,7 @@ internal static class ItemOverrideManager
 
         lock (StateLock)
         {
-            return ActiveEntries.Count == 0 && CreatedClones.Count == 0 && CreatedClonePrefabs.Count == 0;
+            return ActiveEntries.Count == 0 && CreatedCloneStates.Count == 0;
         }
     }
 
@@ -331,13 +363,32 @@ internal static class ItemOverrideManager
             return true;
         }
 
-        if (ItemVisualOverrides.IsIconFile(e.FullPath))
+        bool newIconFileChanged = ItemVisualOverrides.IsIconFile(e.FullPath);
+        bool oldIconFileChanged =
+            e is RenamedEventArgs renamed &&
+            ItemVisualOverrides.IsIconFile(renamed.OldFullPath);
+        bool iconFileChanged = newIconFileChanged || oldIconFileChanged;
+        if (iconFileChanged)
         {
+            if (newIconFileChanged)
+            {
+                ItemVisualOverrides.MarkIconFileChanged(e.FullPath);
+            }
+
+            if (oldIconFileChanged && e is RenamedEventArgs renamedIcon)
+            {
+                ItemVisualOverrides.MarkIconFileChanged(renamedIcon.OldFullPath);
+            }
+
+            lock (StateLock)
+            {
+                EntryChanges.RequireFullApply();
+            }
+
             return true;
         }
 
-        return e is RenamedEventArgs renamed &&
-               (IsOverrideFile(renamed.OldFullPath) || ItemVisualOverrides.IsIconFile(renamed.OldFullPath));
+        return e is RenamedEventArgs renamedOverride && IsOverrideFile(renamedOverride.OldFullPath);
     }
 
     private static void OnSyncedPayloadChanged()
@@ -374,36 +425,64 @@ internal static class ItemOverrideManager
 
     internal static void CleanupCreatedClonesForWorldTransition()
     {
-        CleanupCreatedPrefabs(new List<ItemEntry>(), destroy: true);
-        CreatedClones.Clear();
-        CreatedClonePrefabs.Clear();
+        try
+        {
+            CleanupCreatedPrefabs(
+                new List<ItemEntry>(),
+                destroy: true,
+                deferUntilWorldShutdown: false);
+        }
+        finally
+        {
+            CreatedCloneStates.Clear();
+            DeferredCloneRemovals.Clear();
+            try
+            {
+                foreach (GameObject retiredClone in RetiredClonePrefabs)
+                {
+                    if (retiredClone != null)
+                    {
+                        UnityEngine.Object.Destroy(retiredClone);
+                    }
+                }
+            }
+            finally
+            {
+                RetiredClonePrefabs.Clear();
+            }
+        }
     }
 
     internal static void OnWorldShutdown()
     {
+        bool restoreCompleted = false;
+        bool cloneCleanupCompleted = false;
         try
         {
             RestoreRuntimeStateForWorldShutdown();
+            restoreCompleted = true;
         }
         finally
         {
             try
             {
                 CleanupCreatedClonesForWorldTransition();
+                cloneCleanupCompleted = true;
             }
             finally
             {
                 ObjectDbReady = false;
                 ZNetSceneReady = false;
-                RuntimeStateWasApplied = false;
-                GlobalMultiplierStateWasApplied = false;
+                StatusEffectEquipmentRefreshPending = false;
                 GlobalStackMultiplierStateWasApplied = false;
                 GlobalWeightMultiplierStateWasApplied = false;
-                LiveSafeStateWasApplied = false;
                 RuntimeAppliedItemKeys.Clear();
                 LiveSafeAppliedItemKeys.Clear();
-                GlobalMultiplierBaselines.Clear();
-                GlobalMultiplierBaselineItems.Clear();
+                if (restoreCompleted && cloneCleanupCompleted)
+                {
+                    Baselines.Clear();
+                    ReferenceVisiblePrefabs.Clear();
+                }
                 lock (StateLock)
                 {
                     if (DataForgePlugin.IsRemoteServerClient)
@@ -430,9 +509,9 @@ internal static class ItemOverrideManager
         foreach ((string prefabName, ItemDrop itemDrop) in GetItemDrops(itemKeys))
         {
             ItemVisualOverrides.Restore(prefabName, itemDrop);
-            if (Baselines.TryGetValue(prefabName, out ItemDefinition? baseline))
+            if (Baselines.TryGetValue(prefabName, out ItemBaseline? baseline))
             {
-                ApplyDefinition(itemDrop, baseline);
+                ApplyDefinition(itemDrop, baseline.Definition);
             }
         }
 
@@ -440,19 +519,118 @@ internal static class ItemOverrideManager
         {
             foreach ((string prefabName, ItemDrop itemDrop) in GetItemDrops())
             {
-                if (GlobalMultiplierBaselines.TryGetValue(prefabName, out GlobalItemMultiplierBaseline baseline))
+                if (Baselines.TryGetValue(prefabName, out ItemBaseline? baseline))
                 {
-                    RestoreGlobalItemMultiplierFields(itemDrop.m_itemData.m_shared, baseline);
+                    RestoreGlobalItemMultiplierFields(itemDrop.m_itemData.m_shared, baseline.GlobalMultiplier);
                 }
             }
         }
 
         ObjectDB.instance.UpdateRegisters();
+        DataForgeResourceMap.InvalidateObjectDbCaches();
     }
 
     private static void PublishPayload(string payload)
     {
         DataForgeSync.PublishPayload(SyncedPayload, DomainName, payload);
+    }
+
+    private static List<ItemEntry> BuildWorldCompatibleCloneEntries(
+        IReadOnlyList<ItemEntry> configuredEntries,
+        bool logDeferrals)
+    {
+        List<ItemEntry> compatibleEntries = configuredEntries.ToList();
+        if (!DataForgePlugin.UsesLocalAuthorityFiles ||
+            !DataForgeWorldLifecycle.IsGameStarted ||
+            DataForgeWorldLifecycle.IsShuttingDown ||
+            CreatedCloneStates.Count == 0)
+        {
+            return compatibleEntries;
+        }
+
+        Dictionary<string, int> lastCloneEntryIndex = new(StringComparer.OrdinalIgnoreCase);
+        for (int index = 0; index < compatibleEntries.Count; index++)
+        {
+            ItemEntry entry = compatibleEntries[index];
+            if (entry.Override &&
+                !string.IsNullOrWhiteSpace(entry.Item) &&
+                !string.IsNullOrWhiteSpace(entry.CloneFrom))
+            {
+                lastCloneEntryIndex[entry.Item] = index;
+            }
+        }
+
+        foreach (KeyValuePair<string, CreatedCloneState> pair in CreatedCloneStates)
+        {
+            string cloneName = pair.Key;
+            CreatedCloneState cloneState = pair.Value;
+            bool hasCloneEntry = lastCloneEntryIndex.TryGetValue(cloneName, out int cloneEntryIndex);
+            string desiredSource = hasCloneEntry
+                ? NormalizePrefabName(compatibleEntries[cloneEntryIndex].CloneFrom!)
+                : "";
+            if (hasCloneEntry &&
+                string.Equals(desiredSource, cloneState.SourceName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string? effectiveName = GetEffectiveWorldCloneName(
+                cloneName,
+                cloneState,
+                configuredEntries);
+            if (hasCloneEntry)
+            {
+                compatibleEntries[cloneEntryIndex] =
+                    compatibleEntries[cloneEntryIndex].WithWorldCloneIdentity(
+                        cloneState.SourceName,
+                        effectiveName);
+                if (logDeferrals)
+                {
+                    DataForgePlugin.Log.LogWarning(
+                        $"Deferred item clone '{cloneName}' source change from '{cloneState.SourceName}' to '{desiredSource}' until the next world so every client keeps the same prefab identity.");
+                }
+            }
+            else
+            {
+                ItemEntry retainedEntry = new()
+                {
+                    Item = cloneName,
+                    Override = true,
+                    CloneFrom = cloneState.SourceName,
+                    Name = effectiveName
+                };
+                retainedEntry.SetLogContext($"world-pinned item={cloneName}");
+                compatibleEntries.Add(retainedEntry);
+                if (logDeferrals)
+                {
+                    DataForgePlugin.Log.LogWarning(
+                        $"Deferred removal of item clone '{cloneName}' until the next world and retained its synchronized prefab identity for late-joining clients.");
+                }
+            }
+        }
+
+        return compatibleEntries;
+    }
+
+    private static string? GetEffectiveWorldCloneName(
+        string cloneName,
+        CreatedCloneState cloneState,
+        IReadOnlyList<ItemEntry> configuredEntries)
+    {
+        string? effectiveName = Baselines.TryGetValue(cloneName, out ItemBaseline? baseline)
+            ? baseline.Definition.Basics?.Name
+            : cloneState.Prefab.GetComponent<ItemDrop>()?.m_itemData?.m_shared?.m_name;
+        foreach (ItemEntry entry in configuredEntries)
+        {
+            if (entry.Override &&
+                string.Equals(entry.Item, cloneName, StringComparison.OrdinalIgnoreCase) &&
+                entry.Name != null)
+            {
+                effectiveName = entry.Name;
+            }
+        }
+
+        return effectiveName;
     }
 
     private static bool TryLoadEntriesFromDisk(out List<ItemEntry> entries)
@@ -511,7 +689,16 @@ internal static class ItemOverrideManager
                 continue;
             }
 
-            entry.Item = NormalizePrefabName(itemParts[0]);
+            string rawItemName = itemParts[0].Trim();
+            string? cloneFrom = entry.CloneFrom;
+            if (rawItemName.IndexOf("(Clone)", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                DataForgeLogContext.Warning(
+                    $"{sourceContext}: Skipping item target '{rawItemName}'. Configured item targets cannot contain '(Clone)' because Unity uses that suffix for runtime instances.");
+                continue;
+            }
+
+            entry.Item = NormalizePrefabName(rawItemName);
             if (itemParts.Length > 1)
             {
                 if (float.TryParse(itemParts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float amountMultiplier))
@@ -533,7 +720,6 @@ internal static class ItemOverrideManager
                 ? $" amountMultiplier={FormatFloat(entry.AmountMultiplier)}"
                 : "";
             entry.SetLogContext($"{sourceContext} item={entry.Item}{amountContext}");
-            string? cloneFrom = entry.CloneFrom;
             if (cloneFrom != null && cloneFrom.Trim().Length > 0)
             {
                 entry.CloneFrom = NormalizePrefabName(cloneFrom);
@@ -619,12 +805,9 @@ internal static class ItemOverrideManager
         }
 
         HashSet<string> keys = new(entriesByItem.Keys, StringComparer.OrdinalIgnoreCase);
-        if (RuntimeStateWasApplied)
+        foreach (string key in RuntimeAppliedItemKeys)
         {
-            foreach (string key in RuntimeAppliedItemKeys)
-            {
-                keys.Add(key);
-            }
+            keys.Add(key);
         }
 
         return keys;
@@ -640,8 +823,6 @@ internal static class ItemOverrideManager
             RuntimeAppliedItemKeys.Add(key);
         }
 
-        RuntimeStateWasApplied = RuntimeAppliedItemKeys.Count > 0;
-        GlobalMultiplierStateWasApplied = globalMultiplierActive;
         GlobalStackMultiplierStateWasApplied = globalMultiplierActive && DataForgePlugin.StackableStackMultiplier != 1;
         GlobalWeightMultiplierStateWasApplied =
             globalMultiplierActive && Math.Abs(DataForgePlugin.ItemWeightMultiplier - 1f) > 0.0001f;
@@ -651,7 +832,7 @@ internal static class ItemOverrideManager
         Dictionary<string, List<ItemEntry>> entriesByItem,
         bool refreshAllForGlobalMultiplier)
     {
-        if (refreshAllForGlobalMultiplier || LiveSafeStateWasApplied)
+        if (refreshAllForGlobalMultiplier || LiveSafeAppliedItemKeys.Count > 0)
         {
             return true;
         }
@@ -661,9 +842,7 @@ internal static class ItemOverrideManager
             .Any(entry => entry.HasLiveSafeDefinition);
     }
 
-    private static void UpdateLiveSafeItemState(
-        Dictionary<string, List<ItemEntry>> entriesByItem,
-        bool refreshWasRun)
+    private static void UpdateLiveSafeItemState(Dictionary<string, List<ItemEntry>> entriesByItem)
     {
         LiveSafeAppliedItemKeys.Clear();
         foreach (KeyValuePair<string, List<ItemEntry>> pair in entriesByItem)
@@ -673,8 +852,6 @@ internal static class ItemOverrideManager
                 LiveSafeAppliedItemKeys.Add(pair.Key);
             }
         }
-
-        LiveSafeStateWasApplied = refreshWasRun && LiveSafeAppliedItemKeys.Count > 0;
     }
 
     private static string SerializeEntries(List<ItemEntry> entries)
@@ -804,8 +981,6 @@ internal static class ItemOverrideManager
             "#     iconRotation: 23, 51, 25.8           # x, y, z Euler rotation used only by icon: auto.",
             "#     scale: 1                             # visual model scale for item attach/drop meshes; auto icon ignores this scale.",
             "#     material: wood                       # material name from z_materials.reference.txt; replaces all item renderer material slots.",
-            "#     color: 1, 0.8, 0.6, 1                # RGBA tint applied to cloned item material instances.",
-            "#     emission: 0.5                        # emission intensity; 0 disables glow, higher values glow more if the shader supports it.",
             "#",
             "# Example:",
             "# - item: SwordIronHeavy",
@@ -816,8 +991,6 @@ internal static class ItemOverrideManager
             "#     iconRotation: 23, 51, 25.8",
             "#     scale: 0.75",
             "#     material: blackmetal",
-            "#     color: 0.8, 0.85, 1, 1",
-            "#     emission: 0.15",
             "#   damage:",
             "#     slash: 55, 0"
         }) + Environment.NewLine;
@@ -889,33 +1062,20 @@ internal static class ItemOverrideManager
 
         foreach ((string prefabName, ItemDrop itemDrop) in GetItemDrops())
         {
-            if (GlobalMultiplierBaselineItems.TryGetValue(prefabName, out ItemDrop? baselineItem) &&
-                ReferenceEquals(baselineItem, itemDrop))
-            {
-                continue;
-            }
-
-            ItemDrop.ItemData.SharedData shared = itemDrop.m_itemData.m_shared;
-            GlobalMultiplierBaselines[prefabName] = new GlobalItemMultiplierBaseline(
-                shared.m_maxStackSize,
-                shared.m_weight);
-            GlobalMultiplierBaselineItems[prefabName] = itemDrop;
+            CaptureBaseline(prefabName, itemDrop);
         }
     }
 
     private static bool CaptureBaseline(string prefabName, ItemDrop itemDrop)
     {
         TrackReferenceVisibility(prefabName, itemDrop);
-        bool hasBaseline = Baselines.ContainsKey(prefabName);
-        if (hasBaseline &&
-            BaselineItems.TryGetValue(prefabName, out ItemDrop? baselineItem) &&
-            ReferenceEquals(baselineItem, itemDrop))
+        bool hasBaseline = Baselines.TryGetValue(prefabName, out ItemBaseline? baseline);
+        if (hasBaseline && ReferenceEquals(baseline!.Item, itemDrop))
         {
             return false;
         }
 
-        Baselines[prefabName] = ItemDefinition.From(itemDrop);
-        BaselineItems[prefabName] = itemDrop;
+        Baselines[prefabName] = new ItemBaseline(itemDrop);
         return !hasBaseline;
     }
 
@@ -950,13 +1110,26 @@ internal static class ItemOverrideManager
 
     private static void EnsureClonePrefabs(List<ItemEntry> entries, bool warnIfMissingSource)
     {
-        foreach (ItemEntry entry in entries)
-        {
-            if (!entry.Override || string.IsNullOrWhiteSpace(entry.CloneFrom))
+        Dictionary<string, ItemEntry> cloneEntries = entries
+            .Where(entry =>
+                entry.Override &&
+                !string.IsNullOrWhiteSpace(entry.Item) &&
+                !string.IsNullOrWhiteSpace(entry.CloneFrom))
+            .GroupBy(entry => NormalizePrefabName(entry.Item), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.OrdinalIgnoreCase);
+        List<ItemEntry> orderedEntries = DataForgeCloneDependencyOrder.GetAcyclicOrder(
+            cloneEntries,
+            entry => NormalizePrefabName(entry.CloneFrom!),
+            (entry, reason) =>
             {
-                continue;
-            }
-
+                using (DataForgeLogContext.Push(entry.LogContext))
+                {
+                    DataForgeLogContext.Warning(
+                        $"Could not apply cloned item '{entry.Item}': {reason} Keeping the previous clone if one exists.");
+                }
+            });
+        foreach (ItemEntry entry in orderedEntries)
+        {
             using (DataForgeLogContext.Push(entry.LogContext))
             {
                 EnsureClonePrefab(entry, warnIfMissingSource);
@@ -964,7 +1137,10 @@ internal static class ItemOverrideManager
         }
     }
 
-    private static void CleanupCreatedPrefabs(List<ItemEntry> entries, bool destroy)
+    private static void CleanupCreatedPrefabs(
+        List<ItemEntry> entries,
+        bool destroy,
+        bool deferUntilWorldShutdown)
     {
         HashSet<string> activeCloneNames = new(
             entries
@@ -972,10 +1148,21 @@ internal static class ItemOverrideManager
                 .Select(entry => entry.Item),
             StringComparer.OrdinalIgnoreCase);
 
-        foreach (string cloneName in CreatedClonePrefabs.Keys.ToList())
+        DeferredCloneRemovals.RemoveWhere(activeCloneNames.Contains);
+        foreach (string cloneName in CreatedCloneStates.Keys.ToList())
         {
             if (activeCloneNames.Contains(cloneName))
             {
+                continue;
+            }
+
+            if (deferUntilWorldShutdown)
+            {
+                if (DeferredCloneRemovals.Add(cloneName))
+                {
+                    DataForgePlugin.Log.LogInfo(
+                        $"Deferred removal of item clone '{cloneName}' until world shutdown so live item, recipe, and piece references remain valid.");
+                }
                 continue;
             }
 
@@ -990,20 +1177,23 @@ internal static class ItemOverrideManager
             return;
         }
 
-        CreatedClonePrefabs.TryGetValue(entry.Item, out GameObject? ownedClonePrefab);
-        if (CreatedClonePrefabs.ContainsKey(entry.Item) && ownedClonePrefab == null)
+        string sourceName = NormalizePrefabName(entry.CloneFrom!);
+        CreatedCloneStates.TryGetValue(entry.Item, out CreatedCloneState? cloneState);
+        if (cloneState != null && cloneState.Prefab == null)
         {
             RemoveCreatedClonePrefab(entry.Item, destroy: false);
-            ownedClonePrefab = null;
+            cloneState = null;
         }
 
+        GameObject? ownedClonePrefab = cloneState?.Prefab;
         GameObject? existingPrefab = ResolveItemPrefab(entry.Item);
         bool ownsExistingPrefab = existingPrefab != null &&
                                   ownedClonePrefab != null &&
                                   ReferenceEquals(existingPrefab, ownedClonePrefab);
         if (existingPrefab != null && ownedClonePrefab != null && !ownsExistingPrefab)
         {
-            RemoveCreatedClonePrefab(entry.Item, destroy: true);
+            RemoveCreatedClonePrefab(entry.Item, destroy: false);
+            cloneState = null;
             ownedClonePrefab = null;
         }
         else if (existingPrefab == null && ownedClonePrefab != null)
@@ -1012,23 +1202,66 @@ internal static class ItemOverrideManager
             ownsExistingPrefab = true;
         }
 
+        if (cloneState != null && ownedClonePrefab != null && ownsExistingPrefab)
+        {
+            GameObject? requestedSource = ResolveItemPrefab(sourceName);
+            bool sourceNameChanged =
+                !string.Equals(cloneState.SourceName, sourceName, StringComparison.OrdinalIgnoreCase);
+            bool sourcePrefabChanged = !ReferenceEquals(cloneState.SourcePrefab, requestedSource);
+            if (sourceNameChanged || sourcePrefabChanged)
+            {
+                if (DataForgePlugin.UsesLocalAuthorityFiles &&
+                    DataForgeWorldLifecycle.IsGameStarted &&
+                    !DataForgeWorldLifecycle.IsShuttingDown)
+                {
+                    if (sourceNameChanged)
+                    {
+                        DataForgeLogContext.Warning(
+                            $"Deferred cloned item '{entry.Item}' configured source change until the next world.");
+                    }
+                    else
+                    {
+                        DataForgeLogContext.Warning(
+                            $"Detected a same-name source prefab replacement for cloned item '{entry.Item}' ('{sourceName}'). Keeping the existing clone for this world; this external hot replacement cannot be represented in the synchronized payload, so late-joining clients may differ until the world restarts.");
+                    }
+                    return;
+                }
+
+                if (requestedSource == null || ReferenceEquals(requestedSource, ownedClonePrefab))
+                {
+                    if (warnIfMissingSource)
+                    {
+                        DataForgeLogContext.Warning(
+                            $"Could not change cloned item '{entry.Item}' to source '{entry.CloneFrom}'. Keeping the previous clone.");
+                    }
+                    return;
+                }
+
+                GameObject? replacement = TryCreateStoredClone(requestedSource, entry);
+                if (replacement == null)
+                {
+                    return;
+                }
+
+                RegisterObjectDbItemPrefab(replacement, addToItems: true);
+                RebindCreatedCloneReferences(ownedClonePrefab, replacement);
+                RemoveCreatedClonePrefab(entry.Item, destroy: false);
+                ItemDrop replacementItemDrop = replacement.GetComponent<ItemDrop>();
+                CaptureBaseline(entry.Item, replacementItemDrop);
+                CreatedCloneStates[entry.Item] = new CreatedCloneState(replacement, sourceName, requestedSource);
+                CreatedCloneRevision++;
+                DataForgePlugin.Log.LogInfo($"Changed cloned item '{entry.Item}' source to '{sourceName}'.");
+                return;
+            }
+        }
+
         if (existingPrefab != null)
         {
             if (ownsExistingPrefab)
             {
-                CreatedClones.Add(entry.Item);
                 EnsureStoredClonePrefab(existingPrefab);
-                string? cloneSourceName = entry.CloneFrom;
-                GameObject? existingCloneSource = !string.IsNullOrWhiteSpace(cloneSourceName)
-                    ? ResolveItemPrefab(cloneSourceName!)
-                    : null;
-                PrepareClonedItemData(existingPrefab, existingCloneSource, entry.Item, entry.Name);
-            }
-            else if (CreatedClones.Remove(entry.Item))
-            {
-                Baselines.Remove(entry.Item);
-                BaselineItems.Remove(entry.Item);
-                ReferenceVisiblePrefabs.Remove(entry.Item);
+                GameObject? existingCloneSource = ResolveItemPrefab(sourceName);
+                PrepareClonedItemData(existingPrefab, existingCloneSource, entry.Item);
             }
 
             RegisterObjectDbItemPrefab(existingPrefab);
@@ -1037,10 +1270,8 @@ internal static class ItemOverrideManager
             return;
         }
 
-        CreatedClones.Remove(entry.Item);
-        CreatedClonePrefabs.Remove(entry.Item);
-
-        GameObject sourcePrefab = ObjectDB.instance.GetItemPrefab(entry.CloneFrom);
+        CreatedCloneStates.Remove(entry.Item);
+        GameObject? sourcePrefab = ResolveItemPrefab(sourceName);
         if (sourcePrefab == null)
         {
             if (warnIfMissingSource)
@@ -1050,38 +1281,108 @@ internal static class ItemOverrideManager
             return;
         }
 
-        GameObject clone = InstantiateStoredClone(sourcePrefab);
-        clone.name = entry.Item;
-        PrepareClonedItemData(clone, sourcePrefab, entry.Item, entry.Name);
+        GameObject? clone = TryCreateStoredClone(sourcePrefab, entry);
+        if (clone == null)
+        {
+            return;
+        }
 
         RegisterObjectDbItemPrefab(clone, addToItems: true);
         ItemDrop itemDrop = clone.GetComponent<ItemDrop>();
         CaptureBaseline(entry.Item, itemDrop);
-        CreatedClones.Add(entry.Item);
-        CreatedClonePrefabs[entry.Item] = clone;
-        DataForgePlugin.Log.LogInfo($"Cloned item '{entry.CloneFrom}' as '{entry.Item}'.");
+        CreatedCloneStates[entry.Item] = new CreatedCloneState(clone, sourceName, sourcePrefab);
+        CreatedCloneRevision++;
+        DataForgePlugin.Log.LogInfo($"Cloned item '{sourceName}' as '{entry.Item}'.");
+    }
+
+    private static void RebindCreatedCloneReferences(GameObject previousPrefab, GameObject replacementPrefab)
+    {
+        ItemDrop? previousItem = previousPrefab.GetComponent<ItemDrop>();
+        ItemDrop? replacementItem = replacementPrefab.GetComponent<ItemDrop>();
+        if (previousItem == null || replacementItem == null)
+        {
+            return;
+        }
+
+        try
+        {
+            RecipeOverrideManager.RebindItemPrefabReferences(previousItem, replacementItem);
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogWarning(
+                $"Could not rebind recipe references after replacing item clone '{replacementPrefab.name}': {ex.Message}");
+        }
+
+        try
+        {
+            PieceOverrideManager.RebindItemPrefabReferences(previousPrefab, replacementPrefab);
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogWarning(
+                $"Could not rebind piece references after replacing item clone '{replacementPrefab.name}': {ex.Message}");
+        }
+    }
+
+    private static GameObject? TryCreateStoredClone(GameObject sourcePrefab, ItemEntry entry)
+    {
+        GameObject? clone = null;
+        try
+        {
+            clone = InstantiateStoredClone(sourcePrefab);
+            clone.name = entry.Item;
+            PrepareClonedItemData(clone, sourcePrefab, entry.Item);
+            if (clone.GetComponent<ItemDrop>() == null)
+            {
+                throw new InvalidOperationException($"source '{entry.CloneFrom}' has no ItemDrop component");
+            }
+
+            return clone;
+        }
+        catch (Exception ex)
+        {
+            if (clone != null)
+            {
+                UnityEngine.Object.Destroy(clone);
+            }
+
+            DataForgeLogContext.Warning(
+                $"Could not clone item '{entry.Item}' from '{entry.CloneFrom}': {ex.GetBaseException().Message}");
+            return null;
+        }
     }
 
     private static void RemoveCreatedClonePrefab(string cloneName, bool destroy)
     {
-        if (!CreatedClonePrefabs.TryGetValue(cloneName, out GameObject clonePrefab) || clonePrefab == null)
+        DeferredCloneRemovals.Remove(cloneName);
+        if (!CreatedCloneStates.TryGetValue(cloneName, out CreatedCloneState? cloneState) ||
+            cloneState.Prefab == null)
         {
-            CreatedClonePrefabs.Remove(cloneName);
-            CreatedClones.Remove(cloneName);
+            if (CreatedCloneStates.Remove(cloneName))
+            {
+                CreatedCloneRevision++;
+            }
+            ItemVisualOverrides.RestoreAndForget(
+                cloneName,
+                null);
             Baselines.Remove(cloneName);
-            BaselineItems.Remove(cloneName);
             ReferenceVisiblePrefabs.Remove(cloneName);
             return;
         }
 
+        GameObject clonePrefab = cloneState.Prefab;
         UnregisterObjectDbItemPrefab(cloneName, clonePrefab);
         UnregisterZNetScenePrefab(cloneName, clonePrefab);
-        ItemVisualOverrides.Restore(cloneName, clonePrefab.GetComponent<ItemDrop>());
+        ItemVisualOverrides.RestoreAndForget(
+            cloneName,
+            clonePrefab.GetComponent<ItemDrop>());
 
-        CreatedClonePrefabs.Remove(cloneName);
-        CreatedClones.Remove(cloneName);
+        if (CreatedCloneStates.Remove(cloneName))
+        {
+            CreatedCloneRevision++;
+        }
         Baselines.Remove(cloneName);
-        BaselineItems.Remove(cloneName);
         ReferenceVisiblePrefabs.Remove(cloneName);
 
         if (destroy)
@@ -1091,6 +1392,7 @@ internal static class ItemOverrideManager
         else
         {
             clonePrefab.SetActive(false);
+            RetiredClonePrefabs.Add(clonePrefab);
         }
     }
 
@@ -1105,8 +1407,7 @@ internal static class ItemOverrideManager
     private static void PrepareClonedItemData(
         GameObject clonePrefab,
         GameObject? sourcePrefab,
-        string clonePrefabName,
-        string? configuredName)
+        string clonePrefabName)
     {
         ItemDrop itemDrop = clonePrefab.GetComponent<ItemDrop>();
         if (itemDrop?.m_itemData?.m_shared == null)
@@ -1125,8 +1426,8 @@ internal static class ItemOverrideManager
         }
 
         EnsureIndependentSharedMembers(shared, sourceShared);
-        if (string.IsNullOrWhiteSpace(configuredName) &&
-            (sourceShared == null || string.Equals(shared.m_name, sourceShared.m_name, StringComparison.Ordinal)))
+        if (sourceShared == null ||
+            string.Equals(shared.m_name, sourceShared.m_name, StringComparison.Ordinal))
         {
             shared.m_name = clonePrefabName;
         }
@@ -1285,7 +1586,7 @@ internal static class ItemOverrideManager
             return false;
         }
 
-        return CreatedClones.Contains(NormalizePrefabName(itemDrop.gameObject.name));
+        return CreatedCloneStates.ContainsKey(NormalizePrefabName(itemDrop.gameObject.name));
     }
 
     internal static void RepairDropPrefab(ItemDrop.ItemData item)
@@ -1331,7 +1632,8 @@ internal static class ItemOverrideManager
     {
         foreach (GameObject prefab in ObjectDB.instance.m_items)
         {
-            if (prefab == null || CreatedClones.Contains(prefab.name) != preferCreatedClones)
+            if (prefab == null ||
+                CreatedCloneStates.ContainsKey(NormalizePrefabName(prefab.name)) != preferCreatedClones)
             {
                 continue;
             }
@@ -1494,26 +1796,26 @@ internal static class ItemOverrideManager
             {
                 ItemVisualOverrides.Restore(prefabName, itemDrop);
 
-                if (Baselines.TryGetValue(prefabName, out ItemDefinition? baseline))
+                if (Baselines.TryGetValue(prefabName, out ItemBaseline? baseline))
                 {
-                    ApplyDefinition(itemDrop, baseline);
+                    ApplyDefinition(itemDrop, baseline.Definition);
                 }
             }
 
             if (!DataForgePlugin.ItemOverridesEnabled)
             {
                 if (GlobalMultiplierStateWasApplied &&
-                    GlobalMultiplierBaselines.TryGetValue(prefabName, out GlobalItemMultiplierBaseline disabledBaseline))
+                    Baselines.TryGetValue(prefabName, out ItemBaseline? disabledBaseline))
                 {
-                    RestoreGlobalItemMultiplierFields(itemDrop.m_itemData.m_shared, disabledBaseline);
+                    RestoreGlobalItemMultiplierFields(itemDrop.m_itemData.m_shared, disabledBaseline.GlobalMultiplier);
                 }
 
                 continue;
             }
 
-            if (GlobalMultiplierBaselines.TryGetValue(prefabName, out GlobalItemMultiplierBaseline multiplierBaseline))
+            if (Baselines.TryGetValue(prefabName, out ItemBaseline? multiplierBaseline))
             {
-                ApplyGlobalItemMultipliers(itemDrop.m_itemData.m_shared, multiplierBaseline);
+                ApplyGlobalItemMultipliers(itemDrop.m_itemData.m_shared, multiplierBaseline.GlobalMultiplier);
             }
 
             if (!hasEntries)
@@ -1677,10 +1979,10 @@ internal static class ItemOverrideManager
         }
 
         bool floatingApplied = false;
-        if (Baselines.TryGetValue(prefabName, out ItemDefinition? baseline))
+        if (Baselines.TryGetValue(prefabName, out ItemBaseline? baseline))
         {
-            ApplyFloating(itemDrop.gameObject, baseline.Basics?.Floating, immediate: false);
-            floatingApplied = baseline.Basics?.Floating.HasValue == true;
+            ApplyFloating(itemDrop.gameObject, baseline.Definition.Basics?.Floating, immediate: false);
+            floatingApplied = baseline.Definition.Basics?.Floating.HasValue == true;
         }
 
         if (!DataForgePlugin.ItemOverridesEnabled)
@@ -1734,27 +2036,27 @@ internal static class ItemOverrideManager
         bool hasEntries = entriesByItem.TryGetValue(prefabName, out List<ItemEntry> entries);
         bool shouldRestoreLiveSafeState = hasEntries || LiveSafeAppliedItemKeys.Contains(prefabName);
 
-        if (shouldRestoreLiveSafeState && Baselines.TryGetValue(prefabName, out ItemDefinition? baseline))
+        if (shouldRestoreLiveSafeState && Baselines.TryGetValue(prefabName, out ItemBaseline? baseline))
         {
-            ApplyLiveSafeDefinition(item.m_shared, baseline);
+            ApplyLiveSafeDefinition(item.m_shared, baseline.Definition);
             applied = true;
         }
 
         if (!DataForgePlugin.ItemOverridesEnabled)
         {
             if (GlobalMultiplierStateWasApplied &&
-                GlobalMultiplierBaselines.TryGetValue(prefabName, out GlobalItemMultiplierBaseline disabledBaseline))
+                Baselines.TryGetValue(prefabName, out ItemBaseline? disabledBaseline))
             {
-                RestoreGlobalItemMultiplierFields(item.m_shared, disabledBaseline);
+                RestoreGlobalItemMultiplierFields(item.m_shared, disabledBaseline.GlobalMultiplier);
                 applied = true;
             }
 
             return applied;
         }
 
-        if (GlobalMultiplierBaselines.TryGetValue(prefabName, out GlobalItemMultiplierBaseline multiplierBaseline))
+        if (Baselines.TryGetValue(prefabName, out ItemBaseline? multiplierBaseline))
         {
-            ApplyGlobalItemMultipliers(item.m_shared, multiplierBaseline);
+            ApplyGlobalItemMultipliers(item.m_shared, multiplierBaseline.GlobalMultiplier);
             applied = true;
         }
 
@@ -1938,6 +2240,35 @@ internal static class ItemOverrideManager
 
         internal int MaxStackSize { get; }
         internal float Weight { get; }
+    }
+
+    private sealed class ItemBaseline
+    {
+        internal ItemBaseline(ItemDrop itemDrop)
+        {
+            Item = itemDrop;
+            Definition = ItemDefinition.From(itemDrop);
+            ItemDrop.ItemData.SharedData shared = itemDrop.m_itemData.m_shared;
+            GlobalMultiplier = new GlobalItemMultiplierBaseline(shared.m_maxStackSize, shared.m_weight);
+        }
+
+        internal ItemDrop Item { get; }
+        internal ItemDefinition Definition { get; }
+        internal GlobalItemMultiplierBaseline GlobalMultiplier { get; }
+    }
+
+    private sealed class CreatedCloneState
+    {
+        internal CreatedCloneState(GameObject prefab, string sourceName, GameObject sourcePrefab)
+        {
+            Prefab = prefab;
+            SourceName = sourceName;
+            SourcePrefab = sourcePrefab;
+        }
+
+        internal GameObject Prefab { get; }
+        internal string SourceName { get; }
+        internal GameObject SourcePrefab { get; }
     }
 
     private static void ApplyFloating(GameObject gameObject, bool? floating, bool immediate)
@@ -2471,16 +2802,6 @@ internal static class ItemOverrideManager
         }
     }
 
-    private static void CopyTupleInt(string[] parts, int index, Action<int> assign)
-    {
-        if (parts.Length > index &&
-            parts[index].Length > 0 &&
-            int.TryParse(parts[index], NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed))
-        {
-            assign(parsed);
-        }
-    }
-
     private static void CopyTupleBool(string[] parts, int index, Action<bool> assign)
     {
         if (parts.Length > index &&
@@ -2612,6 +2933,120 @@ internal static class ItemOverrideManager
              effect.m_name.Equals(statusEffectName, StringComparison.OrdinalIgnoreCase)));
     }
 
+    internal static bool RebindStatusEffectReferences(StatusEffect previous, StatusEffect? replacement)
+    {
+        try
+        {
+            RebindStatusEffectReferencesCore(previous, replacement);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogWarning(
+                $"Could not rebind all item references from status effect '{previous?.name}': {ex.Message}");
+            return false;
+        }
+    }
+
+    private static void RebindStatusEffectReferencesCore(StatusEffect previous, StatusEffect? replacement)
+    {
+        if (ObjectDB.instance == null || previous == null)
+        {
+            return;
+        }
+
+        HashSet<ItemDrop.ItemData.SharedData> visited = new();
+        int changed = 0;
+
+        void RebindSharedData(ItemDrop.ItemData.SharedData? shared)
+        {
+            if (shared == null || !visited.Add(shared))
+            {
+                return;
+            }
+
+            changed += ReplaceStatusEffectReference(ref shared.m_equipStatusEffect, previous, replacement);
+            changed += ReplaceStatusEffectReference(ref shared.m_setStatusEffect, previous, replacement);
+            changed += ReplaceStatusEffectReference(ref shared.m_consumeStatusEffect, previous, replacement);
+            changed += ReplaceStatusEffectReference(ref shared.m_attackStatusEffect, previous, replacement);
+            changed += ReplaceStatusEffectReference(ref shared.m_perfectBlockStatusEffect, previous, replacement);
+            changed += ReplaceStatusEffectReference(ref shared.m_fullAdrenalineSE, previous, replacement);
+        }
+
+        void RebindItemData(ItemDrop.ItemData? item)
+        {
+            RebindSharedData(item?.m_shared);
+        }
+
+        foreach (GameObject prefab in ObjectDB.instance.m_items)
+        {
+            RebindItemData(prefab != null ? prefab.GetComponent<ItemDrop>()?.m_itemData : null);
+        }
+
+        foreach (GameObject retiredPrefab in RetiredClonePrefabs)
+        {
+            RebindItemData(retiredPrefab != null ? retiredPrefab.GetComponent<ItemDrop>()?.m_itemData : null);
+        }
+
+        if (!DataForgeWorldLifecycle.IsShuttingDown)
+        {
+            if (Player.s_players != null)
+            {
+                foreach (Player player in Player.s_players)
+                {
+                    Inventory? inventory = player != null ? player.GetInventory() : null;
+                    if (inventory == null)
+                    {
+                        continue;
+                    }
+
+                    foreach (ItemDrop.ItemData item in inventory.GetAllItems())
+                    {
+                        RebindItemData(item);
+                    }
+                }
+            }
+
+            foreach (Container container in UnityEngine.Object.FindObjectsByType<Container>(FindObjectsSortMode.None))
+            {
+                Inventory? inventory = container != null ? container.GetInventory() : null;
+                if (inventory == null)
+                {
+                    continue;
+                }
+
+                foreach (ItemDrop.ItemData item in inventory.GetAllItems())
+                {
+                    RebindItemData(item);
+                }
+            }
+
+            foreach (ItemDrop itemDrop in ItemDrop.s_instances)
+            {
+                RebindItemData(itemDrop?.m_itemData);
+            }
+
+            if (changed > 0)
+            {
+                StatusEffectEquipmentRefreshPending = true;
+            }
+        }
+    }
+
+    private static int ReplaceStatusEffectReference(
+        ref StatusEffect? current,
+        StatusEffect previous,
+        StatusEffect? replacement)
+    {
+        if (!ReferenceEquals(current, previous))
+        {
+            return 0;
+        }
+
+        current = replacement;
+        return 1;
+    }
+
     internal static float GetAcquisitionAmountMultiplier(GameObject? itemPrefab)
     {
         if (!DataForgePlugin.ItemOverridesEnabled || itemPrefab == null)
@@ -2707,7 +3142,7 @@ internal static class ItemOverrideManager
                     .Where(pair => ReferenceVisiblePrefabs.Contains(pair.Key))
                     .Select(pair => new
                     {
-                        Entry = CreateOutputEntryMap(pair.Key, pair.Value),
+                        Entry = CreateOutputEntryMap(pair.Key, pair.Value.Definition),
                         OwnerKey = pair.Key,
                         SortKey = DataForgeResourceMap.BuildItemSortKey(
                             pair.Key,
@@ -2764,7 +3199,7 @@ internal static class ItemOverrideManager
             .Where(pair => ReferenceVisiblePrefabs.Contains(pair.Key))
             .Select(pair => new
             {
-                Entry = ItemReferenceEntry.From(pair.Key, pair.Value),
+                Entry = ItemReferenceEntry.From(pair.Key, pair.Value.Definition),
                 SortKey = DataForgeResourceMap.BuildItemSortKey(
                     pair.Key,
                     DataForgeResourceMap.GetItemTierSortValue(pair.Key),
@@ -3194,11 +3629,6 @@ internal static class ItemOverrideManager
     private static bool IsMagicLike(ItemDefinition definition) =>
         IsSkillType(definition, Skills.SkillType.ElementalMagic, Skills.SkillType.BloodMagic);
 
-    private static bool IsFoodLike(ItemDefinition definition) =>
-        IsItemType(definition, ItemDrop.ItemData.ItemType.Consumable) ||
-        HasFoodStats(definition.Food) ||
-        HasStatusEffectValue(definition.Effects?.ConsumeStatusEffect);
-
     private static bool HasDamageTakenModifiers(DamageTakenModifierDefinition? modifiers)
     {
         if (modifiers == null)
@@ -3445,6 +3875,14 @@ internal static class ItemOverrideManager
             LogContext = value;
         }
 
+        internal ItemEntry WithWorldCloneIdentity(string cloneFrom, string? effectiveName)
+        {
+            ItemEntry copy = (ItemEntry)MemberwiseClone();
+            copy.CloneFrom = cloneFrom;
+            copy.Name = effectiveName;
+            return copy;
+        }
+
         internal bool HasPrefabDefinition =>
             HasBasicsDefinition ||
             Durability != null ||
@@ -3576,7 +4014,9 @@ internal static class ItemOverrideManager
                 Equipment = output.EmitEquipment ? ToReferenceEquipment(definition.Equipment, output) : null,
                 DamageTakenModifiers = output.EmitDamageTakenModifiers ? definition.DamageTakenModifiers : null,
                 Food = output.EmitFood ? definition.Food : null,
-                Shield = output.EmitShield && IsItemType(definition, ItemDrop.ItemData.ItemType.Shield) ? definition.Shield : null,
+                Shield = output.EmitShield && IsItemType(definition, ItemDrop.ItemData.ItemType.Shield)
+                    ? ToReferenceShield(definition.Shield)
+                    : null,
                 Damage = output.EmitCombat && output.EmitDirectCombatStats ? ToReferenceDamage(definition.Combat) : null,
                 PrimaryAttack = output.EmitPrimaryAttack ? ToReferencePrimaryAttack(definition.Combat?.PrimaryAttack) : null,
                 SecondaryAttack = output.EmitSecondaryAttack ? ToReferenceAttack(definition.Combat?.SecondaryAttack) : null,
@@ -3681,11 +4121,11 @@ internal static class ItemOverrideManager
                 SpawnOnHit = attack.SpawnOnHit,
                 Draw = ShouldExposeAttackDraw(attack.Draw) ? attack.Draw : null,
                 Reload = ShouldExposeAttackReload(attack.Reload) ? attack.Reload : null,
-                DamageMultiplier = attack.DamageMultiplier,
-                ForceMultiplier = attack.ForceMultiplier,
-                StaggerMultiplier = attack.StaggerMultiplier,
+                DamageMultiplier = NullIfReferenceDefault(attack.DamageMultiplier, 1f),
+                ForceMultiplier = NullIfReferenceDefault(attack.ForceMultiplier, 1f),
+                StaggerMultiplier = NullIfReferenceDefault(attack.StaggerMultiplier, 1f),
                 LastChainDamageMultiplier = ShouldExposeLastChainDamageMultiplier(attack) ? attack.LastChainDamageMultiplier : null,
-                RaiseSkillAmount = attack.RaiseSkillAmount
+                RaiseSkillAmount = NullIfReferenceDefault(attack.RaiseSkillAmount, 1f)
             };
         }
 
@@ -3705,11 +4145,30 @@ internal static class ItemOverrideManager
                 SpawnOnHit = attack.SpawnOnHit,
                 Draw = ShouldExposeAttackDraw(attack.Draw) ? attack.Draw : null,
                 Reload = ShouldExposeAttackReload(attack.Reload) ? attack.Reload : null,
-                DamageMultiplier = attack.DamageMultiplier,
-                ForceMultiplier = attack.ForceMultiplier,
-                StaggerMultiplier = attack.StaggerMultiplier,
-                RaiseSkillAmount = attack.RaiseSkillAmount
+                DamageMultiplier = NullIfReferenceDefault(attack.DamageMultiplier, 1f),
+                ForceMultiplier = NullIfReferenceDefault(attack.ForceMultiplier, 1f),
+                StaggerMultiplier = NullIfReferenceDefault(attack.StaggerMultiplier, 1f),
+                RaiseSkillAmount = NullIfReferenceDefault(attack.RaiseSkillAmount, 1f)
             };
+        }
+
+        private static ShieldDefinition? ToReferenceShield(ShieldDefinition? shield)
+        {
+            return shield == null
+                ? null
+                : new ShieldDefinition
+                {
+                    BlockPower = shield.BlockPower,
+                    DeflectionForce = shield.DeflectionForce,
+                    TimedBlockBonus = NullIfReferenceDefault(shield.TimedBlockBonus, 2f)
+                };
+        }
+
+        private static float? NullIfReferenceDefault(float? value, float defaultValue)
+        {
+            return value.HasValue && Math.Abs(value.Value - defaultValue) <= 0.0001f
+                ? null
+                : value;
         }
     }
 
@@ -3748,8 +4207,6 @@ internal static class ItemOverrideManager
         public string? IconRotation { get; set; }
         public float? Scale { get; set; }
         public string? Material { get; set; }
-        public string? Color { get; set; }
-        public float? Emission { get; set; }
     }
 
     internal sealed class BasicsDefinition

@@ -47,7 +47,7 @@ DataForge can edit common item fields, including:
 - durability, food values, armor, equip modifiers, damage, block values, attacks
 - status effects attached to equip, consume, attack, perfect block, or full adrenaline
 - item cloning from an existing prefab
-- visual overrides such as material, color, emission, custom icon, and auto icon rendering
+- visual overrides such as material, scale, custom icon, and auto icon rendering
 - item acquisition multipliers for drops, pickup, crafting, cooking, and smelting
 
 Example:
@@ -76,8 +76,6 @@ Clone example:
     iconRotation: 23, 51, 25.8
     scale: 0.85
     material: blackmetal
-    color: 0.8, 0.85, 1, 1
-    emission: 0.15
   damage:
     slash: 72, 0
 ```

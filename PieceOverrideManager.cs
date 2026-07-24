@@ -50,11 +50,9 @@ internal static class PieceOverrideManager
     private static readonly Dictionary<string, Piece> BaselinePieces = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<PieceTable, List<GameObject>> PieceTableOrderBaselines = new(ReferenceComparer<PieceTable>.Instance);
     private static readonly Dictionary<GameObject, Piece.PieceCategory> PieceCategoryMoveBaselines = new(ReferenceComparer<GameObject>.Instance);
-    private static readonly HashSet<int> ManagedStationExtensionInstanceIds = new();
-    private static readonly HashSet<int> ManagedCraftingStationInstanceIds = new();
-    private static readonly Dictionary<int, List<StationExtensionSnapshot>> StationExtensionRemovalSnapshots = new();
-    private static readonly Dictionary<int, List<RendererMaterialSnapshot>> PieceMaterialSnapshots = new();
-    private static readonly Dictionary<int, Sprite?> PieceIconSnapshots = new();
+    private static readonly Dictionary<PieceTable, HashSet<Piece.PieceCategory>> InsertedPieceTableCategories = new(ReferenceComparer<PieceTable>.Instance);
+    private static readonly Dictionary<GameObject, List<StationExtensionSnapshot>> StationExtensionRemovalSnapshots =
+        new(ReferenceComparer<GameObject>.Instance);
     private static readonly HashSet<string> RuntimeAppliedPieceKeys = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, string> PieceTableAliases = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -102,7 +100,6 @@ internal static class PieceOverrideManager
     private static bool GameDataReady;
     private static bool ObjectDbReady;
     private static bool PieceTablesReady;
-    private static bool RuntimeStateWasApplied;
     private static bool PieceTableSortWasApplied;
     private static bool PieceTableMembershipWasApplied;
     private static bool PieceCategoryConfigurationWasApplied;
@@ -152,7 +149,7 @@ internal static class PieceOverrideManager
         Watcher?.Dispose();
         ReloadDebouncer?.Dispose();
         ReloadDebouncer = DataForgeFileWatcher.CreateDebouncedAction(ReloadDelayTicks, ReloadYamlValues);
-        Watcher = DataForgeFileWatcher.Create(ConfigDirectory, "*.*", includeSubdirectories: false, ReadYamlValues);
+        Watcher = DataForgeFileWatcher.Create(ConfigDirectory, "*.*", includeSubdirectories: true, ReadYamlValues);
     }
 
     internal static void ReloadFromDiskAndSync()
@@ -233,7 +230,7 @@ internal static class PieceOverrideManager
             !hasActivePieceTableAssignments &&
             !hasActiveRemovedPieces &&
             !hasActivePieceCategoryConfiguration &&
-            !RuntimeStateWasApplied &&
+            RuntimeAppliedPieceKeys.Count == 0 &&
             !PieceTableSortWasApplied &&
             !PieceTableMembershipWasApplied &&
             !PieceCategoryConfigurationWasApplied)
@@ -246,7 +243,7 @@ internal static class PieceOverrideManager
         RestorePieceCategoryMoveBaselines();
         RefreshPieceCategoryRegistry();
 
-        bool shouldTouchRuntime = hasActiveRuntimeDefinitions || RuntimeStateWasApplied;
+        bool shouldTouchRuntime = hasActiveRuntimeDefinitions || RuntimeAppliedPieceKeys.Count > 0;
         HashSet<string>? runtimePieceKeys = shouldTouchRuntime
             ? GetRuntimeApplyKeys(changedPieceKeys, hasActiveRuntimeDefinitions)
             : null;
@@ -279,6 +276,7 @@ internal static class PieceOverrideManager
         {
             PieceTableCategoryGuard.PruneCategoryIfUnused(move.Source, move.SourceCategory);
         }
+        PruneUnusedInsertedPieceTableCategories();
         if (shouldTouchRuntime ||
             hasActivePieceCategoryConfiguration ||
             PieceCategoryConfigurationWasApplied)
@@ -288,7 +286,6 @@ internal static class PieceOverrideManager
 
         ReapplyRecipesIfCraftingStationTopologyChanged();
 
-        RuntimeStateWasApplied = hasActiveRuntimeDefinitions;
         RuntimeAppliedPieceKeys.Clear();
         if (hasActiveRuntimeDefinitions)
         {
@@ -401,7 +398,7 @@ internal static class PieceOverrideManager
     private static bool ShouldSkipRemoteClientBaselineWork()
     {
         if (!DataForgePlugin.IsRemoteServerClient ||
-            RuntimeStateWasApplied ||
+            RuntimeAppliedPieceKeys.Count > 0 ||
             PieceTableSortWasApplied ||
             PieceTableMembershipWasApplied ||
             PieceCategoryConfigurationWasApplied)
@@ -451,6 +448,99 @@ internal static class PieceOverrideManager
         ApplyCurrentConfiguration();
     }
 
+    internal static void RebindItemPrefabReferences(GameObject previousPrefab, GameObject replacementPrefab)
+    {
+        if (previousPrefab == null || replacementPrefab == null)
+        {
+            return;
+        }
+
+        ItemDrop? previousItem = previousPrefab.GetComponent<ItemDrop>();
+        ItemDrop? replacementItem = replacementPrefab.GetComponent<ItemDrop>();
+        if (previousItem == null || replacementItem == null)
+        {
+            return;
+        }
+
+        Piece? previousPiece = previousPrefab.GetComponent<Piece>();
+        Piece? replacementPiece = replacementPrefab.GetComponent<Piece>();
+
+        foreach (Piece piece in Resources.FindObjectsOfTypeAll<Piece>())
+        {
+            if (piece == null)
+            {
+                continue;
+            }
+
+            foreach (Piece.Requirement requirement in piece.m_resources ?? Array.Empty<Piece.Requirement>())
+            {
+                if (requirement != null && ReferenceEquals(requirement.m_resItem, previousItem))
+                {
+                    requirement.m_resItem = replacementItem;
+                }
+            }
+        }
+
+        foreach (PieceTable pieceTable in GetAllPieceTables(includeIgnored: true))
+        {
+            ReplacePrefabReferences(pieceTable.m_pieces, previousPrefab, replacementPrefab);
+        }
+
+        foreach (List<GameObject> baseline in PieceTableOrderBaselines.Values)
+        {
+            ReplacePrefabReferences(baseline, previousPrefab, replacementPrefab);
+        }
+
+        bool hadMovedCategoryBaseline = PieceCategoryMoveBaselines.ContainsKey(previousPrefab);
+        Piece.PieceCategory activeCategory = previousPiece != null
+            ? previousPiece.m_category
+            : default;
+        PieceCategoryMoveBaselines.Remove(previousPrefab);
+        if (hadMovedCategoryBaseline && replacementPiece != null)
+        {
+            PieceCategoryMoveBaselines[replacementPrefab] = replacementPiece.m_category;
+        }
+
+        if (hadMovedCategoryBaseline && replacementPiece != null)
+        {
+            replacementPiece.m_category = activeCategory;
+        }
+
+        lock (StateLock)
+        {
+            EntryChanges.RequireFullApply();
+        }
+    }
+
+    internal static void OnItemPrefabsChanged()
+    {
+        lock (StateLock)
+        {
+            EntryChanges.RequireFullApply();
+        }
+
+        ApplyCurrentConfiguration();
+    }
+
+    private static void ReplacePrefabReferences(
+        List<GameObject>? prefabs,
+        GameObject previousPrefab,
+        GameObject replacementPrefab)
+    {
+        if (prefabs == null)
+        {
+            return;
+        }
+
+        for (int index = 0; index < prefabs.Count; index++)
+        {
+            if (ReferenceEquals(prefabs[index], previousPrefab))
+            {
+                prefabs[index] = replacementPrefab;
+            }
+        }
+    }
+
     internal static void OnWorldShutdown()
     {
         RunWorldShutdownStep("visual state", RestoreAllPieceVisualStates);
@@ -462,15 +552,11 @@ internal static class PieceOverrideManager
         GameDataReady = false;
         ObjectDbReady = false;
         PieceTablesReady = false;
-        RuntimeStateWasApplied = false;
         RuntimeAppliedPieceKeys.Clear();
-        ManagedCraftingStationInstanceIds.Clear();
-        ManagedStationExtensionInstanceIds.Clear();
         StationExtensionRemovalSnapshots.Clear();
-        PieceMaterialSnapshots.Clear();
-        PieceIconSnapshots.Clear();
         PieceTableOrderBaselines.Clear();
         PieceCategoryMoveBaselines.Clear();
+        InsertedPieceTableCategories.Clear();
         CraftingStationTopologyChanged = false;
         StationExtensionTopologyChanged = false;
         PieceTableSortWasApplied = false;
@@ -520,7 +606,7 @@ internal static class PieceOverrideManager
             {
                 hasStationExtension = baseline.StationExtension != null;
                 hasCraftingStation = baseline.CraftingStation != null;
-                ApplyDefinition(gameObject, baseline, adjustHealthZdo: false, applyVisualScale: true);
+                ApplyDefinition(gameObject, baseline, adjustHealthZdo: false, applyVisuals: true);
             }
 
             RemoveManagedComponentsIfAbsent(gameObject, hasStationExtension, hasCraftingStation);
@@ -584,6 +670,25 @@ internal static class PieceOverrideManager
             return;
         }
 
+        if (IsIconFileEvent(e))
+        {
+            if (ItemVisualOverrides.IsIconFile(e.FullPath))
+            {
+                ItemVisualOverrides.MarkIconFileChanged(e.FullPath);
+            }
+
+            if (e is RenamedEventArgs renamed &&
+                ItemVisualOverrides.IsIconFile(renamed.OldFullPath))
+            {
+                ItemVisualOverrides.MarkIconFileChanged(renamed.OldFullPath);
+            }
+
+            lock (StateLock)
+            {
+                EntryChanges.RequireFullApply();
+            }
+        }
+
         ReloadDebouncer?.Schedule();
     }
 
@@ -608,13 +713,21 @@ internal static class PieceOverrideManager
             return false;
         }
 
-        if (IsOverrideFile(e.FullPath) || IsPieceCategoryOverrideFile(e.FullPath))
+        if (IsOverrideFile(e.FullPath) || IsPieceCategoryOverrideFile(e.FullPath) || ItemVisualOverrides.IsIconFile(e.FullPath))
         {
             return true;
         }
 
         return e is RenamedEventArgs renamed &&
-               (IsOverrideFile(renamed.OldFullPath) || IsPieceCategoryOverrideFile(renamed.OldFullPath));
+               (IsOverrideFile(renamed.OldFullPath) ||
+                IsPieceCategoryOverrideFile(renamed.OldFullPath) ||
+                ItemVisualOverrides.IsIconFile(renamed.OldFullPath));
+    }
+
+    private static bool IsIconFileEvent(FileSystemEventArgs e)
+    {
+        return ItemVisualOverrides.IsIconFile(e.FullPath) ||
+               e is RenamedEventArgs renamed && ItemVisualOverrides.IsIconFile(renamed.OldFullPath);
     }
 
     private static void OnSyncedPayloadChanged()
@@ -1338,7 +1451,7 @@ internal static class PieceOverrideManager
 
         foreach ((string prefabName, Piece piece) in pieces)
         {
-            ApplyConfiguredState(piece.gameObject, prefabName, adjustHealthZdo: false, applyVisualScale: true);
+            ApplyConfiguredState(piece.gameObject, prefabName, adjustHealthZdo: false, applyVisuals: true);
         }
     }
 
@@ -1378,7 +1491,7 @@ internal static class PieceOverrideManager
                 continue;
             }
 
-            ApplyConfiguredState(piece.gameObject, prefabName, adjustHealthZdo: true, applyVisualScale: false);
+            ApplyConfiguredState(piece.gameObject, prefabName, adjustHealthZdo: true, applyVisuals: false);
         }
     }
 
@@ -1389,16 +1502,24 @@ internal static class PieceOverrideManager
                gameObject.GetComponent<WearNTear>() != null;
     }
 
-    private static void ApplyConfiguredState(GameObject gameObject, string prefabName, bool adjustHealthZdo, bool applyVisualScale)
+    private static void ApplyConfiguredState(
+        GameObject gameObject,
+        string prefabName,
+        bool adjustHealthZdo,
+        bool applyVisuals)
     {
-        RestorePieceVisualState(gameObject);
+        if (applyVisuals)
+        {
+            RestorePieceVisualState(gameObject);
+        }
+
         bool finalHasStationExtension = false;
         bool finalHasCraftingStation = false;
         if (Baselines.TryGetValue(prefabName, out PieceDefinition? baseline))
         {
             finalHasStationExtension = baseline.StationExtension != null;
             finalHasCraftingStation = baseline.CraftingStation != null;
-            ApplyDefinition(gameObject, baseline, adjustHealthZdo, applyVisualScale);
+            ApplyDefinition(gameObject, baseline, adjustHealthZdo, applyVisuals);
         }
 
         if (!DataForgePlugin.PieceOverridesEnabled)
@@ -1426,7 +1547,7 @@ internal static class PieceOverrideManager
             finalHasCraftingStation = finalHasCraftingStation || definition.CraftingStation != null;
             using (DataForgeLogContext.Push(entry.LogContext))
             {
-                ApplyDefinition(gameObject, definition, adjustHealthZdo, applyVisualScale);
+                ApplyDefinition(gameObject, definition, adjustHealthZdo, applyVisuals);
             }
         }
 
@@ -1478,7 +1599,7 @@ internal static class PieceOverrideManager
             }
         }
 
-        if (RuntimeStateWasApplied)
+        if (RuntimeAppliedPieceKeys.Count > 0)
         {
             foreach (string key in RuntimeAppliedPieceKeys)
             {
@@ -1588,7 +1709,11 @@ internal static class PieceOverrideManager
         return removedPieces;
     }
 
-    private static void ApplyDefinition(GameObject gameObject, PieceDefinition definition, bool adjustHealthZdo, bool applyVisualScale)
+    private static void ApplyDefinition(
+        GameObject gameObject,
+        PieceDefinition definition,
+        bool adjustHealthZdo,
+        bool applyVisuals)
     {
         Piece piece = gameObject.GetComponent<Piece>();
         if (piece != null && definition.Piece != null)
@@ -1596,7 +1721,7 @@ internal static class PieceOverrideManager
             ApplyPieceDefinition(piece, definition.Piece, adjustHealthZdo);
         }
 
-        ApplySupportedComponentDefinitions(gameObject, definition, applyVisualScale);
+        ApplySupportedComponentDefinitions(gameObject, definition, applyVisuals);
     }
 
     private static void ApplyPieceDefinition(Piece piece, PieceComponentDefinition definition, bool adjustHealthZdo)
@@ -1607,7 +1732,7 @@ internal static class PieceOverrideManager
             Door door = piece.GetComponent<Door>();
             if (door != null)
             {
-                door.m_name = value;
+                door.m_name = definition.BaselineDoorName ?? value;
             }
         });
         Copy(definition.Description, value => piece.m_description = value);
@@ -1778,7 +1903,10 @@ internal static class PieceOverrideManager
         DataForgeLogContext.Warning($"{GetPrefabName(piece.gameObject)} has invalid negative health; keeping previous value.");
     }
 
-    private static void ApplySupportedComponentDefinitions(GameObject gameObject, PieceDefinition definition, bool applyVisualScale)
+    private static void ApplySupportedComponentDefinitions(
+        GameObject gameObject,
+        PieceDefinition definition,
+        bool applyVisuals)
     {
         if (definition.SapCollector != null)
         {
@@ -1854,9 +1982,9 @@ internal static class PieceOverrideManager
             }
         }
 
-        if (definition.Visual != null)
+        if (applyVisuals && definition.Visual != null)
         {
-            ApplyPieceVisualDefinition(gameObject, definition.Visual, applyVisualScale);
+            ApplyPieceVisualDefinition(gameObject, definition.Visual);
         }
     }
 
@@ -2161,15 +2289,14 @@ internal static class PieceOverrideManager
         }
     }
 
-    private static void ApplyPieceVisualDefinition(GameObject gameObject, PieceVisualDefinition definition, bool applyVisualScale)
+    private static void ApplyPieceVisualDefinition(
+        GameObject gameObject,
+        PieceVisualDefinition definition)
     {
-        if (applyVisualScale)
-        {
-            ApplyVisualScale(gameObject, definition.Scale);
-        }
+        ApplyVisualScale(gameObject, definition.Scale);
         if (string.IsNullOrWhiteSpace(definition.Material))
         {
-            ApplyPieceIconDefinition(gameObject, definition, applyVisualScale);
+            ApplyPieceIconDefinition(gameObject, definition);
             return;
         }
 
@@ -2179,7 +2306,7 @@ internal static class PieceOverrideManager
         if (material == null)
         {
             DataForgeLogContext.Warning($"{prefabName} has unknown visual material '{materialName}'. Check z_materials.reference.txt.");
-            ApplyPieceIconDefinition(gameObject, definition, applyVisualScale);
+            ApplyPieceIconDefinition(gameObject, definition);
             return;
         }
 
@@ -2187,11 +2314,10 @@ internal static class PieceOverrideManager
         if (renderers.Count == 0)
         {
             DataForgeLogContext.Warning($"{prefabName} has no piece renderers for visual material override.");
-            ApplyPieceIconDefinition(gameObject, definition, applyVisualScale);
+            ApplyPieceIconDefinition(gameObject, definition);
             return;
         }
 
-        StorePieceMaterialSnapshots(gameObject, renderers);
         foreach (Renderer renderer in renderers)
         {
             Material[] materials = renderer.sharedMaterials;
@@ -2209,15 +2335,18 @@ internal static class PieceOverrideManager
                 }
             }
 
+            TrackPieceMaterialOverride(gameObject, renderer, materials, material);
             renderer.sharedMaterials = updatedMaterials;
         }
 
-        ApplyPieceIconDefinition(gameObject, definition, applyVisualScale);
+        ApplyPieceIconDefinition(gameObject, definition);
     }
 
-    private static void ApplyPieceIconDefinition(GameObject gameObject, PieceVisualDefinition definition, bool applyToPrefabIcon)
+    private static void ApplyPieceIconDefinition(
+        GameObject gameObject,
+        PieceVisualDefinition definition)
     {
-        if (!applyToPrefabIcon || string.IsNullOrWhiteSpace(definition.Icon))
+        if (string.IsNullOrWhiteSpace(definition.Icon))
         {
             return;
         }
@@ -2243,8 +2372,6 @@ internal static class PieceOverrideManager
                 prefabName,
                 gameObject,
                 definition.Material,
-                null,
-                null,
                 definition.IconRotation);
             if (icon == null)
             {
@@ -2262,7 +2389,7 @@ internal static class PieceOverrideManager
             }
         }
 
-        StorePieceIconSnapshot(gameObject, piece);
+        TrackPieceIconOverride(gameObject, piece, icon);
         piece.m_icon = icon;
 
         CraftingStation craftingStation = gameObject.GetComponent<CraftingStation>();
@@ -2301,28 +2428,6 @@ internal static class PieceOverrideManager
             .ToList();
     }
 
-    private static void StorePieceMaterialSnapshots(GameObject gameObject, List<Renderer> renderers)
-    {
-        int key = gameObject.GetInstanceID();
-        if (PieceMaterialSnapshots.ContainsKey(key))
-        {
-            return;
-        }
-
-        PieceMaterialSnapshots[key] = renderers
-            .Select(renderer => new RendererMaterialSnapshot(renderer, renderer.sharedMaterials.ToArray()))
-            .ToList();
-    }
-
-    private static void StorePieceIconSnapshot(GameObject gameObject, Piece piece)
-    {
-        int key = gameObject.GetInstanceID();
-        if (!PieceIconSnapshots.ContainsKey(key))
-        {
-            PieceIconSnapshots[key] = piece.m_icon;
-        }
-    }
-
     private static void RestorePieceVisualState(GameObject gameObject)
     {
         RestorePieceVisualIcon(gameObject);
@@ -2331,42 +2436,78 @@ internal static class PieceOverrideManager
 
     private static void RestorePieceVisualMaterials(GameObject gameObject)
     {
-        int key = gameObject.GetInstanceID();
-        if (!PieceMaterialSnapshots.TryGetValue(key, out List<RendererMaterialSnapshot> snapshots))
+        DataForgePieceComponentOwnership? ownership =
+            gameObject.GetComponent<DataForgePieceComponentOwnership>();
+        if (ownership == null || !ownership.HasMaterialOwnership)
         {
             return;
         }
 
-        PieceMaterialSnapshots.Remove(key);
-        foreach (RendererMaterialSnapshot snapshot in snapshots)
+        if (string.Equals(
+                ownership.VisualPrefabKey,
+                GetPrefabName(gameObject),
+                StringComparison.OrdinalIgnoreCase))
         {
-            if (snapshot.Renderer != null)
-            {
-                snapshot.Renderer.sharedMaterials = snapshot.Materials.ToArray();
-            }
+            ownership.RestoreMaterialOwnership();
         }
+        else
+        {
+            ownership.ClearMaterialOwnership();
+        }
+
+        RemoveOwnershipMarkerIfEmpty(ownership);
     }
 
     private static void RestorePieceVisualIcon(GameObject gameObject)
     {
-        int key = gameObject.GetInstanceID();
-        if (!PieceIconSnapshots.TryGetValue(key, out Sprite? icon))
+        DataForgePieceComponentOwnership? ownership =
+            gameObject.GetComponent<DataForgePieceComponentOwnership>();
+        if (ownership == null || !ownership.HasIconOwnership)
         {
             return;
         }
 
-        PieceIconSnapshots.Remove(key);
-        Piece piece = gameObject.GetComponent<Piece>();
-        if (piece != null)
+        if (!string.Equals(
+                ownership.VisualPrefabKey,
+                GetPrefabName(gameObject),
+                StringComparison.OrdinalIgnoreCase))
         {
-            piece.m_icon = icon;
+            ownership.ClearIconOwnership();
+            RemoveOwnershipMarkerIfEmpty(ownership);
+            return;
         }
 
-        CraftingStation craftingStation = gameObject.GetComponent<CraftingStation>();
-        if (craftingStation != null)
-        {
-            craftingStation.m_icon = icon;
-        }
+        Piece? piece = gameObject.GetComponent<Piece>();
+        CraftingStation? craftingStation = gameObject.GetComponent<CraftingStation>();
+        bool craftingStationIsManaged =
+            craftingStation != null &&
+            ReferenceEquals(ownership.CraftingStation, craftingStation);
+        ownership.RestoreIconOwnership(piece, craftingStation, craftingStationIsManaged);
+        RemoveOwnershipMarkerIfEmpty(ownership);
+    }
+
+    private static void TrackPieceMaterialOverride(
+        GameObject gameObject,
+        Renderer renderer,
+        Material[] originalMaterials,
+        Material appliedMaterial)
+    {
+        DataForgePieceComponentOwnership ownership = GetOrAddPieceOwnership(gameObject);
+        ownership.TrackMaterialOwnership(
+            GetPrefabName(gameObject),
+            renderer,
+            originalMaterials,
+            appliedMaterial);
+    }
+
+    private static void TrackPieceIconOverride(GameObject gameObject, Piece piece, Sprite appliedIcon)
+    {
+        DataForgePieceComponentOwnership ownership = GetOrAddPieceOwnership(gameObject);
+        ownership.TrackIconOwnership(
+            GetPrefabName(gameObject),
+            piece,
+            gameObject.GetComponent<CraftingStation>(),
+            appliedIcon);
     }
 
     private static void ApplyStationExtensionDefinition(GameObject gameObject, string definition)
@@ -2400,7 +2541,7 @@ internal static class PieceOverrideManager
             }
 
             extension = gameObject.AddComponent<StationExtension>();
-            ManagedStationExtensionInstanceIds.Add(gameObject.GetInstanceID());
+            TrackManagedStationExtension(gameObject, extension);
             StationExtensionTopologyChanged = true;
             extension.m_piece = gameObject.GetComponent<Piece>();
             extension.m_continousConnection = false;
@@ -2454,12 +2595,13 @@ internal static class PieceOverrideManager
             return;
         }
 
-        int key = gameObject.GetInstanceID();
-        if (!StationExtensionRemovalSnapshots.ContainsKey(key))
+        if (!StationExtensionRemovalSnapshots.ContainsKey(gameObject))
         {
-            StationExtensionRemovalSnapshots[key] = extensions
+            StationExtensionRemovalSnapshots[gameObject] = extensions
                 .Where(extension => extension != null)
-                .Select(StationExtensionSnapshot.From)
+                .Select(extension => StationExtensionSnapshot.From(
+                    extension,
+                    IsManagedStationExtension(gameObject, extension)))
                 .ToList();
         }
 
@@ -2468,18 +2610,16 @@ internal static class PieceOverrideManager
             RemoveStationExtensionComponent(extension);
         }
 
-        ManagedStationExtensionInstanceIds.Remove(key);
     }
 
     private static void RestoreRemovedStationExtensions(GameObject gameObject)
     {
-        int key = gameObject.GetInstanceID();
-        if (!StationExtensionRemovalSnapshots.TryGetValue(key, out List<StationExtensionSnapshot> snapshots))
+        if (!StationExtensionRemovalSnapshots.TryGetValue(gameObject, out List<StationExtensionSnapshot> snapshots))
         {
             return;
         }
 
-        StationExtensionRemovalSnapshots.Remove(key);
+        StationExtensionRemovalSnapshots.Remove(gameObject);
         foreach (StationExtensionSnapshot snapshot in snapshots)
         {
             if (!CanAddStationExtension(gameObject, GetPrefabName(gameObject)))
@@ -2490,6 +2630,10 @@ internal static class PieceOverrideManager
             StationExtension extension = gameObject.AddComponent<StationExtension>();
             snapshot.Apply(extension);
             EnableStationExtension(extension);
+            if (snapshot.WasManaged)
+            {
+                TrackManagedStationExtension(gameObject, extension);
+            }
             StationExtensionTopologyChanged = true;
         }
     }
@@ -2517,6 +2661,9 @@ internal static class PieceOverrideManager
         {
             return;
         }
+
+        GameObject gameObject = extension.gameObject;
+        ForgetManagedStationExtension(gameObject, extension);
 
         StationExtension.m_allExtensions.Remove(extension);
         StationExtensionTopologyChanged = true;
@@ -2550,30 +2697,95 @@ internal static class PieceOverrideManager
         }
     }
 
-    private static void RemoveManagedStationExtensionIfPresent(GameObject gameObject)
+    private static void TrackManagedStationExtension(GameObject gameObject, StationExtension extension)
     {
-        if (!ManagedStationExtensionInstanceIds.Remove(gameObject.GetInstanceID()))
+        DataForgePieceComponentOwnership ownership = GetOrAddPieceOwnership(gameObject);
+        ownership.StationExtension = extension;
+    }
+
+    private static bool IsManagedStationExtension(GameObject gameObject, StationExtension extension)
+    {
+        DataForgePieceComponentOwnership? ownership =
+            gameObject.GetComponent<DataForgePieceComponentOwnership>();
+        return ownership != null && ReferenceEquals(ownership.StationExtension, extension);
+    }
+
+    private static void ForgetManagedStationExtension(GameObject gameObject, StationExtension extension)
+    {
+        DataForgePieceComponentOwnership? ownership =
+            gameObject.GetComponent<DataForgePieceComponentOwnership>();
+        if (ownership == null || !ReferenceEquals(ownership.StationExtension, extension))
         {
             return;
         }
 
-        StationExtension extension = gameObject.GetComponent<StationExtension>();
+        ownership.StationExtension = null;
+        RemoveOwnershipMarkerIfEmpty(ownership);
+    }
+
+    private static void TrackManagedCraftingStation(GameObject gameObject, CraftingStation craftingStation)
+    {
+        DataForgePieceComponentOwnership ownership = GetOrAddPieceOwnership(gameObject);
+        ownership.CraftingStation = craftingStation;
+    }
+
+    private static bool IsManagedCraftingStation(GameObject gameObject, CraftingStation craftingStation)
+    {
+        DataForgePieceComponentOwnership? ownership =
+            gameObject.GetComponent<DataForgePieceComponentOwnership>();
+        return ownership != null && ReferenceEquals(ownership.CraftingStation, craftingStation);
+    }
+
+    private static void ForgetManagedCraftingStation(GameObject gameObject, CraftingStation craftingStation)
+    {
+        DataForgePieceComponentOwnership? ownership =
+            gameObject.GetComponent<DataForgePieceComponentOwnership>();
+        if (ownership == null || !ReferenceEquals(ownership.CraftingStation, craftingStation))
+        {
+            return;
+        }
+
+        ownership.CraftingStation = null;
+        RemoveOwnershipMarkerIfEmpty(ownership);
+    }
+
+    private static void RemoveOwnershipMarkerIfEmpty(DataForgePieceComponentOwnership ownership)
+    {
+        if (ownership == null ||
+            ownership.StationExtension != null ||
+            ownership.CraftingStation != null ||
+            ownership.HasVisualOwnership)
+        {
+            return;
+        }
+
+        try
+        {
+            UnityEngine.Object.DestroyImmediate(ownership);
+        }
+        catch
+        {
+            UnityEngine.Object.Destroy(ownership);
+        }
+    }
+
+    private static DataForgePieceComponentOwnership GetOrAddPieceOwnership(GameObject gameObject)
+    {
+        return gameObject.GetComponent<DataForgePieceComponentOwnership>() ??
+               gameObject.AddComponent<DataForgePieceComponentOwnership>();
+    }
+
+    private static void RemoveManagedStationExtensionIfPresent(GameObject gameObject)
+    {
+        StationExtension? extension = gameObject
+            .GetComponent<DataForgePieceComponentOwnership>()
+            ?.StationExtension;
         if (extension == null)
         {
             return;
         }
 
-        StationExtension.m_allExtensions.Remove(extension);
-        StationExtensionTopologyChanged = true;
-        try
-        {
-            UnityEngine.Object.DestroyImmediate(extension);
-        }
-        catch (Exception ex)
-        {
-            DataForgePlugin.Log.LogDebug($"Could not immediately remove managed StationExtension from '{GetPrefabName(gameObject)}': {ex.Message}");
-            UnityEngine.Object.Destroy(extension);
-        }
+        RemoveStationExtensionComponent(extension);
     }
 
     private static CraftingStation? AddManagedCraftingStation(GameObject gameObject)
@@ -2586,7 +2798,7 @@ internal static class PieceOverrideManager
         }
 
         CraftingStation craftingStation = gameObject.AddComponent<CraftingStation>();
-        ManagedCraftingStationInstanceIds.Add(gameObject.GetInstanceID());
+        TrackManagedCraftingStation(gameObject, craftingStation);
         CraftingStationTopologyChanged = true;
         StationExtensionTopologyChanged = true;
 
@@ -2621,20 +2833,15 @@ internal static class PieceOverrideManager
 
     private static void RemoveManagedCraftingStationIfPresent(GameObject gameObject)
     {
-        int key = gameObject.GetInstanceID();
-        if (!ManagedCraftingStationInstanceIds.Remove(key))
-        {
-            return;
-        }
-
-        CraftingStation craftingStation = gameObject.GetComponent<CraftingStation>();
+        CraftingStation? craftingStation = gameObject
+            .GetComponent<DataForgePieceComponentOwnership>()
+            ?.CraftingStation;
         if (craftingStation == null)
         {
-            CraftingStationTopologyChanged = true;
-            StationExtensionTopologyChanged = true;
             return;
         }
 
+        ForgetManagedCraftingStation(gameObject, craftingStation);
         CraftingStationTopologyChanged = true;
         StationExtensionTopologyChanged = true;
         craftingStation.CancelInvoke();
@@ -2659,7 +2866,7 @@ internal static class PieceOverrideManager
             return;
         }
 
-        bool isManaged = ManagedCraftingStationInstanceIds.Contains(craftingStation.gameObject.GetInstanceID());
+        bool isManaged = IsManagedCraftingStation(craftingStation.gameObject, craftingStation);
         if (isManaged)
         {
             if (craftingStation.m_roofCheckPoint == null)
@@ -2897,7 +3104,39 @@ internal static class PieceOverrideManager
 
     private static void EnsurePieceTableCategory(PieceTable pieceTable, Piece.PieceCategory category)
     {
+        bool alreadyPresent = pieceTable.m_categories?.Contains(category) == true;
         PieceTableCategoryGuard.EnsureCategory(pieceTable, category);
+        if (alreadyPresent || pieceTable.m_categories?.Contains(category) != true)
+        {
+            return;
+        }
+
+        if (!InsertedPieceTableCategories.TryGetValue(pieceTable, out HashSet<Piece.PieceCategory>? categories))
+        {
+            categories = new HashSet<Piece.PieceCategory>();
+            InsertedPieceTableCategories[pieceTable] = categories;
+        }
+
+        categories.Add(category);
+    }
+
+    private static void PruneUnusedInsertedPieceTableCategories()
+    {
+        foreach (KeyValuePair<PieceTable, HashSet<Piece.PieceCategory>> pair in InsertedPieceTableCategories.ToArray())
+        {
+            foreach (Piece.PieceCategory category in pair.Value.ToArray())
+            {
+                if (PieceTableCategoryGuard.RemoveOwnedCategoryIfUnused(pair.Key, category))
+                {
+                    pair.Value.Remove(category);
+                }
+            }
+
+            if (pair.Value.Count == 0)
+            {
+                InsertedPieceTableCategories.Remove(pair.Key);
+            }
+        }
     }
 
     private static void CapturePieceTableOrderBaselinesIfNeeded(IEnumerable<PieceTable> pieceTables)
@@ -3175,12 +3414,7 @@ internal static class PieceOverrideManager
                 MovePiecePrefabToTable(piecePrefab!, move.Target, affectedTables);
             }
 
-            applied.Add(new ResolvedPieceCategoryMove(
-                move.Target,
-                move.Source,
-                move.CategoryName,
-                sourceCategory,
-                targetCategory));
+            applied.Add(new ResolvedPieceCategoryMove(move.Source, sourceCategory));
         }
 
         return applied;
@@ -3469,7 +3703,9 @@ internal static class PieceOverrideManager
 
     private static string? NullIfIgnoredCategory(string? categoryName)
     {
-        return IsIgnoredCategoryName(categoryName) || IsOwnerManagedHomesteadCategoryName(categoryName)
+        return string.Equals(categoryName?.Trim(), nameof(Piece.PieceCategory.Misc), StringComparison.OrdinalIgnoreCase) ||
+               IsIgnoredCategoryName(categoryName) ||
+               IsOwnerManagedHomesteadCategoryName(categoryName)
             ? null
             : categoryName;
     }
@@ -4069,24 +4305,6 @@ internal static class PieceOverrideManager
         return null;
     }
 
-    private static string? GetReferencePieceTableName(string prefabName)
-    {
-        List<string> tableNames = BuildPieceTableMembershipSnapshot().GetTableNames(prefabName);
-        return tableNames.FirstOrDefault(name =>
-            !IsDefaultReferencePieceTableName(name) &&
-            !IsIgnoredPieceTableName(name));
-    }
-
-    private static string? GetFullScaffoldPieceTableName(string prefabName)
-    {
-        return GetFullScaffoldPieceTableName(prefabName, BuildPieceTableMembershipSnapshot());
-    }
-
-    private static bool ShouldGeneratePieceEntry(string prefabName)
-    {
-        return ShouldGeneratePieceEntry(prefabName, BuildPieceTableMembershipSnapshot());
-    }
-
     private static string? GetFullScaffoldPieceTableName(string prefabName, PieceTableMembershipSnapshot pieceTableMembership)
     {
         return pieceTableMembership
@@ -4098,11 +4316,6 @@ internal static class PieceOverrideManager
     private static bool ShouldGeneratePieceEntry(string prefabName, PieceTableMembershipSnapshot pieceTableMembership)
     {
         return !pieceTableMembership.IsOnlyInIgnoredTables(prefabName);
-    }
-
-    private static bool IsOnlyInIgnoredPieceTables(string prefabName)
-    {
-        return BuildPieceTableMembershipSnapshot().IsOnlyInIgnoredTables(prefabName);
     }
 
     private static PieceTableMembershipSnapshot BuildPieceTableMembershipSnapshot()
@@ -4896,9 +5109,28 @@ internal static class PieceOverrideManager
                         CraftRequiresFire = definition.CraftingStation.CraftRequiresFire
                     })
                     : null,
-                Visual = definition.Visual != null ? ReferenceValue.ClonePruned(definition.Visual) : null
+                Visual = ToReferenceVisual(definition.Visual)
             };
             return ReferenceValue.ClonePruned(entry) ?? new PieceReferenceEntry { Piece = prefab };
+        }
+
+        private static PieceVisualDefinition? ToReferenceVisual(PieceVisualDefinition? visual)
+        {
+            if (visual == null)
+            {
+                return null;
+            }
+
+            PieceVisualDefinition reference = new()
+            {
+                Scale = visual.Scale.HasValue && Math.Abs(visual.Scale.Value - 1f) <= 0.0001f
+                    ? null
+                    : visual.Scale,
+                Material = visual.Material,
+                Icon = visual.Icon,
+                IconRotation = visual.IconRotation
+            };
+            return ReferenceValue.ClonePruned(reference);
         }
 
         private static string? FormatReferenceComfort(string? value)
@@ -4972,10 +5204,13 @@ internal static class PieceOverrideManager
         public float? Health { get; set; }
         public string? Comfort { get; set; }
         public List<PieceResourceDefinition>? Resources { get; set; }
+        [YamlIgnore]
+        public string? BaselineDoorName { get; set; }
 
         internal static PieceComponentDefinition From(Piece piece)
         {
             WearNTear wearNTear = piece.GetComponent<WearNTear>();
+            Door? door = piece.GetComponent<Door>();
             return new PieceComponentDefinition
             {
                 Name = piece.m_name,
@@ -4985,7 +5220,8 @@ internal static class PieceOverrideManager
                 CanBeRemoved = piece.m_canBeRemoved,
                 Health = wearNTear != null ? wearNTear.m_health : null,
                 Comfort = FormatTuple(piece.m_comfort, piece.m_comfortGroup),
-                Resources = PieceResourceDefinition.From(piece.m_resources)
+                Resources = PieceResourceDefinition.From(piece.m_resources),
+                BaselineDoorName = door != null ? door.m_name : null
             };
         }
     }
@@ -5181,25 +5417,14 @@ internal static class PieceOverrideManager
 
     private sealed class ResolvedPieceCategoryMove
     {
-        internal ResolvedPieceCategoryMove(
-            PieceTable target,
-            PieceTable source,
-            string categoryName,
-            Piece.PieceCategory sourceCategory,
-            Piece.PieceCategory targetCategory)
+        internal ResolvedPieceCategoryMove(PieceTable source, Piece.PieceCategory sourceCategory)
         {
-            Target = target;
             Source = source;
-            CategoryName = categoryName;
             SourceCategory = sourceCategory;
-            TargetCategory = targetCategory;
         }
 
-        internal PieceTable Target { get; }
         internal PieceTable Source { get; }
-        internal string CategoryName { get; }
         internal Piece.PieceCategory SourceCategory { get; }
-        internal Piece.PieceCategory TargetCategory { get; }
     }
 
     private sealed class PieceTableNameComparer : IComparer<string>
@@ -5476,8 +5701,9 @@ internal static class PieceOverrideManager
         private Vector3 ConnectionOffset { get; set; }
         private bool ContinuousConnection { get; set; }
         private Piece? Piece { get; set; }
+        internal bool WasManaged { get; private set; }
 
-        internal static StationExtensionSnapshot From(StationExtension extension)
+        internal static StationExtensionSnapshot From(StationExtension extension, bool wasManaged)
         {
             return new StationExtensionSnapshot
             {
@@ -5487,7 +5713,8 @@ internal static class PieceOverrideManager
                 ConnectionPrefab = extension.m_connectionPrefab,
                 ConnectionOffset = extension.m_connectionOffset,
                 ContinuousConnection = extension.m_continousConnection,
-                Piece = extension.m_piece
+                Piece = extension.m_piece,
+                WasManaged = wasManaged
             };
         }
 
@@ -5501,18 +5728,6 @@ internal static class PieceOverrideManager
             extension.m_continousConnection = ContinuousConnection;
             extension.m_piece = Piece != null ? Piece : extension.GetComponent<Piece>();
         }
-    }
-
-    private sealed class RendererMaterialSnapshot
-    {
-        internal RendererMaterialSnapshot(Renderer renderer, Material[] materials)
-        {
-            Renderer = renderer;
-            Materials = materials;
-        }
-
-        internal Renderer Renderer { get; }
-        internal Material[] Materials { get; }
     }
 
     private static string FormatCraftingStation(CraftingStation? craftingStation)
@@ -5543,4 +5758,233 @@ internal static class PieceOverrideManager
         };
     }
 
+}
+
+internal sealed class DataForgePieceComponentOwnership : MonoBehaviour
+{
+    [SerializeField]
+    private StationExtension? _stationExtension;
+
+    [SerializeField]
+    private CraftingStation? _craftingStation;
+
+    [SerializeField]
+    private string _visualPrefabKey = "";
+
+    [SerializeField]
+    private bool _hasIconOwnership;
+
+    [SerializeField]
+    private Sprite? _originalPieceIcon;
+
+    [SerializeField]
+    private Sprite? _appliedPieceIcon;
+
+    [SerializeField]
+    private CraftingStation? _iconCraftingStation;
+
+    [SerializeField]
+    private Sprite? _originalCraftingStationIcon;
+
+    [SerializeField]
+    private List<RendererMaterialOwnership> _materialOwnership = new();
+
+    internal StationExtension? StationExtension
+    {
+        get => _stationExtension;
+        set => _stationExtension = value;
+    }
+
+    internal CraftingStation? CraftingStation
+    {
+        get => _craftingStation;
+        set => _craftingStation = value;
+    }
+
+    internal string VisualPrefabKey => _visualPrefabKey;
+    internal bool HasIconOwnership => _hasIconOwnership;
+    internal bool HasMaterialOwnership => _materialOwnership.Count > 0;
+    internal bool HasVisualOwnership => HasIconOwnership || HasMaterialOwnership;
+
+    internal void TrackIconOwnership(
+        string prefabKey,
+        Piece piece,
+        CraftingStation? craftingStation,
+        Sprite appliedIcon)
+    {
+        PrepareVisualOwnership(prefabKey);
+        if (!_hasIconOwnership)
+        {
+            _hasIconOwnership = true;
+            _originalPieceIcon = piece.m_icon;
+            _iconCraftingStation = craftingStation;
+            _originalCraftingStationIcon = craftingStation != null ? craftingStation.m_icon : null;
+        }
+        else if (_iconCraftingStation == null && craftingStation != null)
+        {
+            _iconCraftingStation = craftingStation;
+            _originalCraftingStationIcon =
+                ReferenceEquals(craftingStation.m_icon, _appliedPieceIcon) &&
+                ReferenceEquals(craftingStation, _craftingStation)
+                    ? _originalPieceIcon
+                    : craftingStation.m_icon;
+        }
+
+        _appliedPieceIcon = appliedIcon;
+    }
+
+    internal void RestoreIconOwnership(
+        Piece? piece,
+        CraftingStation? craftingStation,
+        bool craftingStationIsManaged)
+    {
+        if (!_hasIconOwnership)
+        {
+            return;
+        }
+
+        if (piece != null && ReferenceEquals(piece.m_icon, _appliedPieceIcon))
+        {
+            piece.m_icon = _originalPieceIcon;
+        }
+
+        if (craftingStation != null &&
+            ReferenceEquals(craftingStation.m_icon, _appliedPieceIcon))
+        {
+            if (_iconCraftingStation != null &&
+                ReferenceEquals(craftingStation, _iconCraftingStation))
+            {
+                craftingStation.m_icon = _originalCraftingStationIcon;
+            }
+            else if (craftingStationIsManaged)
+            {
+                craftingStation.m_icon = _originalPieceIcon;
+            }
+        }
+
+        ClearIconOwnership();
+    }
+
+    internal void ClearIconOwnership()
+    {
+        _hasIconOwnership = false;
+        _originalPieceIcon = null;
+        _appliedPieceIcon = null;
+        _iconCraftingStation = null;
+        _originalCraftingStationIcon = null;
+        ClearVisualPrefabKeyIfUnused();
+    }
+
+    internal void TrackMaterialOwnership(
+        string prefabKey,
+        Renderer renderer,
+        Material[] originalMaterials,
+        Material appliedMaterial)
+    {
+        PrepareVisualOwnership(prefabKey);
+        RendererMaterialOwnership? ownership = _materialOwnership
+            .FirstOrDefault(entry => ReferenceEquals(entry.Renderer, renderer));
+        if (ownership == null)
+        {
+            ownership = new RendererMaterialOwnership(renderer, originalMaterials);
+            _materialOwnership.Add(ownership);
+        }
+
+        ownership.AppliedMaterial = appliedMaterial;
+    }
+
+    internal void RestoreMaterialOwnership()
+    {
+        foreach (RendererMaterialOwnership ownership in _materialOwnership)
+        {
+            ownership.RestoreIfOwned();
+        }
+
+        ClearMaterialOwnership();
+    }
+
+    internal void ClearMaterialOwnership()
+    {
+        _materialOwnership.Clear();
+        ClearVisualPrefabKeyIfUnused();
+    }
+
+    private void PrepareVisualOwnership(string prefabKey)
+    {
+        if (!HasVisualOwnership)
+        {
+            _visualPrefabKey = prefabKey;
+            return;
+        }
+
+        if (string.Equals(_visualPrefabKey, prefabKey, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        ClearIconOwnership();
+        ClearMaterialOwnership();
+        _visualPrefabKey = prefabKey;
+    }
+
+    private void ClearVisualPrefabKeyIfUnused()
+    {
+        if (!HasVisualOwnership)
+        {
+            _visualPrefabKey = "";
+        }
+    }
+
+    [Serializable]
+    private sealed class RendererMaterialOwnership
+    {
+        [SerializeField]
+        private Renderer? _renderer;
+
+        [SerializeField]
+        private Material[] _originalMaterials = Array.Empty<Material>();
+
+        [SerializeField]
+        private Material? _appliedMaterial;
+
+        internal RendererMaterialOwnership(Renderer renderer, Material[] originalMaterials)
+        {
+            _renderer = renderer;
+            _originalMaterials = originalMaterials.ToArray();
+        }
+
+        internal Renderer? Renderer => _renderer;
+
+        internal Material? AppliedMaterial
+        {
+            set => _appliedMaterial = value;
+        }
+
+        internal void RestoreIfOwned()
+        {
+            if (_renderer == null)
+            {
+                return;
+            }
+
+            Material[] currentMaterials = _renderer.sharedMaterials;
+            bool changed = false;
+            int slotCount = Math.Min(currentMaterials.Length, _originalMaterials.Length);
+            for (int index = 0; index < slotCount; index++)
+            {
+                if (_originalMaterials[index] != null &&
+                    ReferenceEquals(currentMaterials[index], _appliedMaterial))
+                {
+                    currentMaterials[index] = _originalMaterials[index];
+                    changed = true;
+                }
+            }
+
+            if (changed)
+            {
+                _renderer.sharedMaterials = currentMaterials;
+            }
+        }
+
+    }
 }

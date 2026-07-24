@@ -15,7 +15,7 @@ internal static class ItemVisualOverrides
 {
     internal const string AutoIconValue = "auto";
     internal const string DefaultAutoIconRotationValue = "23, 51, 25.8";
-    private const string AutoIconRenderRevision = "jotunn-prefab-main-renderers-5-full-fingerprint";
+    private const string AutoIconRenderRevision = "jotunn-prefab-main-renderers-6-material-only";
     private const int AutoIconSize = 128;
     private const int AutoIconLayer = 30;
     private static readonly Vector3 DefaultAutoIconRotation = new(23f, 51f, 25.8f);
@@ -23,8 +23,9 @@ internal static class ItemVisualOverrides
     private static readonly Dictionary<string, List<RendererMaterialSnapshot>> OriginalMaterials = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, Sprite[]?> OriginalIcons = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, List<TransformScaleSnapshot>> OriginalVisualScales = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, List<Material>> CreatedMaterials = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, IconCacheEntry> IconCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> PendingIconReloads = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly List<Sprite> RetiredIconSprites = new();
     private static readonly List<Sprite> GeneratedAutoIcons = new();
     private static readonly Dictionary<string, Material> MaterialLookupCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly MethodInfo? LoadImageMethod = ResolveLoadImageMethod();
@@ -38,7 +39,7 @@ internal static class ItemVisualOverrides
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
     internal static string IconDirectory => Path.Combine(ConfigDirectory, "icon");
-    private static string AutoIconCacheDirectory => Path.Combine(IconDirectory, "cache");
+    private static string AutoIconCacheDirectory => Path.Combine(ConfigDirectory, "cache", "auto-icons");
 
     internal static void EnsureIconDirectory()
     {
@@ -78,21 +79,15 @@ internal static class ItemVisualOverrides
             }
         }
 
-        foreach (List<Material> materials in CreatedMaterials.Values)
-        {
-            foreach (Material material in materials)
-            {
-                if (material != null)
-                {
-                    UnityEngine.Object.Destroy(material);
-                }
-            }
-        }
-
         HashSet<int> destroyedSpriteIds = new();
         foreach (IconCacheEntry entry in IconCache.Values)
         {
             DestroyOwnedSprite(entry.Sprite, destroyedSpriteIds);
+        }
+
+        foreach (Sprite sprite in RetiredIconSprites)
+        {
+            DestroyOwnedSprite(sprite, destroyedSpriteIds);
         }
 
         foreach (Sprite sprite in GeneratedAutoIcons)
@@ -103,8 +98,12 @@ internal static class ItemVisualOverrides
         OriginalMaterials.Clear();
         OriginalIcons.Clear();
         OriginalVisualScales.Clear();
-        CreatedMaterials.Clear();
         IconCache.Clear();
+        lock (PendingIconReloads)
+        {
+            PendingIconReloads.Clear();
+        }
+        RetiredIconSprites.Clear();
         GeneratedAutoIcons.Clear();
         MaterialLookupCache.Clear();
         MaterialLookupCacheBuilt = false;
@@ -134,6 +133,15 @@ internal static class ItemVisualOverrides
         return fullPath.StartsWith(iconRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
+    internal static void MarkIconFileChanged(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        lock (PendingIconReloads)
+        {
+            PendingIconReloads.Add(fullPath);
+        }
+    }
+
     internal static void Apply(ItemDrop itemDrop, ItemOverrideManager.VisualDefinition? visual)
     {
         if (visual == null)
@@ -145,8 +153,6 @@ internal static class ItemVisualOverrides
         bool useAutoIcon = IsAutoIconValue(visual.Icon);
         bool hasExplicitIcon = !useAutoIcon && !string.IsNullOrWhiteSpace(visual.Icon);
         bool hasMaterial = !string.IsNullOrWhiteSpace(visual.Material);
-        bool hasColor = TryParseColor(visual.Color, out Color color);
-        bool hasEmission = visual.Emission.HasValue;
         bool hasScale = visual.Scale.HasValue;
 
         if (hasExplicitIcon)
@@ -154,8 +160,7 @@ internal static class ItemVisualOverrides
             ApplyVisualIcon(prefabName, itemDrop, visual.Icon);
         }
 
-        bool hasRendererVisual = hasMaterial || hasColor || hasEmission;
-        if (!hasRendererVisual)
+        if (!hasMaterial)
         {
             if (hasScale)
             {
@@ -172,16 +177,12 @@ internal static class ItemVisualOverrides
             return;
         }
 
-        Material? materialOverride = null;
-        if (hasMaterial)
+        string materialName = visual.Material!.Trim();
+        Material? materialOverride = ResolveMaterial(materialName);
+        if (materialOverride == null)
         {
-            string materialName = visual.Material!.Trim();
-            materialOverride = ResolveMaterial(materialName);
-            if (materialOverride == null)
-            {
-                DataForgeLogContext.Warning($"{prefabName} has unknown visual material '{materialName}'. Check z_materials.reference.txt.");
-                return;
-            }
+            DataForgeLogContext.Warning($"{prefabName} has unknown visual material '{materialName}'. Check z_materials.reference.txt.");
+            return;
         }
 
         StoreOriginalMaterials(prefabName, renderers);
@@ -191,37 +192,12 @@ internal static class ItemVisualOverrides
             Material[] updatedMaterials = materials.ToArray();
             for (int index = 0; index < materials.Length; index++)
             {
-                Material? sourceMaterial = materialOverride != null ? materialOverride : materials[index];
-                if (sourceMaterial is null)
+                if (materials[index] == null)
                 {
                     continue;
                 }
 
-                Material baseMaterial = sourceMaterial;
-                if (hasColor || hasEmission)
-                {
-                    Material instance = new(baseMaterial)
-                    {
-                        name = $"{NormalizeMaterialName(baseMaterial.name)}_DataForge_{prefabName}"
-                    };
-
-                    if (hasColor)
-                    {
-                        ApplyMaterialColor(instance, color);
-                    }
-
-                    if (hasEmission)
-                    {
-                        ApplyMaterialEmission(instance, Math.Max(0f, visual.Emission!.Value), hasColor ? color : (Color?)null);
-                    }
-
-                    TrackCreatedMaterial(prefabName, instance);
-                    updatedMaterials[index] = instance;
-                }
-                else
-                {
-                    updatedMaterials[index] = baseMaterial;
-                }
+                updatedMaterials[index] = materialOverride;
             }
 
             renderer.sharedMaterials = updatedMaterials;
@@ -238,7 +214,7 @@ internal static class ItemVisualOverrides
         }
     }
 
-    internal static void Restore(string prefabName, ItemDrop itemDrop)
+    internal static void Restore(string prefabName, ItemDrop? itemDrop)
     {
         if (OriginalMaterials.TryGetValue(prefabName, out List<RendererMaterialSnapshot> snapshots))
         {
@@ -251,21 +227,7 @@ internal static class ItemVisualOverrides
             }
         }
 
-        if (CreatedMaterials.TryGetValue(prefabName, out List<Material>? materials))
-        {
-            foreach (Material material in materials)
-            {
-                if (material != null)
-                {
-                    UnityEngine.Object.Destroy(material);
-                }
-            }
-
-            materials.Clear();
-            CreatedMaterials.Remove(prefabName);
-        }
-
-        if (OriginalIcons.TryGetValue(prefabName, out Sprite[]? icons))
+        if (itemDrop != null && OriginalIcons.TryGetValue(prefabName, out Sprite[]? icons))
         {
             itemDrop.m_itemData.m_shared.m_icons = icons?.ToArray();
         }
@@ -280,6 +242,14 @@ internal static class ItemVisualOverrides
                 }
             }
         }
+    }
+
+    internal static void RestoreAndForget(string prefabName, ItemDrop? itemDrop)
+    {
+        Restore(prefabName, itemDrop);
+        OriginalMaterials.Remove(prefabName);
+        OriginalIcons.Remove(prefabName);
+        OriginalVisualScales.Remove(prefabName);
     }
 
     private static void ApplyVisualIcon(string prefabName, ItemDrop itemDrop, string? iconName)
@@ -317,8 +287,6 @@ internal static class ItemVisualOverrides
             prefabName,
             itemDrop.gameObject,
             visual.Material,
-            visual.Color,
-            visual.Emission,
             visual.IconRotation,
             restoreItemVisualScale: true);
         if (icon == null)
@@ -336,8 +304,6 @@ internal static class ItemVisualOverrides
         string prefabName,
         GameObject sourcePrefab,
         string? material,
-        string? color,
-        float? emission,
         string? iconRotationValue,
         bool restoreItemVisualScale = false)
     {
@@ -352,8 +318,6 @@ internal static class ItemVisualOverrides
             prefabName,
             sourcePrefab,
             material,
-            color,
-            emission,
             iconRotation,
             restoreItemVisualScale);
     }
@@ -363,14 +327,12 @@ internal static class ItemVisualOverrides
         string prefabName,
         GameObject sourcePrefab,
         string? material,
-        string? color,
-        float? emission,
         Vector3 iconRotation,
         bool restoreItemVisualScale)
     {
         string renderFingerprint = BuildAutoIconRenderFingerprint(sourcePrefab);
         string cacheName = $"{cacheScope}-{prefabName}";
-        string cachePath = GetAutoIconCachePath(cacheName, cacheScope, prefabName, material, color, emission, iconRotation, renderFingerprint);
+        string cachePath = GetAutoIconCachePath(cacheName, cacheScope, prefabName, material, iconRotation, renderFingerprint);
         if (File.Exists(cachePath))
         {
             Sprite? cachedIcon = LoadSpriteFromPath(cachePath, $"{prefabName} auto icon");
@@ -723,22 +685,24 @@ internal static class ItemVisualOverrides
     private static Sprite? LoadSpriteFromPath(string iconPath, string iconName)
     {
         DateTime lastWriteTimeUtc = File.GetLastWriteTimeUtc(iconPath);
+        bool reloadRequested;
+        lock (PendingIconReloads)
+        {
+            reloadRequested = PendingIconReloads.Contains(iconPath);
+        }
+
         if (IconCache.TryGetValue(iconPath, out IconCacheEntry? cached) &&
             cached.Sprite != null &&
-            cached.LastWriteTimeUtc == lastWriteTimeUtc)
+            cached.LastWriteTimeUtc == lastWriteTimeUtc &&
+            !reloadRequested)
         {
             return cached.Sprite;
         }
 
-        if (cached != null)
-        {
-            IconCache.Remove(iconPath);
-            DestroyOwnedSprite(cached.Sprite);
-        }
-
+        Texture2D? texture = null;
         try
         {
-            Texture2D texture = new(2, 2, TextureFormat.RGBA32, mipChain: false)
+            texture = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false)
             {
                 name = Path.GetFileNameWithoutExtension(iconPath)
             };
@@ -746,7 +710,7 @@ internal static class ItemVisualOverrides
             if (!TryLoadImage(texture, File.ReadAllBytes(iconPath)))
             {
                 UnityEngine.Object.Destroy(texture);
-                return null;
+                return cached?.Sprite;
             }
 
             Sprite sprite = Sprite.Create(
@@ -756,12 +720,25 @@ internal static class ItemVisualOverrides
                 100f);
             sprite.name = Path.GetFileNameWithoutExtension(iconPath);
             IconCache[iconPath] = new IconCacheEntry(lastWriteTimeUtc, sprite);
+            if (cached?.Sprite != null)
+            {
+                RetiredIconSprites.Add(cached.Sprite);
+            }
+            lock (PendingIconReloads)
+            {
+                PendingIconReloads.Remove(iconPath);
+            }
             return sprite;
         }
         catch (Exception ex)
         {
+            if (texture != null)
+            {
+                UnityEngine.Object.Destroy(texture);
+            }
+
             DataForgeLogContext.Warning($"Could not load visual icon '{iconName}' from '{iconPath}': {ex.Message}");
-            return null;
+            return cached?.Sprite;
         }
     }
 
@@ -860,8 +837,6 @@ internal static class ItemVisualOverrides
         string cacheScope,
         string prefabName,
         string? material,
-        string? color,
-        float? emission,
         Vector3 iconRotation,
         string renderFingerprint)
     {
@@ -872,8 +847,6 @@ internal static class ItemVisualOverrides
             cacheScope,
             prefabName,
             material?.Trim() ?? "",
-            color?.Trim() ?? "",
-            emission?.ToString(CultureInfo.InvariantCulture) ?? "",
             FormatVector3(iconRotation),
             AutoIconSize.ToString(CultureInfo.InvariantCulture),
             renderFingerprint
@@ -987,7 +960,7 @@ internal static class ItemVisualOverrides
             if (IconCache.TryGetValue(path, out IconCacheEntry? cached))
             {
                 IconCache.Remove(path);
-                DestroyOwnedSprite(cached.Sprite);
+                RetiredIconSprites.Add(cached.Sprite);
             }
 
             if (File.Exists(path))
@@ -1075,96 +1048,6 @@ internal static class ItemVisualOverrides
         }
     }
 
-    private static bool TryParseColor(string? value, out Color color)
-    {
-        color = Color.white;
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return false;
-        }
-
-        string colorValue = value!;
-        string[] parts = SplitTuple(colorValue);
-        if (parts.Length < 3)
-        {
-            DataForgeLogContext.Warning($"Could not parse visual.color value '{colorValue}'. Expected 'r, g, b, a'.");
-            return false;
-        }
-
-        if (!TryParseColorPart(parts, 0, colorValue, out float red) ||
-            !TryParseColorPart(parts, 1, colorValue, out float green) ||
-            !TryParseColorPart(parts, 2, colorValue, out float blue))
-        {
-            return false;
-        }
-
-        float alpha = 1f;
-        if (parts.Length > 3 && parts[3].Length > 0 &&
-            !float.TryParse(parts[3], NumberStyles.Float, CultureInfo.InvariantCulture, out alpha))
-        {
-            DataForgeLogContext.Warning($"Could not parse visual.color value '{colorValue}'. Expected numeric alpha.");
-            return false;
-        }
-
-        color = new Color(
-            Mathf.Clamp01(red),
-            Mathf.Clamp01(green),
-            Mathf.Clamp01(blue),
-            Mathf.Clamp01(alpha));
-        return true;
-    }
-
-    private static bool TryParseColorPart(string[] parts, int index, string originalValue, out float parsed)
-    {
-        parsed = 0f;
-        if (parts.Length <= index || parts[index].Length == 0)
-        {
-            DataForgeLogContext.Warning($"Could not parse visual.color value '{originalValue}'. Expected 'r, g, b, a'.");
-            return false;
-        }
-
-        if (float.TryParse(parts[index], NumberStyles.Float, CultureInfo.InvariantCulture, out parsed))
-        {
-            return true;
-        }
-
-        DataForgeLogContext.Warning($"Could not parse visual.color value '{originalValue}'. Expected numeric RGBA values.");
-        return false;
-    }
-
-    private static void ApplyMaterialColor(Material material, Color color)
-    {
-        if (material.HasProperty("_Color"))
-        {
-            material.SetColor("_Color", color);
-        }
-
-        if (material.HasProperty("_BaseColor"))
-        {
-            material.SetColor("_BaseColor", color);
-        }
-    }
-
-    private static void ApplyMaterialEmission(Material material, float intensity, Color? tint)
-    {
-        Color baseColor = tint ?? Color.white;
-        Color emissionColor = new(baseColor.r * intensity, baseColor.g * intensity, baseColor.b * intensity, 1f);
-
-        if (material.HasProperty("_EmissionColor"))
-        {
-            material.SetColor("_EmissionColor", emissionColor);
-        }
-
-        if (intensity > 0f)
-        {
-            material.EnableKeyword("_EMISSION");
-        }
-        else
-        {
-            material.DisableKeyword("_EMISSION");
-        }
-    }
-
     internal static Material? ResolveMaterial(string materialName)
     {
         string normalizedName = NormalizeMaterialName(materialName);
@@ -1217,7 +1100,8 @@ internal static class ItemVisualOverrides
         Material[] materials = Resources.FindObjectsOfTypeAll<Material>();
         foreach (Material material in materials)
         {
-            if (material == null || string.IsNullOrWhiteSpace(material.name))
+            if (material == null ||
+                string.IsNullOrWhiteSpace(material.name))
             {
                 continue;
             }
@@ -1428,21 +1312,11 @@ internal static class ItemVisualOverrides
         OriginalIcons[prefabName] = shared.m_icons?.ToArray();
     }
 
-    private static void TrackCreatedMaterial(string prefabName, Material material)
-    {
-        if (!CreatedMaterials.TryGetValue(prefabName, out List<Material>? materials))
-        {
-            materials = new List<Material>();
-            CreatedMaterials[prefabName] = materials;
-        }
-
-        materials.Add(material);
-    }
-
     private static string GetPrefabName(GameObject gameObject)
     {
         return gameObject.name.Replace("(Clone)", "").Trim();
     }
+
 
     private sealed class RendererMaterialSnapshot
     {
