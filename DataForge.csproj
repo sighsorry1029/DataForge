@@ -257,9 +257,9 @@
         <Copy SourceFiles="@(NexusPackageFiles)" DestinationFolder="$(NexusPackageStagingDir)"/>
     </Target>
 
-    <Target Name="UpdateStagedManifestVersion">
-        <Message Text="Updating staged Thunderstore manifest to version $(PackageVersion)."/>
-        <Exec Command="&quot;$(PowerShellExe)&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(ProjectDir)UpdateManifest.ps1&quot; -Mode UpdateManifest -ManifestFile &quot;$(ThunderstorePackageStagingDir)\manifest.json&quot; -VersionString &quot;$(PackageVersion)&quot; -ExpectedName &quot;$(AssemblyName)&quot;"/>
+    <Target Name="UpdateManifestVersion">
+        <Message Text="Updating Thunderstore manifest to version $(PackageVersion)."/>
+        <Exec Command="&quot;$(PowerShellExe)&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(ProjectDir)UpdateManifest.ps1&quot; -Mode UpdateManifest -ManifestFile &quot;$(ProjectDir)Thunderstore\manifest.json&quot; -VersionString &quot;$(PackageVersion)&quot; -ExpectedName &quot;$(AssemblyName)&quot;"/>
     </Target>
 
     <Target Name="MakeThunderstorePackage">
@@ -285,7 +285,7 @@
     </Target>
 
     <Target Name="PackageRelease"
-            DependsOnTargets="ValidatePackageReleaseInputs;Build;GetAssemblyVersion;PreparePackageStaging;UpdateStagedManifestVersion;MakeThunderstorePackage;MakeNexusPackage;ValidateStagedPackages;PromotePackageRelease;CleanPackageStaging">
+            DependsOnTargets="ValidatePackageReleaseInputs;Build;GetAssemblyVersion;UpdateManifestVersion;PreparePackageStaging;MakeThunderstorePackage;MakeNexusPackage;ValidateStagedPackages;PromotePackageRelease;CleanPackageStaging">
         <Message Text="Created Thunderstore and Nexus packages for $(PackageName)." Importance="high"/>
     </Target>
 

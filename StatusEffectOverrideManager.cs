@@ -3428,11 +3428,18 @@ internal static class DataForgePlayerMaxStatsPatch
 [HarmonyPatch]
 internal static class DataForgeMagicPluginMaxStatsCompatibilityPatch
 {
+    private const string MagicPluginGuid = "blacks7ar.MagicPlugin";
     private const string MagicPluginPlayerPatchType = "MagicPlugin.Patches.PlayerPatch";
     private static MethodBase? SetEitrMethod;
 
     private static bool Prepare()
     {
+        if (!BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey(MagicPluginGuid))
+        {
+            SetEitrMethod = null;
+            return false;
+        }
+
         Type? type = AccessTools.TypeByName(MagicPluginPlayerPatchType);
         SetEitrMethod = type == null ? null : AccessTools.Method(type, "SetEitr");
         return SetEitrMethod != null;

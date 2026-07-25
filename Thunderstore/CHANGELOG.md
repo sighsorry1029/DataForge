@@ -7,7 +7,8 @@
 - Made startup, shutdown, and world transitions fault-isolated and ownership-safe across overrides, localization, icons, and VNEI refreshes.
 - Improved piece reload cleanup and visual ownership so DataForge-managed components are removed only when unused and later visual changes made by other mods are preserved.
 - Corrected generated reference defaults, ObjectDB cache invalidation, and station-extension spacing behavior.
-- Reworked Thunderstore and Nexus packaging to stage, validate, and atomically promote release archives.
+- Avoided a HarmonyX type lookup warning when the optional MagicPlugin dependency is not installed.
+- Reworked Thunderstore and Nexus packaging to synchronize the source manifest with the DLL version before staging, validating, and atomically promoting release archives.
 
 ## 1.1.7
 
