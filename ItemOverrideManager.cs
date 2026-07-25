@@ -526,7 +526,6 @@ internal static class ItemOverrideManager
             }
         }
 
-        ObjectDB.instance.UpdateRegisters();
         DataForgeResourceMap.InvalidateObjectDbCaches();
     }
 

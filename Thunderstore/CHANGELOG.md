@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.9
+
+- Stopped rebuilding ObjectDB item registers during shutdown restoration, avoiding cleanup warnings when Unity has already destroyed a registered prefab.
+
 ## 1.1.8
 
 - **Breaking:** Removed item `visual.color` and `visual.emission`. Existing item YAML must remove these keys and select an existing donor with `visual.material` instead.
