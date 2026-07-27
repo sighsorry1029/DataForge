@@ -66,6 +66,7 @@ internal static class ItemOverrideManager
     private static bool ZNetSceneReady;
     private static int CreatedCloneRevision;
     private static bool StatusEffectEquipmentRefreshPending;
+    private static bool StatusEffectItemIconRefreshPending;
     private static bool GlobalStackMultiplierStateWasApplied;
     private static bool GlobalWeightMultiplierStateWasApplied;
 
@@ -90,6 +91,7 @@ internal static class ItemOverrideManager
         Watcher = null;
         ReloadDebouncer?.Dispose();
         ReloadDebouncer = null;
+        StatusEffectItemIconRefreshPending = false;
     }
 
     internal static void SetupFileWatcher()
@@ -153,6 +155,7 @@ internal static class ItemOverrideManager
 
         if (ShouldSkipRemoteClientBaselineWork())
         {
+            TryRefreshStatusEffectItemIcons();
             return;
         }
 
@@ -161,6 +164,7 @@ internal static class ItemOverrideManager
             WriteGeneratedArtifacts();
         }
         ApplyCurrentConfiguration();
+        TryRefreshStatusEffectItemIcons();
     }
 
     internal static void OnZNetSceneReady()
@@ -172,6 +176,7 @@ internal static class ItemOverrideManager
 
         ZNetSceneReady = true;
         ApplyCurrentConfiguration();
+        TryRefreshStatusEffectItemIcons();
     }
 
     internal static void ApplyCurrentConfiguration()
@@ -241,7 +246,8 @@ internal static class ItemOverrideManager
         DataForgeResourceMap.InvalidateObjectDbCaches();
         UpdateRuntimeAppliedItemState(entriesByItem, globalMultiplierActive);
         UpdateLiveSafeItemState(entriesByItem);
-        StatusEffectOverrideManager.RefreshItemIconReferences();
+        StatusEffectItemIconRefreshPending = true;
+        TryRefreshStatusEffectItemIcons();
         if (cloneSetChanged)
         {
             try
@@ -269,6 +275,7 @@ internal static class ItemOverrideManager
 
     internal static void OnStatusEffectDefinitionsChanged()
     {
+        StatusEffectItemIconRefreshPending = true;
         if (!DataForgeWorldLifecycle.IsShuttingDown)
         {
             StatusEffectEquipmentRefreshPending = true;
@@ -282,11 +289,34 @@ internal static class ItemOverrideManager
         try
         {
             ApplyCurrentConfiguration();
+            TryRefreshStatusEffectItemIcons();
         }
         finally
         {
             RefreshEquipmentAfterStatusEffectChanges();
         }
+    }
+
+    private static void TryRefreshStatusEffectItemIcons()
+    {
+        // ServerSync invokes domain callbacks one at a time. Wait for both payloads
+        // before validating item-backed effect icons against their registered items.
+        if (!StatusEffectItemIconRefreshPending ||
+            !ObjectDbReady ||
+            !ZNetSceneReady ||
+            !DataForgeWorldLifecycle.IsGameStarted ||
+            DataForgeWorldLifecycle.IsShuttingDown ||
+            ObjectDB.instance == null ||
+            ZNetScene.instance == null ||
+            (DataForgePlugin.IsRemoteServerClient &&
+             (LastAppliedSyncedPayload == null ||
+              !StatusEffectOverrideManager.HasAppliedSyncedPayload)))
+        {
+            return;
+        }
+
+        StatusEffectItemIconRefreshPending = false;
+        StatusEffectOverrideManager.RefreshItemIconReferences();
     }
 
     private static void RefreshEquipmentAfterStatusEffectChanges()
@@ -421,6 +451,7 @@ internal static class ItemOverrideManager
         }
 
         ApplyCurrentConfiguration();
+        TryRefreshStatusEffectItemIcons();
     }
 
     internal static void CleanupCreatedClonesForWorldTransition()
@@ -474,6 +505,7 @@ internal static class ItemOverrideManager
                 ObjectDbReady = false;
                 ZNetSceneReady = false;
                 StatusEffectEquipmentRefreshPending = false;
+                StatusEffectItemIconRefreshPending = false;
                 GlobalStackMultiplierStateWasApplied = false;
                 GlobalWeightMultiplierStateWasApplied = false;
                 RuntimeAppliedItemKeys.Clear();

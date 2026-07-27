@@ -64,6 +64,7 @@ internal static class StatusEffectOverrideManager
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
     private static string IconDirectory => Path.Combine(ConfigDirectory, "icon");
+    internal static bool HasAppliedSyncedPayload => LastAppliedSyncedPayload != null;
 
     internal static void Initialize(ConfigSync configSync)
     {

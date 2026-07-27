@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.10
+
+- Deferred server-synced `item:` status-effect icon validation until both effect and item payloads are ready, avoiding transient missing-item warnings while preserving genuine unresolved-reference diagnostics.
+
 ## 1.1.9
 
 - Stopped rebuilding ObjectDB item registers during shutdown restoration, avoiding cleanup warnings when Unity has already destroyed a registered prefab.
