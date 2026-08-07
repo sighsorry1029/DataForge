@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.1.11
+
+- Added top-level item `toolTier` overrides with baseline restoration and live synchronization, while omitting the vanilla minimum tier `0` from compact references.
+
 ## 1.1.10
 
 - Deferred server-synced `item:` status-effect icon validation until both effect and item payloads are ready, avoiding transient missing-item warnings while preserving genuine unresolved-reference diagnostics.

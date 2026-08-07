@@ -24,8 +24,9 @@ internal static class ItemOverrideManager
     private const string SyncedPayloadKey = "items";
     private const string CloneRootName = "DataForge_ItemClones";
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
+    private const int MinimumToolTier = 0;
     private const string ReferenceStateKey = "items";
-    private const string ReferenceLogicVersion = "2026-06-24-item-reference-state-v2";
+    private const string ReferenceLogicVersion = "2026-08-03-item-tool-tier-v3";
 
     private static readonly object StateLock = new();
     private static readonly Dictionary<string, ItemBaseline> Baselines = new(StringComparer.OrdinalIgnoreCase);
@@ -944,6 +945,7 @@ internal static class ItemOverrideManager
             "#   maxQuality: 1                          # maximum item quality level.",
             "#   teleportable: true                     # false prevents portal travel.",
             "#   floating: true                         # false removes the Floating component so dropped items sink in water.",
+            "#   toolTier: 0                            # hit tool tier; targets requiring a higher tier reject the hit.",
             "#   durability: 100, 50, true, 1, true, false, 0 # maxDurability, durabilityPerLevel, useDurability, useDurabilityDrain, canBeRepaired, destroyBroken, durabilityDrain.",
             "#   equipment:",
             "#     skillType: Swords                    # shown only for sword/axe/club/knife/spear/polearm/fists/shield/pickaxe/bow/crossbow/elemental magic/blood magic items.",
@@ -2633,6 +2635,8 @@ internal static class ItemOverrideManager
         }
 
         ApplyDamage(shared, combat.Damage);
+        Copy(combat.ToolTier, value =>
+            shared.m_toolTier = Math.Min(short.MaxValue, Math.Max(MinimumToolTier, value)));
         Copy(combat.BackstabBonus, value => shared.m_backstabBonus = Math.Max(0f, value));
         Copy(combat.AttackForce, value => shared.m_attackForce = Math.Max(0f, value));
         ApplyAttack(shared.m_attack, combat.PrimaryAttack, "primaryAttack");
@@ -3286,6 +3290,7 @@ internal static class ItemOverrideManager
             ["override"] = true
         };
         AddBasics(entry, definition.Basics);
+        entry["toolTier"] = definition.Combat?.ToolTier;
 
         if (output.EmitDurability)
         {
@@ -3890,6 +3895,7 @@ internal static class ItemOverrideManager
         public int? MaxQuality { get; set; }
         public bool? Teleportable { get; set; }
         public bool? Floating { get; set; }
+        public int? ToolTier { get; set; }
         public string? Durability { get; set; }
         public EquipmentDefinition? Equipment { get; set; }
         public DamageTakenModifierDefinition? DamageTakenModifiers { get; set; }
@@ -3921,6 +3927,7 @@ internal static class ItemOverrideManager
             DamageTakenModifiers != null ||
             Food != null ||
             Shield != null ||
+            ToolTier != null ||
             Damage != null ||
             PrimaryAttack != null ||
             SecondaryAttack != null ||
@@ -3934,6 +3941,7 @@ internal static class ItemOverrideManager
             DamageTakenModifiers != null ||
             Food != null ||
             Shield != null ||
+            ToolTier != null ||
             Damage != null ||
             PrimaryAttack != null ||
             SecondaryAttack != null ||
@@ -3957,7 +3965,8 @@ internal static class ItemOverrideManager
 
         private CombatDefinition? ToCombatDefinition()
         {
-            if (Damage == null &&
+            if (ToolTier == null &&
+                Damage == null &&
                 PrimaryAttack == null &&
                 SecondaryAttack == null)
             {
@@ -3966,6 +3975,7 @@ internal static class ItemOverrideManager
 
             return new CombatDefinition
             {
+                ToolTier = ToolTier,
                 Damage = Damage,
                 BackstabBonus = Damage?.BackstabBonus,
                 AttackForce = Damage?.AttackForce,
@@ -4018,6 +4028,7 @@ internal static class ItemOverrideManager
         public int? MaxStackSize { get; set; }
         public int? MaxQuality { get; set; }
         public bool? Teleportable { get; set; }
+        public int? ToolTier { get; set; }
         public string? Durability { get; set; }
         public EquipmentDefinition? Equipment { get; set; }
         public DamageTakenModifierDefinition? DamageTakenModifiers { get; set; }
@@ -4039,6 +4050,7 @@ internal static class ItemOverrideManager
                 Value = referenceBasics?.Value,
                 MaxStackSize = referenceBasics?.MaxStackSize,
                 Teleportable = referenceBasics?.Teleportable,
+                ToolTier = definition.Combat?.ToolTier is int toolTier && toolTier != MinimumToolTier ? toolTier : null,
                 Durability = output.EmitDurability && HasDurabilityEnabled(definition.Durability)
                     ? FormatReferenceDurability(definition.Durability)
                     : null,
@@ -4452,6 +4464,7 @@ internal static class ItemOverrideManager
 
     internal sealed class CombatDefinition
     {
+        public int? ToolTier { get; set; }
         public DamageDefinition? Damage { get; set; }
         public float? BackstabBonus { get; set; }
         public float? AttackForce { get; set; }
@@ -4463,6 +4476,7 @@ internal static class ItemOverrideManager
         {
             return new CombatDefinition
             {
+                ToolTier = shared.m_toolTier,
                 Damage = DamageDefinition.From(shared.m_damages, shared.m_damagesPerLevel),
                 BackstabBonus = shared.m_backstabBonus,
                 AttackForce = shared.m_attackForce,
