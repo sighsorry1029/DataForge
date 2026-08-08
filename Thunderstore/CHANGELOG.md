@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.1.12
+## 1.2.0
 
 - Added stable numbered recipe identities so multiple recipes for the same result, including recipes with identical runtime names, are all written to references and can be overridden independently.
 - Made recipe application transactional: unresolved crafting stations or resources keep the safe existing state, and newly added recipes are registered only after complete validation to prevent accidental free crafting.
