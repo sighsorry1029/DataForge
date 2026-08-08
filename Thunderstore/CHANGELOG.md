@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.12
+
+- Added stable numbered recipe identities so multiple recipes for the same result, including recipes with identical runtime names, are all written to references and can be overridden independently.
+- Made recipe application transactional: unresolved crafting stations or resources keep the safe existing state, and newly added recipes are registered only after complete validation to prevent accidental free crafting.
+- Made recipe removal and restoration fully live, refreshed connected clients' crafting UI correctly, isolated per-recipe failures, and reapplied overrides after external mods rebuild recipe objects.
+
 ## 1.1.11
 
 - Added top-level item `toolTier` overrides with baseline restoration and live synchronization, while omitting the vanilla minimum tier `0` from compact references.

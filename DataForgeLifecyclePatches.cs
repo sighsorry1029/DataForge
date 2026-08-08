@@ -154,6 +154,18 @@ internal static class DataForgeObjectDBCopyOtherDBPatch
     }
 }
 
+[HarmonyPatch(typeof(ObjectDB), nameof(ObjectDB.UpdateRegisters))]
+internal static class DataForgeObjectDBUpdateRegistersPatch
+{
+    [HarmonyPriority(Priority.Last)]
+    private static void Postfix(ObjectDB __instance)
+    {
+        DataForgeLifecycleStep.Run(
+            "recipe registry reconciliation",
+            () => RecipeOverrideManager.OnObjectDBRegistersUpdated(__instance));
+    }
+}
+
 [HarmonyPatch(typeof(ZNetScene), nameof(ZNetScene.Awake))]
 internal static class DataForgeZNetSceneAwakePatch
 {
