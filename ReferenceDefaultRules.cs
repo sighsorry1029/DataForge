@@ -73,19 +73,25 @@ internal static class ReferenceDefaultRules
                propertyName.Equals("CanBeRemoved", StringComparison.OrdinalIgnoreCase);
     }
 
-    internal static int DefaultInt(string propertyName)
+    internal static bool IsDefaultInt(int value, string propertyName)
     {
-        if (propertyName.Equals("ListSortWeight", StringComparison.OrdinalIgnoreCase))
+        if (propertyName.Equals("ToolTier", StringComparison.OrdinalIgnoreCase))
         {
-            return 100;
+            return false;
         }
 
-        return propertyName.Equals("Amount", StringComparison.OrdinalIgnoreCase) ||
-               propertyName.Equals("MinStationLevel", StringComparison.OrdinalIgnoreCase) ||
-               propertyName.Equals("MaxStackSize", StringComparison.OrdinalIgnoreCase) ||
-               propertyName.Equals("MaxQuality", StringComparison.OrdinalIgnoreCase)
+        if (propertyName.Equals("ListSortWeight", StringComparison.OrdinalIgnoreCase))
+        {
+            return value == 100;
+        }
+
+        int defaultValue = propertyName.Equals("Amount", StringComparison.OrdinalIgnoreCase) ||
+                           propertyName.Equals("MinStationLevel", StringComparison.OrdinalIgnoreCase) ||
+                           propertyName.Equals("MaxStackSize", StringComparison.OrdinalIgnoreCase) ||
+                           propertyName.Equals("MaxQuality", StringComparison.OrdinalIgnoreCase)
             ? 1
             : 0;
+        return value == defaultValue;
     }
 
     internal static bool IsDefaultFloat(float value, string _)

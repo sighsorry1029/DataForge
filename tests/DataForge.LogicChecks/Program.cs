@@ -18,6 +18,7 @@ internal static class Program
         Run(nameof(CloneOrderBlocksCyclesAndTheirDependents), CloneOrderBlocksCyclesAndTheirDependents);
         Run(nameof(CloneOrderBlocksSelfCycles), CloneOrderBlocksSelfCycles);
         Run(nameof(ReferencePruningOmitsScalarDefaults), ReferencePruningOmitsScalarDefaults);
+        Run(nameof(ReferencePruningRetainsZeroToolTier), ReferencePruningRetainsZeroToolTier);
         Run(nameof(ReferencePruningKeepsScalarOverrides), ReferencePruningKeepsScalarOverrides);
         Run(nameof(ReferencePruningHandlesTupleDefaults), ReferencePruningHandlesTupleDefaults);
         Run(nameof(ReferencePruningRemovesEmptyChildren), ReferencePruningRemovesEmptyChildren);
@@ -152,13 +153,20 @@ internal static class Program
             Override = true,
             Amount = 1,
             MaxQuality = 1,
-            ToolTier = 0,
             Scalar = 0f,
             Icon = "auto"
         };
 
         Assert(ReferenceValue.ClonePruned(source) == null,
             "A reference object containing only established defaults must be omitted.");
+    }
+
+    private static void ReferencePruningRetainsZeroToolTier()
+    {
+        ReferenceFixture source = new() { ToolTier = 0 };
+
+        ReferenceFixture? pruned = ReferenceValue.ClonePruned(source);
+        Assert(pruned?.ToolTier == 0, "An explicitly emitted tool tier 0 must be retained.");
     }
 
     private static void ReferencePruningKeepsScalarOverrides()
@@ -178,7 +186,7 @@ internal static class Program
         Assert(pruned!.Override == false, "Explicit override:false must be retained.");
         Assert(pruned.Amount == 2, "A non-default amount must be retained.");
         Assert(pruned.MaxQuality == 3, "A non-default max quality must be retained.");
-        Assert(pruned.ToolTier == 1, "Tool tier 1 must be retained because vanilla's minimum is 0.");
+        Assert(pruned.ToolTier == 1, "An emitted tool tier must be retained regardless of its value.");
         Assert(Math.Abs(pruned.Scalar.GetValueOrDefault() - 0.5f) < 0.0001f,
             "A non-zero scalar must be retained.");
         Assert(pruned.Icon == "custom.png", "A custom icon must be retained.");

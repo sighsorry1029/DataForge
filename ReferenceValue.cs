@@ -35,7 +35,7 @@ internal static class ReferenceValue
         if (valueType == typeof(int))
         {
             int value = (int)source;
-            return value == ReferenceDefaultRules.DefaultInt(propertyName) ? null : value;
+            return ReferenceDefaultRules.IsDefaultInt(value, propertyName) ? null : value;
         }
 
         if (valueType == typeof(float))

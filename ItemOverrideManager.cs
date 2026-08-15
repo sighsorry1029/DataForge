@@ -26,7 +26,7 @@ internal static class ItemOverrideManager
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
     private const int MinimumToolTier = 0;
     private const string ReferenceStateKey = "items";
-    private const string ReferenceLogicVersion = "2026-08-03-item-tool-tier-v3";
+    private const string ReferenceLogicVersion = "2026-08-15-item-tool-tier-v4";
 
     private static readonly object StateLock = new();
     private static readonly Dictionary<string, ItemBaseline> Baselines = new(StringComparer.OrdinalIgnoreCase);
@@ -4081,7 +4081,9 @@ internal static class ItemOverrideManager
                 Value = referenceBasics?.Value,
                 MaxStackSize = referenceBasics?.MaxStackSize,
                 Teleportable = referenceBasics?.Teleportable,
-                ToolTier = definition.Combat?.ToolTier is int toolTier && toolTier != MinimumToolTier ? toolTier : null,
+                ToolTier = IsSkillType(definition, Skills.SkillType.Axes, Skills.SkillType.Pickaxes)
+                    ? definition.Combat?.ToolTier
+                    : null,
                 Durability = output.EmitDurability && HasDurabilityEnabled(definition.Durability)
                     ? FormatReferenceDurability(definition.Durability)
                     : null,

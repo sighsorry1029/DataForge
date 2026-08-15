@@ -6,6 +6,7 @@
 - Bounded and isolated icon transfer, validation, retry, disk, and texture-memory failures so one bad asset cannot block unrelated definitions or leave clients retrying indefinitely.
 - Made fermenter, cooking-station, and smelter resources and conversions validate before commit, preventing unresolved references from leaving partially applied runtime state.
 - Hardened file-watcher recovery, source-of-truth setup, world cleanup, recipe validation, acquisition multiplier patches, and generated artifact writes so failures remain scoped and recover live where possible.
+- Changed compact item references to emit `toolTier`, including tier `0`, only for axe and pickaxe skill items.
 
 ## 1.2.0
 
