@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.1
+
+- Added server-authoritative PNG synchronization for explicit item, piece, and status-effect icons using content-hash manifests, missing-only transfers, persistent client caching, and live change or removal reapplication.
+- Bounded and isolated icon transfer, validation, retry, disk, and texture-memory failures so one bad asset cannot block unrelated definitions or leave clients retrying indefinitely.
+- Made fermenter, cooking-station, and smelter resources and conversions validate before commit, preventing unresolved references from leaving partially applied runtime state.
+- Hardened file-watcher recovery, source-of-truth setup, world cleanup, recipe validation, acquisition multiplier patches, and generated artifact writes so failures remain scoped and recover live where possible.
+
 ## 1.2.0
 
 - Added stable numbered recipe identities so multiple recipes for the same result, including recipes with identical runtime names, are all written to references and can be overridden independently.

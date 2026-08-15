@@ -126,11 +126,13 @@
         <Compile Include="Plugin.cs"/>
         <Compile Include="DataForgeConsoleCommands.cs"/>
         <Compile Include="DataForgeLogContext.cs"/>
+        <Compile Include="DataForgeIconProtocol.cs"/>
         <Compile Include="DataForgeReferenceSections.cs"/>
         <Compile Include="DataForgeItemSortClassifier.cs"/>
         <Compile Include="DataForgeResourceMap.cs"/>
         <Compile Include="DataForgeValue.cs"/>
         <Compile Include="DataForgeSync.cs"/>
+        <Compile Include="DataForgeIconSync.cs"/>
         <Compile Include="DataForgeReferenceState.cs"/>
         <Compile Include="DataForgeOverrideFiles.cs"/>
         <Compile Include="DomainEntryChangeTracker.cs"/>

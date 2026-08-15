@@ -67,6 +67,7 @@ internal static class PieceOverrideManager
     private static readonly Dictionary<string, int> KnownPieceCategoryValuePriorities = new(StringComparer.Ordinal);
     private static readonly Dictionary<Piece.PieceCategory, string> KnownPieceCategoryNameSources = new();
     private static readonly Dictionary<string, string> KnownPieceCategoryValueSources = new(StringComparer.Ordinal);
+    private static readonly HashSet<Piece.PieceCategory> OwnerManagedPieceCategories = new();
     private static readonly HashSet<string> ReportedPieceCategoryConflicts = new(StringComparer.Ordinal);
     private static readonly HashSet<string> ReportedPieceCategoryConfigurationIssues = new(StringComparer.Ordinal);
     private static readonly IDeserializer Deserializer = new DeserializerBuilder()
@@ -149,7 +150,12 @@ internal static class PieceOverrideManager
         Watcher?.Dispose();
         ReloadDebouncer?.Dispose();
         ReloadDebouncer = DataForgeFileWatcher.CreateDebouncedAction(ReloadDelayTicks, ReloadYamlValues);
-        Watcher = DataForgeFileWatcher.Create(ConfigDirectory, "*.*", includeSubdirectories: true, ReadYamlValues);
+        Watcher = DataForgeFileWatcher.Create(
+            ConfigDirectory,
+            "*.*",
+            includeSubdirectories: true,
+            ReadYamlValues,
+            OnWatcherError);
     }
 
     internal static void ReloadFromDiskAndSync()
@@ -181,7 +187,7 @@ internal static class PieceOverrideManager
         PublishPayload(SerializeEntries(entries));
         PublishPieceCategoryPayload(SerializePieceCategoryConfiguration(pieceCategoryConfiguration));
         ApplyCurrentConfiguration();
-        WritePieceCategoryReferenceArtifact();
+        DataForgeLifecycleStep.Run("piece category generated-artifact write", WritePieceCategoryReferenceArtifact);
     }
 
     internal static void ApplyCurrentConfiguration()
@@ -301,7 +307,7 @@ internal static class PieceOverrideManager
             hasActivePieceCategoryMoves;
         PieceCategoryConfigurationWasApplied = hasActivePieceCategoryConfiguration;
         AppliedPieceCategoryConfigurationVersion = pieceCategoryConfigurationVersion;
-        WritePieceCategoryReferenceArtifact();
+        DataForgeLifecycleStep.Run("piece category generated-artifact write", WritePieceCategoryReferenceArtifact);
         VneiRefreshManager.RequestRefresh(DomainName);
     }
 
@@ -443,7 +449,7 @@ internal static class PieceOverrideManager
 
         if (writeGeneratedArtifacts)
         {
-            WriteGeneratedArtifacts();
+            DataForgeLifecycleStep.Run("piece generated-artifact write", WriteGeneratedArtifacts);
         }
         ApplyCurrentConfiguration();
     }
@@ -541,13 +547,14 @@ internal static class PieceOverrideManager
         }
     }
 
-    internal static void OnWorldShutdown()
+    internal static bool OnWorldShutdown()
     {
-        RunWorldShutdownStep("visual state", RestoreAllPieceVisualStates);
-        RunWorldShutdownStep("moved piece categories", RestorePieceCategoryMoveBaselines);
-        RunWorldShutdownStep("prefab definitions", RestoreAppliedPrefabDefinitionsForWorldShutdown);
-        RunWorldShutdownStep("piece tables", RestoreCapturedPieceTablesForWorldShutdown);
-        RunWorldShutdownStep("piece categories", PieceTableCategoryGuard.ResetWorldState);
+        bool cleanupSucceeded = true;
+        cleanupSucceeded &= RunWorldShutdownStep("visual state", RestoreAllPieceVisualStates);
+        cleanupSucceeded &= RunWorldShutdownStep("moved piece categories", RestorePieceCategoryMoveBaselines);
+        cleanupSucceeded &= RunWorldShutdownStep("prefab definitions", RestoreAppliedPrefabDefinitionsForWorldShutdown);
+        cleanupSucceeded &= RunWorldShutdownStep("piece tables", RestoreCapturedPieceTablesForWorldShutdown);
+        cleanupSucceeded &= RunWorldShutdownStep("piece categories", PieceTableCategoryGuard.ResetWorldState);
         ResetPieceCategoryRegistry();
         GameDataReady = false;
         ObjectDbReady = false;
@@ -575,17 +582,21 @@ internal static class PieceOverrideManager
 
             EntryChanges.RequireFullApply();
         }
+
+        return cleanupSucceeded;
     }
 
-    private static void RunWorldShutdownStep(string name, Action action)
+    private static bool RunWorldShutdownStep(string name, Action action)
     {
         try
         {
             action();
+            return true;
         }
         catch (Exception ex)
         {
             DataForgePlugin.Log.LogWarning($"Failed to restore DataForge piece {name} during world shutdown: {ex}");
+            return false;
         }
     }
 
@@ -658,9 +669,9 @@ internal static class PieceOverrideManager
             return;
         }
 
-        WriteGeneratedArtifacts();
+        DataForgeLifecycleStep.Run("piece generated-artifact write", WriteGeneratedArtifacts);
         ApplyCurrentConfiguration();
-        WritePieceCategoryReferenceArtifact();
+        DataForgeLifecycleStep.Run("piece category generated-artifact write", WritePieceCategoryReferenceArtifact);
     }
 
     private static void ReadYamlValues(object sender, FileSystemEventArgs e)
@@ -703,6 +714,26 @@ internal static class PieceOverrideManager
         catch (Exception ex)
         {
             DataForgePlugin.Log.LogError($"Error reloading piece YAML files: {ex}");
+        }
+    }
+
+    private static void OnWatcherError(object sender, ErrorEventArgs e)
+    {
+        DataForgePlugin.Log.LogWarning($"Piece file watcher lost events; scheduling a full reload: {e.GetException().Message}");
+        ItemVisualOverrides.MarkAllIconFilesChanged();
+        lock (StateLock)
+        {
+            EntryChanges.RequireFullApply();
+            PieceCategoryConfigurationVersion++;
+        }
+
+        if (DataForgeFileWatcher.TryRecreate("piece", SetupFileWatcher))
+        {
+            ReloadDebouncer?.Schedule();
+        }
+        else
+        {
+            ReloadYamlValues();
         }
     }
 
@@ -806,6 +837,53 @@ internal static class PieceOverrideManager
         EntryChanges.SetEntries(entries);
         ActiveEntries = entries;
         ActiveRuntimeEntriesByPiece = BuildActiveRuntimeEntriesByPiece(entries);
+        DataForgeIconSync.ScheduleManifestRefresh();
+    }
+
+    internal static void CollectReferencedExplicitIconNames(ISet<string> names)
+    {
+        if (!DataForgePlugin.PieceOverridesEnabled)
+        {
+            return;
+        }
+
+        lock (StateLock)
+        {
+            foreach (PieceEntry entry in ActiveEntries)
+            {
+                string? icon = entry.Visual?.Icon;
+                if (entry.Override &&
+                    !entry.Remove &&
+                    entry.HasRuntimeDefinition &&
+                    !string.IsNullOrWhiteSpace(icon) &&
+                    !ItemVisualOverrides.IsAutoIconValue(icon))
+                {
+                    names.Add(icon!);
+                }
+            }
+        }
+    }
+
+    internal static void OnSyncedIconsChanged(ISet<string> changedNames)
+    {
+        bool referencesChangedIcon;
+        lock (StateLock)
+        {
+            referencesChangedIcon = ActiveEntries.Any(entry =>
+                entry.Override &&
+                !entry.Remove &&
+                entry.HasRuntimeDefinition &&
+                DataForgeIconSync.ContainsLogicalIconName(changedNames, entry.Visual?.Icon, excludeAuto: true));
+            if (referencesChangedIcon)
+            {
+                EntryChanges.RequireFullApply();
+            }
+        }
+
+        if (referencesChangedIcon)
+        {
+            ApplyCurrentConfiguration();
+        }
     }
 
     private static void SetActivePieceCategoryConfiguration(PieceCategoryConfiguration configuration)
@@ -1825,7 +1903,7 @@ internal static class PieceOverrideManager
                 if (itemDrop == null)
                 {
                     DataForgeLogContext.Warning($"{GetPrefabName(piece.gameObject)} has unknown build resource '{pair.Key}'.");
-                    continue;
+                    return;
                 }
 
                 string[] parts = SplitTuple(pair.Value);
@@ -2026,15 +2104,19 @@ internal static class PieceOverrideManager
     private static void ApplyFermenterDefinition(Fermenter fermenter, FermenterDefinition definition)
     {
         Copy(definition.Duration, value => fermenter.m_fermentationDuration = Math.Max(0f, value));
-        if (definition.Conversions != null)
+        if (definition.Conversions != null &&
+            TryBuildFermenterConversions(fermenter, definition.Conversions, out List<Fermenter.ItemConversion> conversions))
         {
-            fermenter.m_conversion = BuildFermenterConversions(fermenter, definition.Conversions);
+            fermenter.m_conversion = conversions;
         }
     }
 
-    private static List<Fermenter.ItemConversion> BuildFermenterConversions(Fermenter fermenter, List<FermenterConversionDefinition> definitions)
+    private static bool TryBuildFermenterConversions(
+        Fermenter fermenter,
+        List<FermenterConversionDefinition> definitions,
+        out List<Fermenter.ItemConversion> conversions)
     {
-        List<Fermenter.ItemConversion> conversions = new();
+        conversions = new List<Fermenter.ItemConversion>();
         string prefabName = GetPrefabName(fermenter.gameObject);
         foreach (FermenterConversionDefinition definition in definitions)
         {
@@ -2044,7 +2126,7 @@ internal static class PieceOverrideManager
                 if (parts.Length == 0 || parts[0].Length == 0)
                 {
                     DataForgeLogContext.Warning($"{prefabName} has fermenter conversion '{pair.Key}' without output item.");
-                    continue;
+                    return false;
                 }
 
                 ItemDrop? from = ResolveItemDrop(pair.Key);
@@ -2052,7 +2134,7 @@ internal static class PieceOverrideManager
                 if (from == null || to == null)
                 {
                     DataForgeLogContext.Warning($"{prefabName} has unknown fermenter conversion '{pair.Key}: {pair.Value}'.");
-                    continue;
+                    return false;
                 }
 
                 conversions.Add(new Fermenter.ItemConversion
@@ -2064,50 +2146,85 @@ internal static class PieceOverrideManager
             }
         }
 
-        return conversions;
+        return true;
     }
 
     private static void ApplyCookingStationDefinition(CookingStation cookingStation, CookingStationDefinition definition)
     {
-        if (!string.IsNullOrWhiteSpace(definition.Fuel))
+        bool applyFuel = !string.IsNullOrWhiteSpace(definition.Fuel);
+        bool fuelValid = true;
+        ItemDrop? fuelItem = cookingStation.m_fuelItem;
+        bool useFuel = cookingStation.m_useFuel;
+        bool requireFire = cookingStation.m_requireFire;
+        int maxFuel = cookingStation.m_maxFuel;
+        int secondsPerFuel = cookingStation.m_secPerFuel;
+        if (applyFuel)
         {
             string[] parts = SplitTuple(definition.Fuel);
             if (parts.Length > 0 && parts[0].Length > 0)
             {
                 if (IsNone(parts[0]))
                 {
-                    cookingStation.m_fuelItem = null;
-                    cookingStation.m_useFuel = false;
+                    fuelItem = null;
+                    useFuel = false;
                 }
                 else
                 {
-                    ItemDrop? fuelItem = ResolveItemDrop(parts[0]);
-                    if (fuelItem == null)
+                    ItemDrop? resolvedFuelItem = ResolveItemDrop(parts[0]);
+                    if (resolvedFuelItem == null)
                     {
                         DataForgeLogContext.Warning($"{GetPrefabName(cookingStation.gameObject)} has unknown cookingStation fuel item '{parts[0]}'.");
+                        fuelValid = false;
                     }
                     else
                     {
-                        cookingStation.m_fuelItem = fuelItem;
-                        cookingStation.m_useFuel = true;
+                        fuelItem = resolvedFuelItem;
+                        useFuel = true;
                     }
                 }
             }
 
-            CopyBoolPart(parts, 1, parsed => cookingStation.m_requireFire = parsed);
-            CopyIntPart(parts, 2, parsed => cookingStation.m_maxFuel = Math.Max(0, parsed));
-            CopyIntPart(parts, 3, parsed => cookingStation.m_secPerFuel = Math.Max(0, parsed));
+            if (parts.Length > 1 && parts[1].Length > 0 && bool.TryParse(parts[1], out bool parsedRequireFire))
+            {
+                requireFire = parsedRequireFire;
+            }
+
+            if (TryGetIntPart(parts, 2, out int parsedMaxFuel))
+            {
+                maxFuel = Math.Max(0, parsedMaxFuel);
+            }
+
+            if (TryGetIntPart(parts, 3, out int parsedSecondsPerFuel))
+            {
+                secondsPerFuel = Math.Max(0, parsedSecondsPerFuel);
+            }
         }
 
-        if (definition.Conversions != null)
+        if (applyFuel && fuelValid)
         {
-            cookingStation.m_conversion = BuildCookingStationConversions(cookingStation, definition.Conversions);
+            cookingStation.m_fuelItem = fuelItem;
+            cookingStation.m_useFuel = useFuel;
+            cookingStation.m_requireFire = requireFire;
+            cookingStation.m_maxFuel = maxFuel;
+            cookingStation.m_secPerFuel = secondsPerFuel;
+        }
+
+        if (definition.Conversions != null &&
+            TryBuildCookingStationConversions(
+                cookingStation,
+                definition.Conversions,
+                out List<CookingStation.ItemConversion> conversions))
+        {
+            cookingStation.m_conversion = conversions;
         }
     }
 
-    private static List<CookingStation.ItemConversion> BuildCookingStationConversions(CookingStation cookingStation, List<CookingStationConversionDefinition> definitions)
+    private static bool TryBuildCookingStationConversions(
+        CookingStation cookingStation,
+        List<CookingStationConversionDefinition> definitions,
+        out List<CookingStation.ItemConversion> conversions)
     {
-        List<CookingStation.ItemConversion> conversions = new();
+        conversions = new List<CookingStation.ItemConversion>();
         string prefabName = GetPrefabName(cookingStation.gameObject);
         foreach (CookingStationConversionDefinition definition in definitions)
         {
@@ -2117,7 +2234,7 @@ internal static class PieceOverrideManager
                 if (parts.Length == 0 || parts[0].Length == 0)
                 {
                     DataForgeLogContext.Warning($"{prefabName} has cookingStation conversion '{pair.Key}' without output item.");
-                    continue;
+                    return false;
                 }
 
                 ItemDrop? from = ResolveItemDrop(pair.Key);
@@ -2125,7 +2242,7 @@ internal static class PieceOverrideManager
                 if (from == null || to == null)
                 {
                     DataForgeLogContext.Warning($"{prefabName} has unknown cookingStation conversion '{pair.Key}: {pair.Value}'.");
-                    continue;
+                    return false;
                 }
 
                 conversions.Add(new CookingStation.ItemConversion
@@ -2137,66 +2254,107 @@ internal static class PieceOverrideManager
             }
         }
 
-        return conversions;
+        return true;
     }
 
     private static void ApplySmelterDefinition(Smelter smelter, SmelterDefinition definition)
     {
-        if (!string.IsNullOrWhiteSpace(definition.Input))
+        bool applyInput = !string.IsNullOrWhiteSpace(definition.Input);
+        bool inputValid = true;
+        ItemDrop? fuelItem = smelter.m_fuelItem;
+        int maxFuel = smelter.m_maxFuel;
+        int maxOre = smelter.m_maxOre;
+        if (applyInput)
         {
             string[] parts = SplitTuple(definition.Input);
             if (parts.Length > 0 && parts[0].Length > 0)
             {
-                string fuelItem = parts[0];
-                if (IsNone(fuelItem))
+                string fuelItemName = parts[0];
+                if (IsNone(fuelItemName))
                 {
-                    smelter.m_fuelItem = null;
+                    fuelItem = null;
                 }
                 else
                 {
-                    ItemDrop? item = ResolveItemDrop(fuelItem);
-                    if (item == null)
+                    ItemDrop? resolvedFuelItem = ResolveItemDrop(fuelItemName);
+                    if (resolvedFuelItem == null)
                     {
-                        DataForgeLogContext.Warning($"{GetPrefabName(smelter.gameObject)} has unknown smelter fuel item '{fuelItem}'.");
+                        DataForgeLogContext.Warning($"{GetPrefabName(smelter.gameObject)} has unknown smelter fuel item '{fuelItemName}'.");
+                        inputValid = false;
                     }
                     else
                     {
-                        smelter.m_fuelItem = item;
+                        fuelItem = resolvedFuelItem;
                     }
                 }
             }
 
-            CopyIntPart(parts, 1, parsed => smelter.m_maxFuel = Math.Max(0, parsed));
-            CopyIntPart(parts, 2, parsed => smelter.m_maxOre = Math.Max(0, parsed));
+            if (TryGetIntPart(parts, 1, out int parsedMaxFuel))
+            {
+                maxFuel = Math.Max(0, parsedMaxFuel);
+            }
+
+            if (TryGetIntPart(parts, 2, out int parsedMaxOre))
+            {
+                maxOre = Math.Max(0, parsedMaxOre);
+            }
         }
 
-        if (!string.IsNullOrWhiteSpace(definition.Output))
+        bool applyOutput = !string.IsNullOrWhiteSpace(definition.Output);
+        int fuelPerProduct = smelter.m_fuelPerProduct;
+        float secondsPerProduct = smelter.m_secPerProduct;
+        if (applyOutput)
         {
             string[] parts = SplitTuple(definition.Output);
-            CopyIntPart(parts, 0, parsed => smelter.m_fuelPerProduct = Math.Max(0, parsed));
-            CopyFloatPart(parts, 1, parsed => smelter.m_secPerProduct = Math.Max(0f, parsed));
+            if (TryGetIntPart(parts, 0, out int parsedFuelPerProduct))
+            {
+                fuelPerProduct = Math.Max(0, parsedFuelPerProduct);
+            }
+
+            if (parts.Length > 1 && parts[1].Length > 0 &&
+                float.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out float parsedSecondsPerProduct))
+            {
+                secondsPerProduct = Math.Max(0f, parsedSecondsPerProduct);
+            }
+        }
+
+        if (applyInput && inputValid)
+        {
+            smelter.m_fuelItem = fuelItem;
+            smelter.m_maxFuel = maxFuel;
+            smelter.m_maxOre = maxOre;
+        }
+
+        if (applyOutput)
+        {
+            smelter.m_fuelPerProduct = fuelPerProduct;
+            smelter.m_secPerProduct = secondsPerProduct;
         }
 
         Copy(definition.RequiresRoof, value => smelter.m_requiresRoof = value);
-        if (definition.Conversions != null)
+        if (definition.Conversions != null &&
+            TryBuildSmelterConversions(smelter, definition.Conversions, out List<Smelter.ItemConversion> conversions))
         {
-            smelter.m_conversion = BuildSmelterConversions(smelter, definition.Conversions);
+            smelter.m_conversion = conversions;
         }
     }
 
-    private static List<Smelter.ItemConversion> BuildSmelterConversions(Smelter smelter, List<SmelterConversionDefinition> definitions)
+    private static bool TryBuildSmelterConversions(
+        Smelter smelter,
+        List<SmelterConversionDefinition> definitions,
+        out List<Smelter.ItemConversion> conversions)
     {
-        List<Smelter.ItemConversion> conversions = new();
+        conversions = new List<Smelter.ItemConversion>();
         string prefabName = GetPrefabName(smelter.gameObject);
         foreach (SmelterConversionDefinition definition in definitions)
         {
             foreach (KeyValuePair<string, string> pair in definition)
             {
-                string output = pair.Value.Trim();
+                string output = pair.Value?.Trim() ?? "";
                 if (output.Length == 0)
                 {
                     DataForgeLogContext.Warning($"{prefabName} has smelter conversion '{pair.Key}' without output item.");
-                    continue;
+                    return false;
                 }
 
                 ItemDrop? from = ResolveItemDrop(pair.Key);
@@ -2204,7 +2362,7 @@ internal static class PieceOverrideManager
                 if (from == null || to == null)
                 {
                     DataForgeLogContext.Warning($"{prefabName} has unknown smelter conversion '{pair.Key}: {pair.Value}'.");
-                    continue;
+                    return false;
                 }
 
                 conversions.Add(new Smelter.ItemConversion
@@ -2215,7 +2373,7 @@ internal static class PieceOverrideManager
             }
         }
 
-        return conversions;
+        return true;
     }
 
     private static void ApplyContainerDefinition(Container container, string definition)
@@ -3716,21 +3874,9 @@ internal static class PieceOverrideManager
                string.Equals(categoryName?.Trim(), HomesteadCategoryName, StringComparison.Ordinal);
     }
 
-    internal static bool IsOwnerManagedHomesteadCategory(Piece.PieceCategory category)
+    private static bool IsOwnerManagedHomesteadCategory(Piece.PieceCategory category)
     {
-        if (!IsHomesteadLoaded())
-        {
-            return false;
-        }
-
-        if (KnownPieceCategoryNames.TryGetValue(category, out string knownName) &&
-            knownName.Equals(HomesteadCategoryName, StringComparison.Ordinal))
-        {
-            return true;
-        }
-
-        return TryResolvePieceCategory(HomesteadCategoryName, out Piece.PieceCategory homesteadCategory) &&
-               homesteadCategory == category;
+        return OwnerManagedPieceCategories.Contains(category);
     }
 
     private static bool IsHomesteadLoaded()
@@ -3897,7 +4043,21 @@ internal static class PieceOverrideManager
         RegisterJotunnPieceCategories();
         RegisterEmbeddedPieceManagerCategories();
         RegisterPieceTableCategoryLabels();
-        PieceTableCategoryGuard.ReplaceKnownCategories(KnownPieceCategoryValues, KnownPieceCategoryNames);
+        RefreshOwnerManagedPieceCategories();
+        PieceTableCategoryGuard.ReplaceKnownCategories(
+            KnownPieceCategoryValues,
+            KnownPieceCategoryNames,
+            OwnerManagedPieceCategories);
+    }
+
+    private static void RefreshOwnerManagedPieceCategories()
+    {
+        OwnerManagedPieceCategories.Clear();
+        if (IsHomesteadLoaded() &&
+            TryResolvePieceCategory(HomesteadCategoryName, out Piece.PieceCategory homesteadCategory))
+        {
+            OwnerManagedPieceCategories.Add(homesteadCategory);
+        }
     }
 
     private static void ResetPieceCategoryRegistry()
@@ -3908,6 +4068,7 @@ internal static class PieceOverrideManager
         KnownPieceCategoryValuePriorities.Clear();
         KnownPieceCategoryNameSources.Clear();
         KnownPieceCategoryValueSources.Clear();
+        OwnerManagedPieceCategories.Clear();
         ReportedPieceCategoryConflicts.Clear();
         ReportedPieceCategoryConfigurationIssues.Clear();
     }
@@ -4412,11 +4573,6 @@ internal static class PieceOverrideManager
         }
 
         return normalizedName;
-    }
-
-    private static bool IsDefaultReferencePieceTableName(string pieceTableName)
-    {
-        return NormalizePieceTableIdentifier(pieceTableName).Equals("_HammerPieceTable", StringComparison.OrdinalIgnoreCase);
     }
 
     private static PieceTable? ResolvePieceTable(string pieceTableName)

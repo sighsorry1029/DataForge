@@ -36,18 +36,27 @@ internal static class ItemVisualOverrides
         new[] { typeof(Texture2D) },
         null);
     private static bool MaterialLookupCacheBuilt;
+    private static bool IconResourceReleaseBlocked;
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
     internal static string IconDirectory => Path.Combine(ConfigDirectory, "icon");
     private static string AutoIconCacheDirectory => Path.Combine(ConfigDirectory, "cache", "auto-icons");
+    private static string SynchronizedIconCacheDirectory =>
+        Path.Combine(ConfigDirectory, "cache", "server-icons");
 
     internal static void EnsureIconDirectory()
     {
         Directory.CreateDirectory(IconDirectory);
     }
 
-    internal static void ResetWorldState()
+    internal static void ResetWorldState(bool releaseIconResources)
     {
+        if (!releaseIconResources)
+        {
+            IconResourceReleaseBlocked = true;
+        }
+
+        bool shouldReleaseIconResources = releaseIconResources && !IconResourceReleaseBlocked;
         foreach (List<RendererMaterialSnapshot> snapshots in OriginalMaterials.Values)
         {
             foreach (RendererMaterialSnapshot snapshot in snapshots)
@@ -79,32 +88,39 @@ internal static class ItemVisualOverrides
             }
         }
 
-        HashSet<int> destroyedSpriteIds = new();
-        foreach (IconCacheEntry entry in IconCache.Values)
+        if (shouldReleaseIconResources)
         {
-            DestroyOwnedSprite(entry.Sprite, destroyedSpriteIds);
-        }
+            HashSet<int> destroyedSpriteIds = new();
+            foreach (IconCacheEntry entry in IconCache.Values)
+            {
+                DestroyOwnedSprite(entry.Sprite, destroyedSpriteIds);
+            }
 
-        foreach (Sprite sprite in RetiredIconSprites)
-        {
-            DestroyOwnedSprite(sprite, destroyedSpriteIds);
-        }
+            foreach (Sprite sprite in RetiredIconSprites)
+            {
+                DestroyOwnedSprite(sprite, destroyedSpriteIds);
+            }
 
-        foreach (Sprite sprite in GeneratedAutoIcons)
-        {
-            DestroyOwnedSprite(sprite, destroyedSpriteIds);
+            foreach (Sprite sprite in GeneratedAutoIcons)
+            {
+                DestroyOwnedSprite(sprite, destroyedSpriteIds);
+            }
         }
 
         OriginalMaterials.Clear();
         OriginalIcons.Clear();
         OriginalVisualScales.Clear();
-        IconCache.Clear();
-        lock (PendingIconReloads)
+        if (shouldReleaseIconResources)
         {
-            PendingIconReloads.Clear();
+            IconCache.Clear();
+            lock (PendingIconReloads)
+            {
+                PendingIconReloads.Clear();
+            }
+            RetiredIconSprites.Clear();
+            GeneratedAutoIcons.Clear();
+            DataForgeIconSync.OnIconResourcesReleased();
         }
-        RetiredIconSprites.Clear();
-        GeneratedAutoIcons.Clear();
         MaterialLookupCache.Clear();
         MaterialLookupCacheBuilt = false;
     }
@@ -140,6 +156,21 @@ internal static class ItemVisualOverrides
         {
             PendingIconReloads.Add(fullPath);
         }
+
+        DataForgeIconSync.ScheduleManifestRefresh();
+    }
+
+    internal static void MarkAllIconFilesChanged()
+    {
+        lock (PendingIconReloads)
+        {
+            foreach (string iconPath in IconCache.Keys)
+            {
+                PendingIconReloads.Add(iconPath);
+            }
+        }
+
+        DataForgeIconSync.ScheduleManifestRefresh();
     }
 
     internal static void Apply(ItemDrop itemDrop, ItemOverrideManager.VisualDefinition? visual)
@@ -671,6 +702,29 @@ internal static class ItemVisualOverrides
         return ResolveIconSprite(iconName);
     }
 
+    internal static bool CanDecodeSynchronizedIcon(byte[] bytes, int expectedWidth, int expectedHeight)
+    {
+        Texture2D? texture = null;
+        try
+        {
+            texture = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false);
+            return TryLoadImage(texture, bytes) &&
+                   texture.width == expectedWidth &&
+                   texture.height == expectedHeight;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            if (texture != null)
+            {
+                UnityEngine.Object.Destroy(texture);
+            }
+        }
+    }
+
     private static Sprite? ResolveIconSprite(string iconName)
     {
         string? iconPath = ResolveIconPath(iconName);
@@ -693,8 +747,8 @@ internal static class ItemVisualOverrides
 
         if (IconCache.TryGetValue(iconPath, out IconCacheEntry? cached) &&
             cached.Sprite != null &&
-            cached.LastWriteTimeUtc == lastWriteTimeUtc &&
-            !reloadRequested)
+            (IsSynchronizedIconCachePath(iconPath) ||
+             cached.LastWriteTimeUtc == lastWriteTimeUtc && !reloadRequested))
         {
             return cached.Sprite;
         }
@@ -737,7 +791,7 @@ internal static class ItemVisualOverrides
                 UnityEngine.Object.Destroy(texture);
             }
 
-            DataForgeLogContext.Warning($"Could not load visual icon '{iconName}' from '{iconPath}': {ex.Message}");
+            DataForgeLogContext.Warning($"Could not load icon '{iconName}' from '{iconPath}': {ex.Message}");
             return cached?.Sprite;
         }
     }
@@ -807,8 +861,24 @@ internal static class ItemVisualOverrides
                    null);
     }
 
+    private static bool IsSynchronizedIconCachePath(string path)
+    {
+        string fullPath = Path.GetFullPath(path);
+        string cacheRoot = Path.GetFullPath(SynchronizedIconCacheDirectory);
+        return fullPath.StartsWith(
+            cacheRoot + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string? ResolveIconPath(string iconName)
     {
+        if (DataForgePlugin.IsRemoteServerClient && DataForgeIconSync.HasRemoteManifestAuthority)
+        {
+            return DataForgeIconSync.TryResolveRemoteIconPath(iconName, out string syncedPath)
+                ? syncedPath
+                : null;
+        }
+
         if (string.IsNullOrWhiteSpace(iconName))
         {
             return null;

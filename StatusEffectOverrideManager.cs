@@ -31,13 +31,10 @@ internal static class StatusEffectOverrideManager
 
     private static readonly object StateLock = new();
     private static readonly Dictionary<string, BaselineSnapshot> Baselines = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, IconCacheEntry> IconCache = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly HashSet<string> PendingIconCacheInvalidations = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, OwnedClone> CreatedClones = new(StringComparer.OrdinalIgnoreCase);
     private static readonly List<StatusEffect> RetiredEffectClones = new();
     private static readonly HashSet<string> RuntimeAppliedEffectKeys = new(StringComparer.OrdinalIgnoreCase);
     private static Dictionary<string, MaxStatsBonus> ActiveMaxStats = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly MethodInfo? LoadImageMethod = ResolveLoadImageMethod();
     private static readonly IDeserializer Deserializer = new DeserializerBuilder()
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
         .Build();
@@ -63,7 +60,6 @@ internal static class StatusEffectOverrideManager
     private static bool ZNetSceneReady;
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
-    private static string IconDirectory => Path.Combine(ConfigDirectory, "icon");
     internal static bool HasAppliedSyncedPayload => LastAppliedSyncedPayload != null;
 
     internal static void Initialize(ConfigSync configSync)
@@ -83,12 +79,6 @@ internal static class StatusEffectOverrideManager
         Watcher = null;
         ReloadDebouncer?.Dispose();
         ReloadDebouncer = null;
-        lock (StateLock)
-        {
-            PendingIconCacheInvalidations.Clear();
-        }
-
-        bool safeToClearIconCache = true;
         try
         {
             if (ObjectDbReady)
@@ -101,7 +91,6 @@ internal static class StatusEffectOverrideManager
         }
         catch (Exception ex)
         {
-            safeToClearIconCache = false;
             DataForgePlugin.Log.LogWarning($"Failed to restore status effects during plugin shutdown: {ex}");
         }
         finally
@@ -112,17 +101,12 @@ internal static class StatusEffectOverrideManager
             }
             catch (Exception ex)
             {
-                safeToClearIconCache = false;
                 DataForgePlugin.Log.LogWarning($"Failed to remove cloned status effects during plugin shutdown: {ex}");
             }
             finally
             {
                 RuntimeAppliedEffectKeys.Clear();
                 ActiveMaxStats = new Dictionary<string, MaxStatsBonus>(StringComparer.OrdinalIgnoreCase);
-                if (safeToClearIconCache)
-                {
-                    ClearIconCache();
-                }
             }
         }
     }
@@ -142,7 +126,12 @@ internal static class StatusEffectOverrideManager
         Watcher?.Dispose();
         ReloadDebouncer?.Dispose();
         ReloadDebouncer = DataForgeFileWatcher.CreateDebouncedAction(ReloadDelayTicks, ReloadYamlValues);
-        Watcher = DataForgeFileWatcher.Create(ConfigDirectory, "*.*", includeSubdirectories: true, ReadYamlValues);
+        Watcher = DataForgeFileWatcher.Create(
+            ConfigDirectory,
+            "*.*",
+            includeSubdirectories: true,
+            ReadYamlValues,
+            OnWatcherError);
     }
 
     internal static void ReloadFromDiskAndSync()
@@ -159,7 +148,6 @@ internal static class StatusEffectOverrideManager
             return;
         }
 
-        InvalidatePendingIconCacheEntries();
         lock (StateLock)
         {
             SetActiveEntries(entries);
@@ -189,7 +177,7 @@ internal static class StatusEffectOverrideManager
 
         if (writeGeneratedArtifacts)
         {
-            WriteGeneratedArtifacts();
+            DataForgeLifecycleStep.Run("status-effect generated-artifact write", WriteGeneratedArtifacts);
         }
         ApplyCurrentConfiguration();
     }
@@ -811,12 +799,12 @@ internal static class StatusEffectOverrideManager
 
         if (IsIconFile(e.FullPath))
         {
-            QueueIconCacheInvalidation(e.FullPath);
+            MarkIconFileChanged(e.FullPath);
         }
 
         if (e is RenamedEventArgs renamed && IsIconFile(renamed.OldFullPath))
         {
-            QueueIconCacheInvalidation(renamed.OldFullPath);
+            MarkIconFileChanged(renamed.OldFullPath);
         }
 
         ReloadDebouncer?.Schedule();
@@ -833,6 +821,25 @@ internal static class StatusEffectOverrideManager
         catch (Exception ex)
         {
             DataForgePlugin.Log.LogError($"Error reloading status effect YAML files: {ex}");
+        }
+    }
+
+    private static void OnWatcherError(object sender, ErrorEventArgs e)
+    {
+        DataForgePlugin.Log.LogWarning($"Status-effect file watcher lost events; scheduling a full reload: {e.GetException().Message}");
+        ItemVisualOverrides.MarkAllIconFilesChanged();
+        lock (StateLock)
+        {
+            EntryChanges.RequireFullApply();
+        }
+
+        if (DataForgeFileWatcher.TryRecreate("status-effect", SetupFileWatcher))
+        {
+            ReloadDebouncer?.Schedule();
+        }
+        else
+        {
+            ReloadYamlValues();
         }
     }
 
@@ -894,6 +901,53 @@ internal static class StatusEffectOverrideManager
         EntryChanges.SetEntries(entries);
         ActiveEntries = entries;
         ActiveMaxStats = BuildMaxStatsOverrides(entries);
+        DataForgeIconSync.ScheduleManifestRefresh();
+    }
+
+    internal static void CollectReferencedExplicitIconNames(ISet<string> names)
+    {
+        if (!DataForgePlugin.StatusEffectOverridesEnabled)
+        {
+            return;
+        }
+
+        lock (StateLock)
+        {
+            foreach (StatusEffectEntry entry in ActiveEntries)
+            {
+                string? icon = entry.Icon;
+                if (entry.Override &&
+                    entry.HasDefinition &&
+                    !string.IsNullOrWhiteSpace(icon) &&
+                    !icon!.TrimStart().StartsWith(ItemIconPrefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    names.Add(icon);
+                }
+            }
+        }
+    }
+
+    internal static void OnSyncedIconsChanged(ISet<string> changedNames)
+    {
+        bool referencesChangedIcon;
+        lock (StateLock)
+        {
+            referencesChangedIcon = ActiveEntries.Any(entry =>
+                entry.Override &&
+                entry.HasDefinition &&
+                !string.IsNullOrWhiteSpace(entry.Icon) &&
+                !entry.Icon!.TrimStart().StartsWith(ItemIconPrefix, StringComparison.OrdinalIgnoreCase) &&
+                DataForgeIconSync.ContainsLogicalIconName(changedNames, entry.Icon, excludeAuto: false));
+            if (referencesChangedIcon)
+            {
+                EntryChanges.RequireFullApply();
+            }
+        }
+
+        if (referencesChangedIcon)
+        {
+            ApplyCurrentConfiguration();
+        }
     }
 
     private static Dictionary<string, MaxStatsBonus> BuildMaxStatsOverrides(IEnumerable<StatusEffectEntry> entries)
@@ -1028,9 +1082,18 @@ internal static class StatusEffectOverrideManager
         return ItemVisualOverrides.IsIconFile(path);
     }
 
+    private static void MarkIconFileChanged(string path)
+    {
+        ItemVisualOverrides.MarkIconFileChanged(path);
+        lock (StateLock)
+        {
+            EntryChanges.RequireFullApply();
+        }
+    }
+
     private static void EnsureConfigDirectoryAndDefaultOverride()
     {
-        Directory.CreateDirectory(IconDirectory);
+        ItemVisualOverrides.EnsureIconDirectory();
         DataForgeOverrideFiles.EnsureDefaultOverride(ConfigDirectory, OverrideFileName, GetOverrideFiles, DefaultOverrideTemplate);
     }
 
@@ -1263,19 +1326,15 @@ internal static class StatusEffectOverrideManager
 
     internal static void OnWorldShutdown()
     {
-        bool restoreCompleted = false;
-        bool cloneCleanupCompleted = false;
         try
         {
             RestoreBaselineEffects(RuntimeAppliedEffectKeys.ToArray());
-            restoreCompleted = true;
         }
         finally
         {
             try
             {
                 CleanupCreatedClonesForWorldTransition();
-                cloneCleanupCompleted = true;
             }
             finally
             {
@@ -1283,13 +1342,8 @@ internal static class StatusEffectOverrideManager
                 ObjectDbReady = false;
                 ZNetSceneReady = false;
                 RuntimeAppliedEffectKeys.Clear();
-                if (restoreCompleted && cloneCleanupCompleted)
-                {
-                    ClearIconCache();
-                }
                 lock (StateLock)
                 {
-                    PendingIconCacheInvalidations.Clear();
                     if (DataForgePlugin.IsRemoteServerClient)
                     {
                         SetActiveEntries(new List<StatusEffectEntry>());
@@ -1760,7 +1814,7 @@ internal static class StatusEffectOverrideManager
             return;
         }
 
-        Sprite? icon = ResolveIconSprite(iconKey);
+        Sprite? icon = ItemVisualOverrides.ResolveIconSpriteFromConfig(iconKey);
         if (icon == null)
         {
             if (!IsHeadlessGraphics())
@@ -1835,188 +1889,6 @@ internal static class StatusEffectOverrideManager
             item != null &&
             (string.Equals(Utils.GetPrefabName(item.name), itemName, StringComparison.OrdinalIgnoreCase) ||
              string.Equals(item.name, itemName, StringComparison.OrdinalIgnoreCase)));
-    }
-
-    private static Sprite? ResolveIconSprite(string iconName)
-    {
-        string? iconPath = ResolveIconPath(iconName);
-        if (iconPath == null || !File.Exists(iconPath))
-        {
-            return null;
-        }
-
-        DateTime lastWriteTimeUtc = File.GetLastWriteTimeUtc(iconPath);
-        if (IconCache.TryGetValue(iconPath, out IconCacheEntry? cached) &&
-            cached.LastWriteTimeUtc == lastWriteTimeUtc &&
-            !cached.ReloadRequired)
-        {
-            return cached.Sprite;
-        }
-
-        Texture2D? newTexture = null;
-        try
-        {
-            newTexture = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false)
-            {
-                name = Path.GetFileNameWithoutExtension(iconPath)
-            };
-
-            if (!TryLoadImage(newTexture, File.ReadAllBytes(iconPath)))
-            {
-                UnityEngine.Object.Destroy(newTexture);
-                return cached?.Sprite;
-            }
-
-            Sprite sprite = Sprite.Create(
-                newTexture,
-                new Rect(0f, 0f, newTexture.width, newTexture.height),
-                new Vector2(0.5f, 0.5f),
-                100f);
-            sprite.name = Path.GetFileNameWithoutExtension(iconPath);
-            IconCache[iconPath] = new IconCacheEntry(lastWriteTimeUtc, sprite);
-            if (cached != null)
-            {
-                DestroyIconCacheEntry(cached);
-            }
-
-            return sprite;
-        }
-        catch (Exception ex)
-        {
-            if (newTexture != null)
-            {
-                UnityEngine.Object.Destroy(newTexture);
-            }
-
-            DataForgeLogContext.Warning($"Could not load status effect icon '{iconName}' from '{iconPath}': {ex.Message}");
-            return cached?.Sprite;
-        }
-    }
-
-    private static void InvalidateIconCache(string path)
-    {
-        string fullPath = Path.GetFullPath(path);
-        if (!IconCache.TryGetValue(fullPath, out IconCacheEntry? cached))
-        {
-            return;
-        }
-
-        IconCache.Remove(fullPath);
-        DestroyIconCacheEntry(cached);
-    }
-
-    private static void QueueIconCacheInvalidation(string path)
-    {
-        string fullPath = Path.GetFullPath(path);
-        lock (StateLock)
-        {
-            PendingIconCacheInvalidations.Add(fullPath);
-            EntryChanges.RequireFullApply();
-        }
-    }
-
-    private static void InvalidatePendingIconCacheEntries()
-    {
-        string[] paths;
-        lock (StateLock)
-        {
-            paths = PendingIconCacheInvalidations.ToArray();
-            PendingIconCacheInvalidations.Clear();
-        }
-
-        foreach (string path in paths)
-        {
-            if (!File.Exists(path))
-            {
-                InvalidateIconCache(path);
-                continue;
-            }
-
-            if (IconCache.TryGetValue(path, out IconCacheEntry? cached))
-            {
-                cached.RequireReload();
-            }
-        }
-    }
-
-    private static void ClearIconCache()
-    {
-        foreach (IconCacheEntry cached in IconCache.Values)
-        {
-            DestroyIconCacheEntry(cached);
-        }
-
-        IconCache.Clear();
-    }
-
-    private static void DestroyIconCacheEntry(IconCacheEntry cached)
-    {
-        Sprite sprite = cached.Sprite;
-        Texture? texture = sprite != null ? sprite.texture : null;
-        if (sprite != null)
-        {
-            UnityEngine.Object.Destroy(sprite);
-        }
-
-        if (texture != null)
-        {
-            UnityEngine.Object.Destroy(texture);
-        }
-    }
-
-    private static bool TryLoadImage(Texture2D texture, byte[] data)
-    {
-        if (LoadImageMethod == null)
-        {
-            DataForgeLogContext.Warning("Could not locate UnityEngine.ImageConversion.LoadImage for status effect icon.");
-            return false;
-        }
-
-        object?[] args = LoadImageMethod.GetParameters().Length == 3
-            ? new object?[] { texture, data, false }
-            : new object?[] { texture, data };
-        return LoadImageMethod.Invoke(null, args) is bool loaded && loaded;
-    }
-
-    private static MethodInfo? ResolveLoadImageMethod()
-    {
-        return typeof(ImageConversion).GetMethod(
-                   "LoadImage",
-                   BindingFlags.Public | BindingFlags.Static,
-                   null,
-                   new[] { typeof(Texture2D), typeof(byte[]), typeof(bool) },
-                   null)
-               ?? typeof(ImageConversion).GetMethod(
-                   "LoadImage",
-                   BindingFlags.Public | BindingFlags.Static,
-                   null,
-                   new[] { typeof(Texture2D), typeof(byte[]) },
-                   null);
-    }
-
-    private static string? ResolveIconPath(string iconName)
-    {
-        if (string.IsNullOrWhiteSpace(iconName))
-        {
-            return null;
-        }
-
-        string relativePath = iconName.Trim()
-            .Replace('/', Path.DirectorySeparatorChar)
-            .Replace('\\', Path.DirectorySeparatorChar);
-        if (!Path.HasExtension(relativePath))
-        {
-            relativePath += ".png";
-        }
-
-        string fullPath = Path.GetFullPath(Path.Combine(IconDirectory, relativePath));
-        string iconRoot = Path.GetFullPath(IconDirectory);
-        if (!fullPath.StartsWith(iconRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
-
-        return fullPath;
     }
 
     private static void ApplyEffectList(string statusEffectName, string? value, Action<EffectList> assign, string fieldName)
@@ -3397,23 +3269,6 @@ internal static class StatusEffectOverrideManager
         internal StatusEffect SourceEffect { get; }
     }
 
-    private sealed class IconCacheEntry
-    {
-        public IconCacheEntry(DateTime lastWriteTimeUtc, Sprite sprite)
-        {
-            LastWriteTimeUtc = lastWriteTimeUtc;
-            Sprite = sprite;
-        }
-
-        public DateTime LastWriteTimeUtc { get; }
-        public Sprite Sprite { get; }
-        public bool ReloadRequired { get; private set; }
-
-        internal void RequireReload()
-        {
-            ReloadRequired = true;
-        }
-    }
 }
 
 [HarmonyPatch(typeof(Player), nameof(Player.GetTotalFoodValue))]

@@ -74,21 +74,33 @@ internal static class DataForgeRuntimeCleanup
             cleanupSucceeded &= DataForgeLifecycleStep.Run(
                 "recipe cleanup",
                 RecipeOverrideManager.OnWorldShutdown);
-            cleanupSucceeded &= DataForgeLifecycleStep.Run(
+            bool statusEffectCleanupSucceeded = DataForgeLifecycleStep.Run(
                 "status-effect cleanup",
                 StatusEffectOverrideManager.OnWorldShutdown);
-            cleanupSucceeded &= DataForgeLifecycleStep.Run(
+            cleanupSucceeded &= statusEffectCleanupSucceeded;
+            bool itemCleanupSucceeded = DataForgeLifecycleStep.Run(
                 "item cleanup",
                 ItemOverrideManager.OnWorldShutdown);
-            cleanupSucceeded &= DataForgeLifecycleStep.Run(
+            cleanupSucceeded &= itemCleanupSucceeded;
+            bool pieceCleanupResult = false;
+            bool pieceCleanupCompleted = DataForgeLifecycleStep.Run(
                 "piece cleanup",
-                PieceOverrideManager.OnWorldShutdown);
+                () => pieceCleanupResult = PieceOverrideManager.OnWorldShutdown());
+            bool pieceCleanupSucceeded = pieceCleanupCompleted && pieceCleanupResult;
+            cleanupSucceeded &= pieceCleanupSucceeded;
             cleanupSucceeded &= DataForgeLifecycleStep.Run(
                 "localization cleanup",
                 LocalizationOverrideManager.OnWorldShutdown);
             cleanupSucceeded &= DataForgeLifecycleStep.Run(
+                "icon sync cleanup",
+                DataForgeIconSync.OnWorldShutdown);
+            bool releaseIconResources =
+                statusEffectCleanupSucceeded &&
+                itemCleanupSucceeded &&
+                pieceCleanupSucceeded;
+            cleanupSucceeded &= DataForgeLifecycleStep.Run(
                 "item-visual cleanup",
-                ItemVisualOverrides.ResetWorldState);
+                () => ItemVisualOverrides.ResetWorldState(releaseIconResources));
             CleanupCompleted = cleanupSucceeded;
             return cleanupSucceeded;
         }
@@ -273,5 +285,27 @@ internal static class DataForgeZNetShutdownCleanupPatch
     private static void Prefix()
     {
         DataForgeRuntimeCleanup.RunOnce();
+    }
+}
+
+[HarmonyPatch(typeof(ZNet), nameof(ZNet.OnNewConnection))]
+internal static class DataForgeIconSyncConnectionPatch
+{
+    [HarmonyPriority(Priority.Last)]
+    private static void Postfix(ZNet __instance, ZNetPeer peer)
+    {
+        DataForgeLifecycleStep.Run(
+            "icon sync connection setup",
+            () => DataForgeIconSync.OnNewConnection(__instance, peer));
+    }
+}
+
+[HarmonyPatch(typeof(ZNet), nameof(ZNet.Disconnect))]
+internal static class DataForgeIconSyncDisconnectPatch
+{
+    [HarmonyPriority(Priority.First)]
+    private static void Prefix(ZNetPeer peer)
+    {
+        DataForgeIconSync.OnPeerDisconnected(peer);
     }
 }

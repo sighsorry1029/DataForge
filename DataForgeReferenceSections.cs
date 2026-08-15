@@ -220,26 +220,16 @@ internal static class DataForgeOwnerResolver
 
     private static IEnumerable<string> EnumerateLookupCandidates(string normalizedName)
     {
-        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
-        AddIfNew(normalizedName);
+        yield return normalizedName;
 
         int aliasSeparatorIndex = normalizedName.IndexOf(':');
         if (aliasSeparatorIndex > 0)
         {
-            AddIfNew(normalizedName.Substring(0, aliasSeparatorIndex));
-        }
-
-        foreach (string candidate in seen)
-        {
-            yield return candidate;
-        }
-
-        void AddIfNew(string candidate)
-        {
-            string normalizedCandidate = NormalizeName(candidate);
-            if (normalizedCandidate.Length > 0)
+            string alias = NormalizeName(normalizedName.Substring(0, aliasSeparatorIndex));
+            if (alias.Length > 0 &&
+                !alias.Equals(normalizedName, StringComparison.OrdinalIgnoreCase))
             {
-                seen.Add(normalizedCandidate);
+                yield return alias;
             }
         }
     }

@@ -7,6 +7,10 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="..\..\DataForgeIconProtocol.cs" Link="DataForgeIconProtocol.cs" />
+    <Compile Include="..\..\DataForgeValue.cs" Link="DataForgeValue.cs" />
     <Compile Include="..\..\DomainEntryChangeTracker.cs" Link="DomainEntryChangeTracker.cs" />
+    <Compile Include="..\..\ReferenceDefaultRules.cs" Link="ReferenceDefaultRules.cs" />
+    <Compile Include="..\..\ReferenceValue.cs" Link="ReferenceValue.cs" />
   </ItemGroup>
 </Project>

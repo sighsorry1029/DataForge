@@ -131,8 +131,7 @@ internal static class DataForgeResourceMap
         {
             itemName,
             itemDrop != null ? itemDrop.name : null,
-            itemDrop?.m_itemData?.m_shared?.m_name,
-            StripLocalizationToken(itemDrop?.m_itemData?.m_shared?.m_name)
+            itemDrop?.m_itemData?.m_shared?.m_name
         };
 
         if (itemDrop?.m_itemData?.m_shared?.m_name is { Length: > 0 } sharedName &&
@@ -185,11 +184,10 @@ internal static class DataForgeResourceMap
             yield break;
         }
 
-        yield return NormalizeResourceToken(cleaned);
-        string stripped = StripLocalizationToken(cleaned);
-        if (stripped.Length > 0)
+        string token = NormalizeResourceToken(cleaned);
+        if (token.Length > 0)
         {
-            yield return NormalizeResourceToken(stripped);
+            yield return token;
         }
     }
 
@@ -326,19 +324,6 @@ internal static class DataForgeResourceMap
             : name!.Replace("(Clone)", "").Trim();
     }
 
-    private static string StripLocalizationToken(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return "";
-        }
-
-        string trimmed = value!.Trim();
-        return trimmed.StartsWith("$item_", StringComparison.OrdinalIgnoreCase)
-            ? trimmed.Substring("$item_".Length)
-            : trimmed.TrimStart('$');
-    }
-
     private static ItemDrop? ResolveItemDrop(string? itemName)
     {
         if (ObjectDB.instance == null || string.IsNullOrWhiteSpace(itemName))
@@ -459,8 +444,7 @@ internal static class DataForgeResourceMap
                  {
                      itemDrop.name,
                      itemDrop.gameObject.name,
-                     itemDrop.m_itemData.m_shared.m_name,
-                     StripLocalizationToken(itemDrop.m_itemData.m_shared.m_name)
+                     itemDrop.m_itemData.m_shared.m_name
                  })
         {
             foreach (string key in GetLookupKeys(candidate))
@@ -497,8 +481,7 @@ internal static class DataForgeResourceMap
                  {
                      itemDrop.name,
                      itemDrop.gameObject.name,
-                     itemDrop.m_itemData.m_shared.m_name,
-                     StripLocalizationToken(itemDrop.m_itemData.m_shared.m_name)
+                     itemDrop.m_itemData.m_shared.m_name
                  })
         {
             if (CleanPrefabName(candidate).Equals(token, StringComparison.OrdinalIgnoreCase) ||

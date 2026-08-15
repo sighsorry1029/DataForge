@@ -16,6 +16,7 @@ internal static class PieceTableCategoryGuard
     private static readonly Dictionary<Piece.PieceCategory, string> CategoryLabels = new();
     private static readonly Dictionary<string, Piece.PieceCategory> KnownCategoriesByName = new(StringComparer.Ordinal);
     private static readonly Dictionary<Piece.PieceCategory, string> KnownCategoryNames = new();
+    private static readonly HashSet<Piece.PieceCategory> OwnerManagedCategories = new();
     private static readonly Dictionary<string, Piece.PieceCategory> CustomCategoriesByName = new(StringComparer.Ordinal);
     private static readonly Dictionary<Piece.PieceCategory, string> CustomCategoryNames = new();
     private static readonly Dictionary<PieceTable, NormalizationStamp> NormalizationStamps = new(ReferenceComparer<PieceTable>.Instance);
@@ -60,6 +61,7 @@ internal static class PieceTableCategoryGuard
         CategoryLabels.Clear();
         KnownCategoriesByName.Clear();
         KnownCategoryNames.Clear();
+        OwnerManagedCategories.Clear();
         CustomCategoriesByName.Clear();
         CustomCategoryNames.Clear();
         ConfiguredOrders.Clear();
@@ -101,7 +103,7 @@ internal static class PieceTableCategoryGuard
                 continue;
             }
 
-            if (PieceOverrideManager.IsOwnerManagedHomesteadCategory(category))
+            if (OwnerManagedCategories.Contains(category))
             {
                 continue;
             }
@@ -148,14 +150,10 @@ internal static class PieceTableCategoryGuard
         return KnownCategoriesByName.TryGetValue(categoryName.Trim(), out category);
     }
 
-    internal static bool TryGetKnownCategoryName(Piece.PieceCategory category, out string name)
-    {
-        return KnownCategoryNames.TryGetValue(category, out name);
-    }
-
     internal static void ReplaceKnownCategories(
         IReadOnlyDictionary<string, Piece.PieceCategory> categoriesByName,
-        IReadOnlyDictionary<Piece.PieceCategory, string> namesByCategory)
+        IReadOnlyDictionary<Piece.PieceCategory, string> namesByCategory,
+        IReadOnlyCollection<Piece.PieceCategory> ownerManagedCategories)
     {
         KnownCategoriesByName.Clear();
         foreach (KeyValuePair<string, Piece.PieceCategory> pair in categoriesByName)
@@ -173,6 +171,12 @@ internal static class PieceTableCategoryGuard
             {
                 KnownCategoryNames[pair.Key] = pair.Value.Trim();
             }
+        }
+
+        OwnerManagedCategories.Clear();
+        foreach (Piece.PieceCategory category in ownerManagedCategories)
+        {
+            OwnerManagedCategories.Add(category);
         }
 
         CategoryLabels.Clear();
@@ -245,17 +249,9 @@ internal static class PieceTableCategoryGuard
         foreach (KeyValuePair<PieceTable, List<ConfiguredCategory>> pair in ConfiguredOrders)
         {
             if (!configuredOrders.TryGetValue(pair.Key, out List<ConfiguredCategory>? replacement) ||
-                pair.Value.Count != replacement.Count)
+                !pair.Value.SequenceEqual(replacement))
             {
                 return false;
-            }
-
-            for (int index = 0; index < pair.Value.Count; index++)
-            {
-                if (!pair.Value[index].Equals(replacement[index]))
-                {
-                    return false;
-                }
             }
         }
 
@@ -330,20 +326,7 @@ internal static class PieceTableCategoryGuard
 
     private static bool CategorySlotsMatch(IReadOnlyList<CategorySlot> left, IReadOnlyList<CategorySlot> right)
     {
-        if (left.Count != right.Count)
-        {
-            return false;
-        }
-
-        for (int index = 0; index < left.Count; index++)
-        {
-            if (!left[index].Equals(right[index]))
-            {
-                return false;
-            }
-        }
-
-        return true;
+        return left.SequenceEqual(right);
     }
 
     private static void MoveOwnerManagedCategoriesToEnd(PieceTable pieceTable)
@@ -356,7 +339,7 @@ internal static class PieceTableCategoryGuard
         for (int index = pieceTable.m_categories.Count - 2; index >= 0; index--)
         {
             Piece.PieceCategory category = pieceTable.m_categories[index];
-            if (!PieceOverrideManager.IsOwnerManagedHomesteadCategory(category))
+            if (!OwnerManagedCategories.Contains(category))
             {
                 continue;
             }

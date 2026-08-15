@@ -110,7 +110,12 @@ internal static class ItemOverrideManager
         Watcher?.Dispose();
         ReloadDebouncer?.Dispose();
         ReloadDebouncer = DataForgeFileWatcher.CreateDebouncedAction(ReloadDelayTicks, ReloadYamlValues);
-        Watcher = DataForgeFileWatcher.Create(ConfigDirectory, "*.*", includeSubdirectories: true, ReadYamlValues);
+        Watcher = DataForgeFileWatcher.Create(
+            ConfigDirectory,
+            "*.*",
+            includeSubdirectories: true,
+            ReadYamlValues,
+            OnWatcherError);
     }
 
     internal static void ReloadFromDiskAndSync()
@@ -162,7 +167,7 @@ internal static class ItemOverrideManager
 
         if (writeGeneratedArtifacts)
         {
-            WriteGeneratedArtifacts();
+            DataForgeLifecycleStep.Run("item generated-artifact write", WriteGeneratedArtifacts);
         }
         ApplyCurrentConfiguration();
         TryRefreshStatusEffectItemIcons();
@@ -453,6 +458,25 @@ internal static class ItemOverrideManager
 
         ApplyCurrentConfiguration();
         TryRefreshStatusEffectItemIcons();
+    }
+
+    private static void OnWatcherError(object sender, ErrorEventArgs e)
+    {
+        DataForgePlugin.Log.LogWarning($"Item file watcher lost events; scheduling a full reload: {e.GetException().Message}");
+        ItemVisualOverrides.MarkAllIconFilesChanged();
+        lock (StateLock)
+        {
+            EntryChanges.RequireFullApply();
+        }
+
+        if (DataForgeFileWatcher.TryRecreate("item", SetupFileWatcher))
+        {
+            ReloadDebouncer?.Schedule();
+        }
+        else
+        {
+            ReloadYamlValues();
+        }
     }
 
     internal static void CleanupCreatedClonesForWorldTransition()
@@ -768,6 +792,54 @@ internal static class ItemOverrideManager
         EntryChanges.SetEntries(entries);
         ActiveEntries = entries;
         ActiveAmountMultipliers = BuildAmountMultiplierMap(entries);
+        DataForgeIconSync.ScheduleManifestRefresh();
+    }
+
+    internal static void CollectReferencedExplicitIconNames(ISet<string> names)
+    {
+        if (!DataForgePlugin.ItemOverridesEnabled)
+        {
+            return;
+        }
+
+        lock (StateLock)
+        {
+            foreach (ItemEntry entry in ActiveEntries)
+            {
+                string? icon = entry.Visual?.Icon;
+                if (entry.Override &&
+                    entry.HasPrefabDefinition &&
+                    !string.IsNullOrWhiteSpace(icon) &&
+                    !ItemVisualOverrides.IsAutoIconValue(icon))
+                {
+                    names.Add(icon!);
+                }
+            }
+        }
+    }
+
+    internal static void OnSyncedIconsChanged(ISet<string> changedNames)
+    {
+        bool referencesChangedIcon;
+        lock (StateLock)
+        {
+            referencesChangedIcon = ActiveEntries.Any(entry =>
+                entry.Override &&
+                entry.HasPrefabDefinition &&
+                DataForgeIconSync.ContainsLogicalIconName(changedNames, entry.Visual?.Icon, excludeAuto: true));
+            if (referencesChangedIcon)
+            {
+                EntryChanges.RequireFullApply();
+            }
+        }
+
+        if (!referencesChangedIcon)
+        {
+            return;
+        }
+
+        ApplyCurrentConfiguration();
+        TryRefreshStatusEffectItemIcons();
     }
 
     private static Dictionary<string, float> BuildAmountMultiplierMap(List<ItemEntry> entries)
@@ -2180,15 +2252,9 @@ internal static class ItemOverrideManager
             return;
         }
 
-        Copy(basics.Name, value => shared.m_name = value);
-        Copy(basics.Description, value => shared.m_description = value);
-        Copy(basics.Subtitle, value => shared.m_subtitle = value);
+        ApplyLiveSafeBasics(shared, basics);
         CopyEnum<ItemDrop.ItemData.ItemType>(basics.ItemType, value => shared.m_itemType = value, "itemType");
-        CopyFloatValue(basics.Weight, value => shared.m_weight = value);
-        Copy(basics.Value, value => shared.m_value = Math.Max(0, value));
-        Copy(basics.MaxStackSize, value => shared.m_maxStackSize = Math.Max(1, value));
         Copy(basics.MaxQuality, value => shared.m_maxQuality = Math.Max(1, value));
-        Copy(basics.Teleportable, value => shared.m_teleportable = value);
     }
 
     private static void ApplyLiveSafeBasics(ItemDrop.ItemData.SharedData shared, BasicsDefinition? basics)
@@ -2418,21 +2484,9 @@ internal static class ItemOverrideManager
             return;
         }
 
+        ApplyLiveSafeEquipment(shared, equipment);
         CopyEnum<Skills.SkillType>(equipment.SkillType, value => shared.m_skillType = value, "skillType");
         Copy(equipment.EquipDuration, value => shared.m_equipDuration = Math.Max(0f, value));
-        Copy(equipment.MovementModifier, value => shared.m_movementModifier = value);
-        Copy(equipment.EitrRegenModifier, value => shared.m_eitrRegenModifier = value);
-        Copy(equipment.HeatResistanceModifier, value => shared.m_heatResistanceModifier = value);
-        Copy(equipment.HomeItemsStaminaModifier, value => shared.m_homeItemsStaminaModifier = value);
-        Copy(equipment.AttackStaminaModifier, value => shared.m_attackStaminaModifier = value);
-        Copy(equipment.BlockStaminaModifier, value => shared.m_blockStaminaModifier = value);
-        Copy(equipment.DodgeStaminaModifier, value => shared.m_dodgeStaminaModifier = value);
-        Copy(equipment.JumpStaminaModifier, value => shared.m_jumpStaminaModifier = value);
-        Copy(equipment.RunStaminaModifier, value => shared.m_runStaminaModifier = value);
-        Copy(equipment.SneakStaminaModifier, value => shared.m_sneakStaminaModifier = value);
-        Copy(equipment.SwimStaminaModifier, value => shared.m_swimStaminaModifier = value);
-        CopyFloatPair(equipment.Armor, value => shared.m_armor = value, value => shared.m_armorPerLevel = value);
-        Copy(equipment.MaxAdrenaline, value => shared.m_maxAdrenaline = Math.Max(0f, value));
     }
 
     private static void ApplyLiveSafeEquipment(ItemDrop.ItemData.SharedData shared, EquipmentDefinition? equipment)
@@ -2856,10 +2910,7 @@ internal static class ItemOverrideManager
 
         CopyStatusEffect(effects.EquipStatusEffect, value => shared.m_equipStatusEffect = value);
         ApplySetEffect(shared, effects.Set);
-        CopyStatusEffect(effects.ConsumeStatusEffect, value => shared.m_consumeStatusEffect = value);
-        ApplyAttackStatusEffect(shared, effects.AttackStatusEffect);
-        CopyStatusEffect(effects.PerfectBlockStatusEffect, value => shared.m_perfectBlockStatusEffect = value);
-        CopyStatusEffect(effects.FullAdrenalineStatusEffect, value => shared.m_fullAdrenalineSE = value);
+        ApplyLiveSafeEffects(shared, effects);
     }
 
     private static void ApplyLiveSafeEffects(ItemDrop.ItemData.SharedData shared, EffectsDefinition? effects)
@@ -3769,14 +3820,6 @@ internal static class ItemOverrideManager
                GetFirstTupleFloat(damage.Spirit);
     }
 
-    private static bool HasFoodStats(string? food)
-    {
-        string[] parts = SplitTuple(food);
-        return GetTupleFloat(parts, 0) > 0f ||
-               GetTupleFloat(parts, 1) > 0f ||
-               GetTupleFloat(parts, 2) > 0f;
-    }
-
     private static bool HasDurabilityEnabled(string? durability)
     {
         string[] parts = SplitTuple(durability);
@@ -3920,19 +3963,7 @@ internal static class ItemOverrideManager
             return copy;
         }
 
-        internal bool HasPrefabDefinition =>
-            HasBasicsDefinition ||
-            Durability != null ||
-            Equipment != null ||
-            DamageTakenModifiers != null ||
-            Food != null ||
-            Shield != null ||
-            ToolTier != null ||
-            Damage != null ||
-            PrimaryAttack != null ||
-            SecondaryAttack != null ||
-            Effects != null ||
-            Visual != null;
+        internal bool HasPrefabDefinition => HasLiveSafeDefinition || Visual != null;
 
         internal bool HasLiveSafeDefinition =>
             HasBasicsDefinition ||
@@ -4520,23 +4551,18 @@ internal static class ItemOverrideManager
         {
             return new DamageDefinition
             {
-                Blunt = FormatDamagePair(damage.m_blunt, damagePerLevel.m_blunt),
-                Slash = FormatDamagePair(damage.m_slash, damagePerLevel.m_slash),
-                Pierce = FormatDamagePair(damage.m_pierce, damagePerLevel.m_pierce),
-                Chop = FormatDamagePair(damage.m_chop, damagePerLevel.m_chop),
-                Pickaxe = FormatDamagePair(damage.m_pickaxe, damagePerLevel.m_pickaxe),
-                Fire = FormatDamagePair(damage.m_fire, damagePerLevel.m_fire),
-                Frost = FormatDamagePair(damage.m_frost, damagePerLevel.m_frost),
-                Lightning = FormatDamagePair(damage.m_lightning, damagePerLevel.m_lightning),
-                Poison = FormatDamagePair(damage.m_poison, damagePerLevel.m_poison),
-                Spirit = FormatDamagePair(damage.m_spirit, damagePerLevel.m_spirit)
+                Blunt = FormatFloatPair(damage.m_blunt, damagePerLevel.m_blunt),
+                Slash = FormatFloatPair(damage.m_slash, damagePerLevel.m_slash),
+                Pierce = FormatFloatPair(damage.m_pierce, damagePerLevel.m_pierce),
+                Chop = FormatFloatPair(damage.m_chop, damagePerLevel.m_chop),
+                Pickaxe = FormatFloatPair(damage.m_pickaxe, damagePerLevel.m_pickaxe),
+                Fire = FormatFloatPair(damage.m_fire, damagePerLevel.m_fire),
+                Frost = FormatFloatPair(damage.m_frost, damagePerLevel.m_frost),
+                Lightning = FormatFloatPair(damage.m_lightning, damagePerLevel.m_lightning),
+                Poison = FormatFloatPair(damage.m_poison, damagePerLevel.m_poison),
+                Spirit = FormatFloatPair(damage.m_spirit, damagePerLevel.m_spirit)
             };
         }
-    }
-
-    private static string FormatDamagePair(float damage, float damagePerLevel)
-    {
-        return FormatFloatPair(damage, damagePerLevel);
     }
 
     private static string FormatFloatPair(float first, float second)

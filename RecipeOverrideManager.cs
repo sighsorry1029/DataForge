@@ -110,7 +110,12 @@ internal static class RecipeOverrideManager
         Watcher?.Dispose();
         ReloadDebouncer?.Dispose();
         ReloadDebouncer = DataForgeFileWatcher.CreateDebouncedAction(ReloadDelayTicks, ReloadYamlValues);
-        Watcher = DataForgeFileWatcher.Create(ConfigDirectory, "*.*", includeSubdirectories: false, ReadYamlValues);
+        Watcher = DataForgeFileWatcher.Create(
+            ConfigDirectory,
+            "*.*",
+            includeSubdirectories: false,
+            ReadYamlValues,
+            OnWatcherError);
     }
 
     internal static void ReloadFromDiskAndSync()
@@ -151,7 +156,7 @@ internal static class RecipeOverrideManager
         SynchronizeRecipeSlots();
         if (writeGeneratedArtifacts)
         {
-            WriteGeneratedArtifacts();
+            WriteReferenceArtifact();
         }
         ApplyCurrentConfiguration();
         RememberCurrentRecipeObjects();
@@ -170,7 +175,6 @@ internal static class RecipeOverrideManager
             return;
         }
 
-        SynchronizeRecipeSlots();
         WriteReferenceArtifact();
         ApplyCurrentConfiguration();
     }
@@ -259,7 +263,7 @@ internal static class RecipeOverrideManager
                     }
                     else if (recipe != null)
                     {
-                        RemoveCreatedRecipe(key, destroy: false);
+                        RemoveCreatedRecipe(key);
                     }
                     else if (!cleanedCreatedRecipes.Contains(key))
                     {
@@ -381,7 +385,6 @@ internal static class RecipeOverrideManager
             return;
         }
 
-        SynchronizeRecipeSlots();
         WriteReferenceArtifact();
         ApplyCurrentConfiguration();
     }
@@ -491,6 +494,19 @@ internal static class RecipeOverrideManager
         catch (Exception ex)
         {
             DataForgePlugin.Log.LogError($"Error reloading recipe YAML files: {ex}");
+        }
+    }
+
+    private static void OnWatcherError(object sender, ErrorEventArgs e)
+    {
+        DataForgePlugin.Log.LogWarning($"Recipe file watcher lost events; scheduling a full reload: {e.GetException().Message}");
+        if (DataForgeFileWatcher.TryRecreate("recipe", SetupFileWatcher))
+        {
+            ReloadDebouncer?.Schedule();
+        }
+        else
+        {
+            ReloadYamlValues();
         }
     }
 
@@ -1059,7 +1075,7 @@ internal static class RecipeOverrideManager
                 continue;
             }
 
-            RemoveCreatedRecipe(key, destroy: false);
+            RemoveCreatedRecipe(key);
             removedCreatedKeys.Add(key);
         }
 
@@ -1068,15 +1084,9 @@ internal static class RecipeOverrideManager
 
     internal static void CleanupCreatedRecipesForWorldTransition()
     {
-        if (ObjectDB.instance == null)
-        {
-            CreatedRecipeObjects.Clear();
-            return;
-        }
-
         foreach (string key in CreatedRecipeObjects.Keys.ToList())
         {
-            RemoveCreatedRecipe(key, destroy: true);
+            RemoveCreatedRecipe(key);
         }
     }
 
@@ -1111,20 +1121,21 @@ internal static class RecipeOverrideManager
         }
     }
 
-    private static void RemoveCreatedRecipe(string key, bool destroy)
+    private static void RemoveCreatedRecipe(string key)
     {
         CreatedRecipeObjects.TryGetValue(key, out Recipe? recipe);
-        if (recipe != null && ObjectDB.instance != null)
+        if (recipe != null)
         {
-            ObjectDB.instance.m_recipes.Remove(recipe);
-            InvalidateRecipeLookupCache();
-            if (destroy)
+            if (ObjectDB.instance != null)
             {
-                UnityEngine.Object.Destroy(recipe);
+                ObjectDB.instance.m_recipes.Remove(recipe);
             }
+
+            UnityEngine.Object.Destroy(recipe);
         }
 
         CreatedRecipeObjects.Remove(key);
+        InvalidateRecipeLookupCache();
     }
 
     private static Recipe? TryCreateRecipe(RecipeEntry entry)
@@ -1978,16 +1989,6 @@ internal static class RecipeOverrideManager
         return true;
     }
 
-    private static void WriteGeneratedArtifacts()
-    {
-        if (!DataForgePlugin.UsesLocalAuthorityFiles)
-        {
-            return;
-        }
-
-        WriteReferenceArtifact();
-    }
-
     internal static bool TryWriteFullScaffoldConfigurationFile(out string path, out string error)
     {
         path = Path.Combine(ConfigDirectory, FullScaffoldFileName);
@@ -2004,7 +2005,7 @@ internal static class RecipeOverrideManager
                     .Where(slot => slot.Current != null && slot.BaselineEnabled)
                     .Select(pair => new
                     {
-                        Entry = RecipeFullEntry.From(pair.PublicKey, pair.Baseline),
+                        Entry = RecipeEntry.From(pair.PublicKey, pair.Baseline),
                         OwnerKey = pair.Baseline.Item ?? ToRecipeItemKey(pair.PublicKey),
                         SortKey = DataForgeResourceMap.BuildItemSortKey(
                             pair.Baseline.Item ?? ToRecipeItemKey(pair.PublicKey),
@@ -2027,30 +2028,37 @@ internal static class RecipeOverrideManager
 
     private static void WriteReferenceArtifact()
     {
-        if (!CanBuildGeneratedArtifacts())
+        if (!DataForgePlugin.UsesLocalAuthorityFiles || !CanBuildGeneratedArtifacts())
         {
             return;
         }
 
-        EnsureConfigDirectoryAndDefaultOverride();
-        CaptureAllBaselinesIfNeeded();
-        string sourceSignature = ComputeReferenceSourceSignature();
-        string referencePath = Path.Combine(ConfigDirectory, ReferenceFileName);
-        if (DataForgeReferenceState.ShouldSkip(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion))
+        try
         {
-            return;
-        }
+            EnsureConfigDirectoryAndDefaultOverride();
+            CaptureAllBaselinesIfNeeded();
+            string sourceSignature = ComputeReferenceSourceSignature();
+            string referencePath = Path.Combine(ConfigDirectory, ReferenceFileName);
+            if (DataForgeReferenceState.ShouldSkip(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion))
+            {
+                return;
+            }
 
-        bool wrote = GeneratedArtifactWriter.WriteReferenceIfReady(
-            RecipeSlots.Values.Any(slot => slot.Current != null && slot.BaselineEnabled),
-            ConfigDirectory,
-            ReferenceFileName,
-            DomainName,
-            OverrideFileName,
-            BuildReferenceArtifactContent);
-        if (wrote || File.Exists(referencePath))
+            bool wrote = GeneratedArtifactWriter.WriteReferenceIfReady(
+                RecipeSlots.Values.Any(slot => slot.Current != null && slot.BaselineEnabled),
+                ConfigDirectory,
+                ReferenceFileName,
+                DomainName,
+                OverrideFileName,
+                BuildReferenceArtifactContent);
+            if (wrote || File.Exists(referencePath))
+            {
+                DataForgeReferenceState.Record(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
+            }
+        }
+        catch (Exception ex)
         {
-            DataForgeReferenceState.Record(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
+            DataForgePlugin.Log.LogWarning($"Could not write recipe reference artifact: {ex.Message}");
         }
     }
 
@@ -2206,9 +2214,22 @@ internal static class RecipeOverrideManager
         }
 
         string normalizedKey = variant == null ? itemPrefab : $"{itemPrefab};{variant}";
-        normalizedRecipe = parts.Length > 1 && parts[1].Length > 0
-            ? $"{normalizedKey}, {parts[1]}"
-            : normalizedKey;
+        if (parts.Length > 1)
+        {
+            if (!int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out int amount) ||
+                amount < 1)
+            {
+                error = $"Recipe amount '{parts[1]}' must be a positive integer.";
+                return false;
+            }
+
+            normalizedRecipe = $"{normalizedKey}, {amount.ToString(CultureInfo.InvariantCulture)}";
+        }
+        else
+        {
+            normalizedRecipe = normalizedKey;
+        }
+
         return true;
     }
 
@@ -2352,22 +2373,10 @@ internal static class RecipeOverrideManager
             ListSortWeight.HasValue ||
             Resources != null ||
             QualityBonus != null;
-    }
 
-    internal sealed class RecipeFullEntry
-    {
-        public string Recipe { get; set; } = "";
-        public bool Override { get; set; } = true;
-        public bool Remove { get; set; }
-        public string? CraftingStation { get; set; }
-        public string? RequireOnlyOneIngredient { get; set; }
-        public int? ListSortWeight { get; set; }
-        public List<RequirementDefinition>? Resources { get; set; }
-        public List<QualityBonusDefinition>? QualityBonus { get; set; }
-
-        internal static RecipeFullEntry From(string publicKey, RecipeDefinition definition)
+        internal static RecipeEntry From(string publicKey, RecipeDefinition definition)
         {
-            return new RecipeFullEntry
+            return new RecipeEntry
             {
                 Recipe = FormatRecipeHeader(publicKey, definition.Amount, includeDefaultAmount: true),
                 Override = true,

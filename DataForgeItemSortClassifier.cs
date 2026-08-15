@@ -576,8 +576,7 @@ internal static class DataForgeItemSortClassifier
         foreach (string? candidate in new[]
                  {
                      itemName,
-                     shared?.m_name,
-                     StripLocalizationToken(shared?.m_name)
+                     shared?.m_name
                  })
         {
             if (HasToken(candidate, tokens))
@@ -612,19 +611,6 @@ internal static class DataForgeItemSortClassifier
 
     private static bool ContainsIgnoreCase(string value, string token) =>
         value.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0;
-
-    private static string StripLocalizationToken(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return "";
-        }
-
-        string trimmed = value!.Trim();
-        return trimmed.StartsWith("$item_", StringComparison.OrdinalIgnoreCase)
-            ? trimmed.Substring("$item_".Length)
-            : trimmed.TrimStart('$');
-    }
 
     private static DataForgeItemSortGroup Group(int bigGroupRank, int subGroupRank, int detailRank = 0) =>
         new(bigGroupRank, subGroupRank, detailRank);

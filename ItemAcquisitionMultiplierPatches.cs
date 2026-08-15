@@ -37,12 +37,17 @@ internal static class DataForgePickableRpcPickAmountMultiplierPatch
     }
 
     [HarmonyPriority(Priority.Last)]
-    private static void Postfix(Pickable __instance, PickableAmountState __state)
+    private static Exception? Finalizer(
+        Pickable __instance,
+        PickableAmountState __state,
+        Exception? __exception)
     {
         if (__state.Changed)
         {
             __instance.m_amount = __state.Amount;
         }
+
+        return __exception;
     }
 }
 
@@ -194,15 +199,28 @@ internal static class DataForgeCookingStationRemoveDoneItemAmountMultiplierPatch
 
     private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
     {
+        int replacements = 0;
         foreach (CodeInstruction instruction in instructions)
         {
             if (SpawnItemMethod != null && instruction.Calls(SpawnItemMethod))
             {
-                yield return new CodeInstruction(OpCodes.Call, SpawnItemWithMultiplierMethod);
+                CodeInstruction replacement = new(instruction)
+                {
+                    opcode = OpCodes.Call,
+                    operand = SpawnItemWithMultiplierMethod
+                };
+                replacements++;
+                yield return replacement;
                 continue;
             }
 
             yield return instruction;
+        }
+
+        if (replacements != 1)
+        {
+            DataForgePlugin.Log.LogWarning(
+                $"CookingStation output multiplier patch expected one SpawnItem call but replaced {replacements}; cooking output multipliers may be unavailable.");
         }
     }
 
@@ -240,15 +258,28 @@ internal static class DataForgeInventoryGuiDoCraftingAmountMultiplierPatch
 
     private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
     {
+        int replacements = 0;
         foreach (CodeInstruction instruction in instructions)
         {
             if (AddItemMethod != null && instruction.Calls(AddItemMethod))
             {
-                yield return new CodeInstruction(OpCodes.Call, AddItemWithMultiplierMethod);
+                CodeInstruction replacement = new(instruction)
+                {
+                    opcode = OpCodes.Call,
+                    operand = AddItemWithMultiplierMethod
+                };
+                replacements++;
+                yield return replacement;
                 continue;
             }
 
             yield return instruction;
+        }
+
+        if (replacements != 1)
+        {
+            DataForgePlugin.Log.LogWarning(
+                $"Crafting output multiplier patch expected one Inventory.AddItem call but replaced {replacements}; crafting output multipliers may be unavailable.");
         }
     }
 

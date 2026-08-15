@@ -294,13 +294,17 @@ $df_se_tooltip_raise_skill: "{0} skill XP: <color=orange>{1}</color>"
 
 ## Icons And Materials
 
-Custom item icons are loaded from:
+Explicit item, piece, and status-effect icons are loaded on the source-of-truth server from:
 
 ```text
 BepInEx/config/DataForge/icon/
 ```
 
-Use 256x256 PNG files when possible. ServerSync synchronizes the YAML value, but each client still needs the same local PNG file.
+Use 256x256 PNG files when possible. The server publishes a content-hash manifest for PNG files referenced by active YAML. Clients request only hashes missing from their persistent cache and apply changed or removed icons live; clients do not need their own copy of the server PNG files.
+
+Downloaded files are stored by SHA-256 under `BepInEx/config/DataForge/cache/server-icons/`. Item and piece `icon: auto` values remain client-rendered, and status-effect `icon: item:ItemPrefabName` continues to reuse the resolved item icon instead of transferring another file. Status-effect `icon: auto` is still a literal request for `auto.png` and is synchronized like any other explicit PNG.
+
+To keep login and texture memory bounded, each manifest accepts at most 128 referenced icons, 512 KiB per PNG, 2 MiB of unique PNG data, 1024x1024 per image, and 16,777,216 unique decoded pixels in total. Replaced Sprite resources remain valid until world cleanup, while newly decoded synchronized hashes are capped at twice the manifest icon-count and pixel budgets per world; further new hashes stay cached and use the last-known-good or baseline icon until the next clean world transition. Missing or rejected server files do not block unrelated configuration.
 
 `z_materials.reference.txt` is generated as a material lookup list for visual overrides.
 

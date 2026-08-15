@@ -72,7 +72,8 @@ internal static class DataForgeFileWatcher
         string directory,
         string filter,
         bool includeSubdirectories,
-        FileSystemEventHandler handler)
+        FileSystemEventHandler handler,
+        ErrorEventHandler? errorHandler = null)
     {
         Directory.CreateDirectory(directory);
         FileSystemWatcher watcher = new(directory, filter)
@@ -84,10 +85,29 @@ internal static class DataForgeFileWatcher
         watcher.Created += handler;
         watcher.Deleted += handler;
         watcher.Renamed += (sender, args) => handler(sender, args);
+        if (errorHandler != null)
+        {
+            watcher.Error += errorHandler;
+        }
+
         watcher.EnableRaisingEvents = true;
         return watcher;
     }
 
     internal static DebouncedAction CreateDebouncedAction(long delayTicks, Action action) =>
         new(delayTicks, action);
+
+    internal static bool TryRecreate(string name, Action recreate)
+    {
+        try
+        {
+            recreate();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogWarning($"Could not recreate the {name} file watcher: {ex.Message}");
+            return false;
+        }
+    }
 }

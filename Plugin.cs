@@ -15,7 +15,7 @@ namespace DataForge;
 public class DataForgePlugin : BaseUnityPlugin
 {
     internal const string ModName = "DataForge";
-    internal const string ModVersion = "1.2.0";
+    internal const string ModVersion = "1.2.1";
     internal const string Author = "sighsorry";
     internal const string ModGUID = $"{Author}.{ModName}";
 
@@ -114,7 +114,11 @@ public class DataForgePlugin : BaseUnityPlugin
             Toggle.On,
             "If on, item YAML overrides are applied to matching ObjectDB item prefabs.",
             order: 900);
-        _enableItemOverrides.SettingChanged += (_, _) => ApplyConfigChange(ItemOverrideManager.ApplyCurrentConfiguration);
+        _enableItemOverrides.SettingChanged += (_, _) =>
+        {
+            ApplyConfigChange(ItemOverrideManager.ApplyCurrentConfiguration);
+            DataForgeIconSync.ScheduleManifestRefresh();
+        };
 
         _enableRecipeOverrides = ConfigEntry(
             "1 - General",
@@ -130,7 +134,11 @@ public class DataForgePlugin : BaseUnityPlugin
             Toggle.On,
             "If on, status effect YAML overrides are applied to ObjectDB status effects.",
             order: 700);
-        _enableStatusEffectOverrides.SettingChanged += (_, _) => ApplyConfigChange(StatusEffectOverrideManager.ApplyCurrentConfiguration);
+        _enableStatusEffectOverrides.SettingChanged += (_, _) =>
+        {
+            ApplyConfigChange(StatusEffectOverrideManager.ApplyCurrentConfiguration);
+            DataForgeIconSync.ScheduleManifestRefresh();
+        };
 
         _enablePieceOverrides = ConfigEntry(
             "1 - General",
@@ -138,7 +146,11 @@ public class DataForgePlugin : BaseUnityPlugin
             Toggle.On,
             "If on, piece YAML overrides are applied to matching prefabs and loaded pieces.",
             order: 600);
-        _enablePieceOverrides.SettingChanged += (_, _) => ApplyConfigChange(PieceOverrideManager.ApplyCurrentConfiguration);
+        _enablePieceOverrides.SettingChanged += (_, _) =>
+        {
+            ApplyConfigChange(PieceOverrideManager.ApplyCurrentConfiguration);
+            DataForgeIconSync.ScheduleManifestRefresh();
+        };
 
         _stackableStackMultiplier = ConfigEntry(
             "2 - Misc",
@@ -203,6 +215,7 @@ public class DataForgePlugin : BaseUnityPlugin
         ClampMaxStoredFireplaceFuel();
 
         LocalizationOverrideManager.Initialize(ConfigSync);
+        DataForgeIconSync.Initialize(ConfigSync);
         StatusEffectOverrideManager.Initialize(ConfigSync);
         ItemOverrideManager.Initialize(ConfigSync);
         RecipeOverrideManager.Initialize(ConfigSync);
@@ -225,24 +238,50 @@ public class DataForgePlugin : BaseUnityPlugin
 
     private void OnDestroy()
     {
-        SaveWithRespectToConfigSet();
-        _watcher?.Dispose();
-        _watcher = null;
-        _configReloadDebouncer?.Dispose();
-        _configReloadDebouncer = null;
-        DataForgeRuntimeCleanup.RunOnce();
-        LocalizationOverrideManager.Dispose();
-        StatusEffectOverrideManager.Dispose();
-        ItemOverrideManager.Dispose();
-        RecipeOverrideManager.Dispose();
-        PieceOverrideManager.Dispose();
-        VneiRefreshManager.Dispose();
-        ConfigSync.SourceOfTruthChanged -= OnSourceOfTruthChanged;
-        _harmony.UnpatchSelf();
+        DataForgeLifecycleStep.Run("configuration save", () => SaveWithRespectToConfigSet());
+        DataForgeLifecycleStep.Run(
+            "configuration watcher cleanup",
+            () =>
+            {
+                try
+                {
+                    _watcher?.Dispose();
+                }
+                finally
+                {
+                    _watcher = null;
+                }
+            });
+        DataForgeLifecycleStep.Run(
+            "configuration reload cleanup",
+            () =>
+            {
+                try
+                {
+                    _configReloadDebouncer?.Dispose();
+                }
+                finally
+                {
+                    _configReloadDebouncer = null;
+                }
+            });
+        DataForgeLifecycleStep.Run("runtime cleanup", () => DataForgeRuntimeCleanup.RunOnce());
+        DataForgeLifecycleStep.Run("icon sync dispose", DataForgeIconSync.Dispose);
+        DataForgeLifecycleStep.Run("localization dispose", LocalizationOverrideManager.Dispose);
+        DataForgeLifecycleStep.Run("status-effect dispose", StatusEffectOverrideManager.Dispose);
+        DataForgeLifecycleStep.Run("item dispose", ItemOverrideManager.Dispose);
+        DataForgeLifecycleStep.Run("recipe dispose", RecipeOverrideManager.Dispose);
+        DataForgeLifecycleStep.Run("piece dispose", PieceOverrideManager.Dispose);
+        DataForgeLifecycleStep.Run("VNEI refresh dispose", VneiRefreshManager.Dispose);
+        DataForgeLifecycleStep.Run(
+            "source-of-truth event cleanup",
+            () => ConfigSync.SourceOfTruthChanged -= OnSourceOfTruthChanged);
+        DataForgeLifecycleStep.Run("Harmony cleanup", _harmony.UnpatchSelf);
     }
 
     private static void OnSourceOfTruthChanged(bool isSourceOfTruth)
     {
+        DataForgeIconSync.OnSourceOfTruthChanged();
         if (isSourceOfTruth)
         {
             EnsureSourceOfTruthFileMode();
@@ -250,10 +289,18 @@ public class DataForgePlugin : BaseUnityPlugin
         }
 
         _sourceOfTruthFileModeReady = false;
-        StatusEffectOverrideManager.SetupFileWatcher();
-        ItemOverrideManager.SetupFileWatcher();
-        RecipeOverrideManager.SetupFileWatcher();
-        PieceOverrideManager.SetupFileWatcher();
+        DataForgeLifecycleStep.Run(
+            "status-effect local-file cleanup",
+            StatusEffectOverrideManager.SetupFileWatcher);
+        DataForgeLifecycleStep.Run(
+            "item local-file cleanup",
+            ItemOverrideManager.SetupFileWatcher);
+        DataForgeLifecycleStep.Run(
+            "recipe local-file cleanup",
+            RecipeOverrideManager.SetupFileWatcher);
+        DataForgeLifecycleStep.Run(
+            "piece local-file cleanup",
+            PieceOverrideManager.SetupFileWatcher);
     }
 
     internal static void EnsureSourceOfTruthFileMode()
@@ -263,20 +310,40 @@ public class DataForgePlugin : BaseUnityPlugin
             return;
         }
 
-        _sourceOfTruthFileModeReady = true;
-        LocalizationOverrideManager.EnsureSourceOfTruthFileMode();
-        StatusEffectOverrideManager.SetupFileWatcher();
-        ItemOverrideManager.SetupFileWatcher();
-        RecipeOverrideManager.SetupFileWatcher();
-        PieceOverrideManager.SetupFileWatcher();
-        StatusEffectOverrideManager.ReloadFromDiskAndSync();
-        ItemOverrideManager.ReloadFromDiskAndSync();
-        RecipeOverrideManager.ReloadFromDiskAndSync();
-        PieceOverrideManager.ReloadFromDiskAndSync();
+        bool ready = true;
+        ready &= DataForgeLifecycleStep.Run(
+            "localization source-of-truth setup",
+            LocalizationOverrideManager.EnsureSourceOfTruthFileMode);
+        ready &= DataForgeLifecycleStep.Run(
+            "status-effect source-of-truth watcher setup",
+            StatusEffectOverrideManager.SetupFileWatcher);
+        ready &= DataForgeLifecycleStep.Run(
+            "status-effect source-of-truth reload",
+            StatusEffectOverrideManager.ReloadFromDiskAndSync);
+        ready &= DataForgeLifecycleStep.Run(
+            "item source-of-truth watcher setup",
+            ItemOverrideManager.SetupFileWatcher);
+        ready &= DataForgeLifecycleStep.Run(
+            "item source-of-truth reload",
+            ItemOverrideManager.ReloadFromDiskAndSync);
+        ready &= DataForgeLifecycleStep.Run(
+            "recipe source-of-truth watcher setup",
+            RecipeOverrideManager.SetupFileWatcher);
+        ready &= DataForgeLifecycleStep.Run(
+            "recipe source-of-truth reload",
+            RecipeOverrideManager.ReloadFromDiskAndSync);
+        ready &= DataForgeLifecycleStep.Run(
+            "piece source-of-truth watcher setup",
+            PieceOverrideManager.SetupFileWatcher);
+        ready &= DataForgeLifecycleStep.Run(
+            "piece source-of-truth reload",
+            PieceOverrideManager.ReloadFromDiskAndSync);
+        _sourceOfTruthFileModeReady = ready;
     }
 
     private void Update()
     {
+        DataForgeIconSync.Update();
         VneiPrefabCleanupGuard.TryPatchVneiIndexAll(_harmony);
     }
 
@@ -294,12 +361,30 @@ public class DataForgePlugin : BaseUnityPlugin
         _watcher?.Dispose();
         _configReloadDebouncer?.Dispose();
         _configReloadDebouncer = DataForgeFileWatcher.CreateDebouncedAction(ReloadDelayTicks, ReloadConfigValues);
-        _watcher = DataForgeFileWatcher.Create(Paths.ConfigPath, ConfigFileName, includeSubdirectories: false, ReadConfigValues);
+        _watcher = DataForgeFileWatcher.Create(
+            Paths.ConfigPath,
+            ConfigFileName,
+            includeSubdirectories: false,
+            ReadConfigValues,
+            OnConfigWatcherError);
     }
 
     private void ReadConfigValues(object sender, FileSystemEventArgs e)
     {
         _configReloadDebouncer?.Schedule();
+    }
+
+    private void OnConfigWatcherError(object sender, ErrorEventArgs e)
+    {
+        Log.LogWarning($"Configuration file watcher lost events; scheduling a full reload: {e.GetException().Message}");
+        if (DataForgeFileWatcher.TryRecreate("configuration", SetupWatcher))
+        {
+            _configReloadDebouncer?.Schedule();
+        }
+        else
+        {
+            ReloadConfigValues();
+        }
     }
 
     private void ReloadConfigValues()
@@ -388,16 +473,18 @@ public class DataForgePlugin : BaseUnityPlugin
     {
         bool originalSaveOnSet = Config.SaveOnConfigSet;
         Config.SaveOnConfigSet = false;
-        if (reload)
+        try
         {
-            Config.Reload();
+            if (reload)
+            {
+                Config.Reload();
+            }
+            else
+            {
+                Config.Save();
+            }
         }
-        else
-        {
-            Config.Save();
-        }
-
-        if (originalSaveOnSet)
+        finally
         {
             Config.SaveOnConfigSet = originalSaveOnSet;
         }
