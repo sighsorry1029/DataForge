@@ -25,6 +25,8 @@ internal static class PieceOverrideManager
     private const string PieceCategoryReferenceFileName = "pieceCategory.reference.yml";
     private const string SyncedPayloadKey = "pieces";
     private const string PieceCategorySyncedPayloadKey = "pieceCategories";
+    private const string HammerPrefabName = "Hammer";
+    private const int HammerAvailabilityRefreshAttemptLimit = 3;
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
     private const int DefaultPieceSortOrder = 100;
     private const string ReferenceStateKey = "pieces";
@@ -106,6 +108,10 @@ internal static class PieceOverrideManager
     private static bool PieceCategoryConfigurationWasApplied;
     private static bool CraftingStationTopologyChanged;
     private static bool StationExtensionTopologyChanged;
+    private static readonly Dictionary<Piece, Piece.PieceCategory> ExpectedHammerCategories =
+        new(ReferenceComparer<Piece>.Instance);
+    private static int HammerCategoryReconciliationFailures;
+    private static int HammerAvailabilityRefreshAttemptsRemaining;
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
 
@@ -133,6 +139,7 @@ internal static class PieceOverrideManager
         Watcher = null;
         ReloadDebouncer?.Dispose();
         ReloadDebouncer = null;
+        ResetHammerCategoryReconciliation();
     }
 
     internal static void SetupFileWatcher()
@@ -307,6 +314,7 @@ internal static class PieceOverrideManager
             hasActivePieceCategoryMoves;
         PieceCategoryConfigurationWasApplied = hasActivePieceCategoryConfiguration;
         AppliedPieceCategoryConfigurationVersion = pieceCategoryConfigurationVersion;
+        CaptureExpectedHammerCategories(activeRemovedPieces);
         DataForgeLifecycleStep.Run("piece category generated-artifact write", WritePieceCategoryReferenceArtifact);
         VneiRefreshManager.RequestRefresh(DomainName);
     }
@@ -552,7 +560,10 @@ internal static class PieceOverrideManager
         bool cleanupSucceeded = true;
         cleanupSucceeded &= RunWorldShutdownStep("visual state", RestoreAllPieceVisualStates);
         cleanupSucceeded &= RunWorldShutdownStep("moved piece categories", RestorePieceCategoryMoveBaselines);
-        cleanupSucceeded &= RunWorldShutdownStep("prefab definitions", RestoreAppliedPrefabDefinitionsForWorldShutdown);
+        bool prefabRestoreSucceeded = RunWorldShutdownStep(
+            "prefab definitions",
+            RestoreAppliedPrefabDefinitionsForWorldShutdown);
+        cleanupSucceeded &= prefabRestoreSucceeded;
         cleanupSucceeded &= RunWorldShutdownStep("piece tables", RestoreCapturedPieceTablesForWorldShutdown);
         cleanupSucceeded &= RunWorldShutdownStep("piece categories", PieceTableCategoryGuard.ResetWorldState);
         ResetPieceCategoryRegistry();
@@ -570,6 +581,12 @@ internal static class PieceOverrideManager
         PieceTableMembershipWasApplied = false;
         PieceCategoryConfigurationWasApplied = false;
         AppliedPieceCategoryConfigurationVersion = -1;
+        ResetHammerCategoryReconciliation();
+        if (prefabRestoreSucceeded)
+        {
+            Baselines.Clear();
+            BaselinePieces.Clear();
+        }
         lock (StateLock)
         {
             if (DataForgePlugin.IsRemoteServerClient)
@@ -1814,7 +1831,14 @@ internal static class PieceOverrideManager
             }
         });
         Copy(definition.Description, value => piece.m_description = value);
-        ApplyCategory(piece, definition.Category);
+        if (definition.BaselineCategory.HasValue)
+        {
+            ApplyCategory(piece, definition.BaselineCategory.Value);
+        }
+        else
+        {
+            ApplyCategory(piece, definition.Category);
+        }
         ApplyCraftingStation(piece, definition.NeedStation);
         Copy(definition.CanBeRemoved, value => piece.m_canBeRemoved = value);
         ApplyPieceHealth(piece, definition.Health, adjustHealthZdo);
@@ -1850,6 +1874,11 @@ internal static class PieceOverrideManager
             category = PieceTableCategoryGuard.GetOrCreateCustomCategory(trimmedCategoryName);
         }
 
+        ApplyCategory(piece, category);
+    }
+
+    private static void ApplyCategory(Piece piece, Piece.PieceCategory category)
+    {
         piece.m_category = category;
         foreach (PieceTable pieceTable in GetPieceTablesContaining(piece.gameObject))
         {
@@ -4760,6 +4789,248 @@ internal static class PieceOverrideManager
         Player.m_localPlayer.UpdateAvailablePiecesList();
     }
 
+    internal static void ReconcileHammerCategoriesAfterHudUpdate()
+    {
+        if (DataForgeWorldLifecycle.IsShuttingDown ||
+            !DataForgeWorldLifecycle.IsGameStarted ||
+            !GameDataReady ||
+            !ObjectDbReady ||
+            !PieceTablesReady ||
+            ZNetScene.instance == null ||
+            ObjectDB.instance == null)
+        {
+            return;
+        }
+
+        Player? player = Player.m_localPlayer;
+        PieceTable? hammerPieceTable = GetHammerPieceTable();
+        if (player == null ||
+            !hammerPieceTable ||
+            !ReferenceEquals(player.m_buildPieces, hammerPieceTable))
+        {
+            HammerCategoryReconciliationFailures = 0;
+            return;
+        }
+
+        if (ExpectedHammerCategories.Count == 0 &&
+            !PieceTableCategoryGuard.HasConfiguredOrder(hammerPieceTable))
+        {
+            return;
+        }
+
+        if (HammerCategoryReconciliationFailures >= 2)
+        {
+            return;
+        }
+
+        try
+        {
+            if (HammerAvailabilityRefreshAttemptsRemaining == 0 &&
+                !HasConfiguredHammerCategoryDrift(hammerPieceTable) &&
+                !PieceTableCategoryGuard.NeedsNormalization(hammerPieceTable))
+            {
+                HammerCategoryReconciliationFailures = 0;
+                return;
+            }
+
+            ReconcileConfiguredHammerCategories(hammerPieceTable, player);
+            HammerCategoryReconciliationFailures = 0;
+        }
+        catch (Exception ex)
+        {
+            HammerCategoryReconciliationFailures++;
+            DataForgePlugin.Log.LogWarning($"Failed to reconcile configured Hammer categories: {ex}");
+        }
+    }
+
+    private static void ReconcileConfiguredHammerCategories(PieceTable hammerPieceTable, Player player)
+    {
+        bool categoryChanged = false;
+        List<Piece>? discardedPieces = null;
+        foreach (KeyValuePair<Piece, Piece.PieceCategory> expected in ExpectedHammerCategories)
+        {
+            Piece? piece = expected.Key;
+            if (!piece)
+            {
+                (discardedPieces ??= new List<Piece>()).Add(expected.Key);
+                continue;
+            }
+
+            bool pieceCategoryChanged = piece.m_category != expected.Value;
+            bool categoryMissing = hammerPieceTable.m_categories?.Contains(expected.Value) != true;
+            if (!pieceCategoryChanged && !categoryMissing)
+            {
+                continue;
+            }
+
+            if (hammerPieceTable.m_pieces?.Contains(piece.gameObject) != true)
+            {
+                continue;
+            }
+
+            try
+            {
+                if (pieceCategoryChanged)
+                {
+                    ApplyCategory(piece, expected.Value);
+                }
+                else
+                {
+                    PieceTableCategoryGuard.EnsureCategory(hammerPieceTable, expected.Value);
+                }
+
+                if (categoryMissing &&
+                    hammerPieceTable.m_categories?.Contains(expected.Value) != true)
+                {
+                    string prefabName = GetPrefabName(piece.gameObject);
+                    ReportPieceCategoryConfigurationIssue(
+                        $"hammer-final-category:{prefabName}",
+                        $"Could not restore the configured Hammer category for piece '{prefabName}'.");
+                    (discardedPieces ??= new List<Piece>()).Add(expected.Key);
+                    continue;
+                }
+
+                categoryChanged = true;
+            }
+            catch (Exception ex)
+            {
+                string prefabName = GetPrefabName(piece.gameObject);
+                ReportPieceCategoryConfigurationIssue(
+                    $"hammer-final-piece:{prefabName}",
+                    $"Could not reconcile Hammer category for piece '{prefabName}': {ex.Message}");
+                if (piece.m_category != expected.Value ||
+                    hammerPieceTable.m_categories?.Contains(expected.Value) != true)
+                {
+                    (discardedPieces ??= new List<Piece>()).Add(expected.Key);
+                }
+            }
+        }
+
+        if (discardedPieces != null)
+        {
+            foreach (Piece piece in discardedPieces)
+            {
+                ExpectedHammerCategories.Remove(piece);
+            }
+        }
+
+        PieceTableCategoryGuard.Normalize(hammerPieceTable);
+        if (categoryChanged)
+        {
+            HammerAvailabilityRefreshAttemptsRemaining = HammerAvailabilityRefreshAttemptLimit;
+        }
+
+        if (HammerAvailabilityRefreshAttemptsRemaining > 0)
+        {
+            try
+            {
+                bool allPiecesUnlocked = player.m_noPlacementCost ||
+                                         (ZoneSystem.instance != null &&
+                                          ZoneSystem.instance.GetGlobalKey(GlobalKeys.AllPiecesUnlocked));
+                hammerPieceTable.UpdateAvailable(player.m_knownRecipes, player, false, allPiecesUnlocked);
+                HammerAvailabilityRefreshAttemptsRemaining = 0;
+            }
+            catch (Exception ex)
+            {
+                HammerAvailabilityRefreshAttemptsRemaining--;
+                ReportPieceCategoryConfigurationIssue(
+                    "hammer-final-availability",
+                    $"Could not refresh Hammer availability after category reconciliation: {ex.Message}");
+            }
+        }
+    }
+
+    private static bool HasConfiguredHammerCategoryDrift(PieceTable hammerPieceTable)
+    {
+        foreach (KeyValuePair<Piece, Piece.PieceCategory> expected in ExpectedHammerCategories)
+        {
+            Piece? piece = expected.Key;
+            if (!piece)
+            {
+                return true;
+            }
+
+            bool pieceCategoryChanged = piece.m_category != expected.Value;
+            bool categoryMissing = hammerPieceTable.m_categories?.Contains(expected.Value) != true;
+            if ((pieceCategoryChanged || categoryMissing) &&
+                hammerPieceTable.m_pieces?.Contains(piece.gameObject) == true)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void CaptureExpectedHammerCategories(ISet<string> removedPieces)
+    {
+        Dictionary<string, string> claims = new(StringComparer.OrdinalIgnoreCase);
+        lock (StateLock)
+        {
+            if (DataForgePlugin.PieceOverridesEnabled)
+            {
+                foreach (PieceEntry entry in ActiveEntries)
+                {
+                    string prefabName = entry.Piece?.Trim() ?? "";
+                    string categoryName = entry.Category?.Trim() ?? "";
+                    if (!entry.Override ||
+                        entry.Remove ||
+                        prefabName.Length == 0 ||
+                        categoryName.Length == 0 ||
+                        IsIgnoredCategoryName(categoryName) ||
+                        IsOwnerManagedHomesteadCategoryName(categoryName) ||
+                        removedPieces.Contains(prefabName))
+                    {
+                        continue;
+                    }
+
+                    claims[prefabName] = categoryName;
+                }
+            }
+        }
+
+        HammerCategoryReconciliationFailures = 0;
+        HammerAvailabilityRefreshAttemptsRemaining = 0;
+        PieceTable? hammerPieceTable = GetHammerPieceTable();
+        if (!hammerPieceTable)
+        {
+            ExpectedHammerCategories.Clear();
+            return;
+        }
+
+        Dictionary<Piece, Piece.PieceCategory> expected = new(ReferenceComparer<Piece>.Instance);
+        foreach (KeyValuePair<string, string> claim in claims)
+        {
+            if (TryResolvePieceCategory(claim.Value, out Piece.PieceCategory category) &&
+                BaselinePieces.TryGetValue(claim.Key, out Piece? piece) &&
+                piece &&
+                hammerPieceTable.m_pieces?.Contains(piece.gameObject) == true &&
+                !IsOwnerManagedHomesteadCategory(category))
+            {
+                expected[piece] = category;
+            }
+        }
+
+        ExpectedHammerCategories.Clear();
+        foreach (KeyValuePair<Piece, Piece.PieceCategory> pair in expected)
+        {
+            ExpectedHammerCategories[pair.Key] = pair.Value;
+        }
+    }
+
+    private static PieceTable? GetHammerPieceTable()
+    {
+        GameObject? hammer = ObjectDB.instance?.GetItemPrefab(HammerPrefabName);
+        return hammer ? hammer.GetComponent<ItemDrop>()?.m_itemData?.m_shared?.m_buildPieces : null;
+    }
+
+    private static void ResetHammerCategoryReconciliation()
+    {
+        ExpectedHammerCategories.Clear();
+        HammerCategoryReconciliationFailures = 0;
+        HammerAvailabilityRefreshAttemptsRemaining = 0;
+    }
+
     private static void ReapplyRecipesIfCraftingStationTopologyChanged()
     {
         if (!CraftingStationTopologyChanged)
@@ -5362,6 +5633,8 @@ internal static class PieceOverrideManager
         public List<PieceResourceDefinition>? Resources { get; set; }
         [YamlIgnore]
         public string? BaselineDoorName { get; set; }
+        [YamlIgnore]
+        public Piece.PieceCategory? BaselineCategory { get; set; }
 
         internal static PieceComponentDefinition From(Piece piece)
         {
@@ -5372,6 +5645,7 @@ internal static class PieceOverrideManager
                 Name = piece.m_name,
                 Description = piece.m_description,
                 Category = FormatPieceCategory(piece),
+                BaselineCategory = piece.m_category,
                 NeedStation = FormatCraftingStation(piece.m_craftingStation),
                 CanBeRemoved = piece.m_canBeRemoved,
                 Health = wearNTear != null ? wearNTear.m_health : null,

@@ -275,6 +275,9 @@ internal static class DataForgeGameStartPatch
         DataForgeLifecycleStep.Run(
             "item game-start apply",
             ItemOverrideManager.ApplyCurrentConfiguration);
+        DataForgeLifecycleStep.Run(
+            "piece game-start apply",
+            PieceOverrideManager.ApplyCurrentConfiguration);
     }
 }
 

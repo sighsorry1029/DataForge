@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.2
+
+- Stabilized configured Hammer categories and tab ordering against later Jotunn and embedded PieceManager refreshes with a scoped, allocation-free final reconciliation pass.
+- Preserved external category ownership and labels, repaired missing HUD tab slots, and avoided local custom-category ID collisions with categories already used by piece prefabs.
+- Made piece startup and world-transition category restoration deterministic, with bounded availability refresh retries and failure isolation for unrelated configured pieces.
+
 ## 1.2.1
 
 - Added server-authoritative PNG synchronization for explicit item, piece, and status-effect icons using content-hash manifests, missing-only transfers, persistent client caching, and live change or removal reapplication.

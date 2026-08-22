@@ -140,6 +140,11 @@ internal static class PieceTableCategoryGuard
         RememberNormalization(pieceTable);
     }
 
+    internal static bool NeedsNormalization(PieceTable? pieceTable)
+    {
+        return pieceTable && !IsNormalizationCurrent(pieceTable);
+    }
+
     internal static bool TryResolveCustomCategory(string categoryName, out Piece.PieceCategory category)
     {
         return CustomCategoriesByName.TryGetValue(categoryName.Trim(), out category);
@@ -155,6 +160,11 @@ internal static class PieceTableCategoryGuard
         IReadOnlyDictionary<Piece.PieceCategory, string> namesByCategory,
         IReadOnlyCollection<Piece.PieceCategory> ownerManagedCategories)
     {
+        if (KnownCategoryMappingsMatch(categoriesByName, namesByCategory, ownerManagedCategories))
+        {
+            return;
+        }
+
         KnownCategoriesByName.Clear();
         foreach (KeyValuePair<string, Piece.PieceCategory> pair in categoriesByName)
         {
@@ -182,6 +192,40 @@ internal static class PieceTableCategoryGuard
         CategoryLabels.Clear();
         CustomCategoryVersion++;
         NormalizationStamps.Clear();
+    }
+
+    private static bool KnownCategoryMappingsMatch(
+        IReadOnlyDictionary<string, Piece.PieceCategory> categoriesByName,
+        IReadOnlyDictionary<Piece.PieceCategory, string> namesByCategory,
+        IReadOnlyCollection<Piece.PieceCategory> ownerManagedCategories)
+    {
+        if (KnownCategoriesByName.Count != categoriesByName.Count ||
+            KnownCategoryNames.Count != namesByCategory.Count ||
+            !OwnerManagedCategories.SetEquals(ownerManagedCategories))
+        {
+            return false;
+        }
+
+        foreach (KeyValuePair<string, Piece.PieceCategory> pair in categoriesByName)
+        {
+            string name = pair.Key.Trim();
+            if (!KnownCategoriesByName.TryGetValue(name, out Piece.PieceCategory category) || category != pair.Value)
+            {
+                return false;
+            }
+        }
+
+        foreach (KeyValuePair<Piece.PieceCategory, string> pair in namesByCategory)
+        {
+            string name = pair.Value.Trim();
+            if (!KnownCategoryNames.TryGetValue(pair.Key, out string? currentName) ||
+                !currentName.Equals(name, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     internal static void ReplaceConfiguredOrders(
@@ -236,6 +280,13 @@ internal static class PieceTableCategoryGuard
                 Normalize(pieceTable);
             }
         }
+    }
+
+    internal static bool HasConfiguredOrder(PieceTable? pieceTable)
+    {
+        return pieceTable &&
+               ConfiguredOrders.TryGetValue(pieceTable, out List<ConfiguredCategory>? categories) &&
+               categories.Count > 0;
     }
 
     private static bool ConfiguredOrdersMatch(
@@ -438,14 +489,31 @@ internal static class PieceTableCategoryGuard
         used.UnionWith(CustomCategoryNames.Keys.Select(static category => (int)category));
         foreach (PieceTable pieceTable in Resources.FindObjectsOfTypeAll<PieceTable>())
         {
-            if (!pieceTable || pieceTable.m_categories == null)
+            if (!pieceTable)
             {
                 continue;
             }
 
-            foreach (Piece.PieceCategory category in pieceTable.m_categories)
+            if (pieceTable.m_categories != null)
             {
-                used.Add((int)category);
+                foreach (Piece.PieceCategory category in pieceTable.m_categories)
+                {
+                    used.Add((int)category);
+                }
+            }
+
+            if (pieceTable.m_pieces == null)
+            {
+                continue;
+            }
+
+            foreach (GameObject piecePrefab in pieceTable.m_pieces)
+            {
+                Piece? piece = piecePrefab ? piecePrefab.GetComponent<Piece>() : null;
+                if (piece != null)
+                {
+                    used.Add((int)piece.m_category);
+                }
             }
         }
 
@@ -709,9 +777,17 @@ internal static class PieceTableCategoryGuard
         int selectedSlots = pieceTable.m_selectedPiece?.Length ?? 0;
         int lastSelectedSlots = pieceTable.m_lastSelectedPiece?.Length ?? 0;
         int pieceCount = pieceTable.m_pieces?.Count ?? 0;
-        int hudTabs = Hud.instance && Hud.instance.m_pieceCategoryTabs != null
-            ? Hud.instance.m_pieceCategoryTabs.Length
-            : 0;
+        int hudTabs = 0;
+        if (Hud.instance && Hud.instance.m_pieceCategoryTabs != null)
+        {
+            GameObject[] tabs = Hud.instance.m_pieceCategoryTabs;
+            hudTabs = tabs.Length;
+            int relevantTabs = Math.Min(categoryCount, tabs.Length);
+            for (int index = 0; index < relevantTabs; index++)
+            {
+                hudTabs = unchecked(hudTabs * 31 + (tabs[index] ? 1 : 0));
+            }
+        }
         int selectedCategory = SelectedCategoryField?.GetValue(pieceTable) is Piece.PieceCategory category
             ? (int)category
             : int.MinValue;
@@ -926,9 +1002,7 @@ internal static class PieceTableCategoryGuard
             return true;
         }
 
-        bool hasAuthoritativeName =
-            CustomCategoryNames.ContainsKey(category) ||
-            KnownCategoryNames.ContainsKey(category);
+        bool hasAuthoritativeName = CustomCategoryNames.ContainsKey(category);
         if (!hasAuthoritativeName || (int)category < VanillaCategorySlots)
         {
             return false;
@@ -988,12 +1062,7 @@ internal static class PieceTableCategoryGuard
         }
 
         int requiredTabs = pieceTable.m_categories.Count;
-        if (hud.m_pieceCategoryTabs.Length >= requiredTabs)
-        {
-            return;
-        }
-
-        GameObject template = hud.m_pieceCategoryTabs[0];
+        GameObject? template = hud.m_pieceCategoryTabs.FirstOrDefault(static tab => tab);
         if (!template)
         {
             return;
@@ -1001,17 +1070,39 @@ internal static class PieceTableCategoryGuard
 
         List<GameObject> tabs = hud.m_pieceCategoryTabs.ToList();
         Transform parent = template.transform.parent;
-        for (int index = tabs.Count; index < requiredTabs; index++)
+        bool changed = false;
+        int existingTabs = Math.Min(requiredTabs, tabs.Count);
+        for (int index = 0; index < existingTabs; index++)
         {
-            GameObject tab = UnityEngine.Object.Instantiate(template, parent);
-            tab.name = $"DataForgeCategoryTab{index}";
-            tab.SetActive(false);
-            AddHudCategoryClickHandler(hud, tab);
-            CreatedHudCategoryTabs.Add(tab);
-            tabs.Add(tab);
+            if (tabs[index])
+            {
+                continue;
+            }
+
+            tabs[index] = CreateHudCategoryTab(template, parent, hud, index);
+            changed = true;
         }
 
-        hud.m_pieceCategoryTabs = tabs.ToArray();
+        for (int index = tabs.Count; index < requiredTabs; index++)
+        {
+            tabs.Add(CreateHudCategoryTab(template, parent, hud, index));
+            changed = true;
+        }
+
+        if (changed)
+        {
+            hud.m_pieceCategoryTabs = tabs.ToArray();
+        }
+    }
+
+    private static GameObject CreateHudCategoryTab(GameObject template, Transform parent, Hud hud, int index)
+    {
+        GameObject tab = UnityEngine.Object.Instantiate(template, parent);
+        tab.name = $"DataForgeCategoryTab{index}";
+        tab.SetActive(false);
+        AddHudCategoryClickHandler(hud, tab);
+        CreatedHudCategoryTabs.Add(tab);
+        return tab;
     }
 
     private static void CaptureCategorySnapshotIfNeeded(PieceTable pieceTable)
@@ -1142,60 +1233,61 @@ internal static class PieceTableCategoryGuard
     {
         private readonly List<Piece.PieceCategory> _categories;
         private readonly List<string> _labels;
-        private readonly int _availablePieceSlots;
-        private readonly int _selectedPieceSlots;
-        private readonly int _lastSelectedPieceSlots;
         private readonly Piece.PieceCategory? _selectedCategory;
 
         private PieceTableCategorySnapshot(
             List<Piece.PieceCategory> categories,
             List<string> labels,
-            int availablePieceSlots,
-            int selectedPieceSlots,
-            int lastSelectedPieceSlots,
             Piece.PieceCategory? selectedCategory)
         {
             _categories = categories;
             _labels = labels;
-            _availablePieceSlots = availablePieceSlots;
-            _selectedPieceSlots = selectedPieceSlots;
-            _lastSelectedPieceSlots = lastSelectedPieceSlots;
             _selectedCategory = selectedCategory;
         }
 
         internal static PieceTableCategorySnapshot From(PieceTable pieceTable)
         {
-            int availablePieceSlots = AvailablePiecesField?.GetValue(pieceTable) is ICollection availablePieces
-                ? availablePieces.Count
-                : -1;
             Piece.PieceCategory? selectedCategory = SelectedCategoryField?.GetValue(pieceTable) is Piece.PieceCategory category
                 ? category
                 : null;
             return new PieceTableCategorySnapshot(
                 pieceTable.m_categories?.ToList() ?? new List<Piece.PieceCategory>(),
                 pieceTable.m_categoryLabels?.ToList() ?? new List<string>(),
-                availablePieceSlots,
-                pieceTable.m_selectedPiece?.Length ?? 0,
-                pieceTable.m_lastSelectedPiece?.Length ?? 0,
                 selectedCategory);
         }
 
         internal void Restore(PieceTable pieceTable)
         {
-            pieceTable.m_categories = _categories.ToList();
-            pieceTable.m_categoryLabels = _labels.ToList();
-            if (_availablePieceSlots >= 0 &&
-                AvailablePiecesField?.GetValue(pieceTable) is IList availablePieces &&
-                !availablePieces.IsFixedSize)
+            List<Piece.PieceCategory> categories = _categories.ToList();
+            List<string> labels = new(categories.Count);
+            for (int index = 0; index < categories.Count; index++)
             {
-                while (availablePieces.Count > _availablePieceSlots)
+                labels.Add(index < _labels.Count ? _labels[index] ?? "" : GetLabel(categories[index]));
+            }
+
+            HashSet<Piece.PieceCategory> restored = new(categories);
+            List<Piece.PieceCategory>? currentCategories = pieceTable.m_categories;
+            List<string>? currentLabels = pieceTable.m_categoryLabels;
+            if (currentCategories != null)
+            {
+                for (int index = 0; index < currentCategories.Count; index++)
                 {
-                    availablePieces.RemoveAt(availablePieces.Count - 1);
+                    Piece.PieceCategory category = currentCategories[index];
+                    bool dataForgeOnlyCategory = CustomCategoryNames.ContainsKey(category);
+                    if (dataForgeOnlyCategory || !restored.Add(category))
+                    {
+                        continue;
+                    }
+
+                    categories.Add(category);
+                    labels.Add(currentLabels != null && index < currentLabels.Count
+                        ? currentLabels[index]
+                        : GetLabel(category));
                 }
             }
 
-            Array.Resize(ref pieceTable.m_selectedPiece, _selectedPieceSlots);
-            Array.Resize(ref pieceTable.m_lastSelectedPiece, _lastSelectedPieceSlots);
+            pieceTable.m_categories = categories;
+            pieceTable.m_categoryLabels = labels;
             if (_selectedCategory.HasValue)
             {
                 SelectedCategoryField?.SetValue(pieceTable, _selectedCategory.Value);
@@ -1336,6 +1428,17 @@ internal static class DataForgePlayerSetPlaceModePieceTableCategoryGuardPatch
     private static void Prefix(PieceTable buildPieces)
     {
         PieceTableCategoryGuard.Normalize(buildPieces);
+    }
+}
+
+[HarmonyPatch(typeof(Hud), "LateUpdate")]
+[HarmonyAfter("com.jotunn.jotunn", "org.bepinex.helpers.PieceManager")]
+internal static class DataForgeHammerCategoryFinalReconcilePatch
+{
+    [HarmonyPriority(Priority.Last)]
+    private static void Postfix()
+    {
+        PieceOverrideManager.ReconcileHammerCategoriesAfterHudUpdate();
     }
 }
 
