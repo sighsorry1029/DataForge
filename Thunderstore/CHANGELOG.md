@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.3
+
+- Coalesced DataForge-configured Hammer pieces into the existing tab with the same displayed name used by non-DataForge pieces, avoiding duplicate tabs created from independently allocated category IDs.
+- Re-resolved configured Hammer category identity only after configuration, build-mode, availability, or category changes, while retaining the final post-framework reconciliation without periodic polling.
+- Preserved ambiguous external categories instead of merging them arbitrarily and removed only empty category slots inserted by DataForge.
+
 ## 1.2.2
 
 - Stabilized configured Hammer categories and tab ordering against later Jotunn and embedded PieceManager refreshes with a scoped, allocation-free final reconciliation pass.

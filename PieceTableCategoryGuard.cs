@@ -1429,6 +1429,12 @@ internal static class DataForgePlayerSetPlaceModePieceTableCategoryGuardPatch
     {
         PieceTableCategoryGuard.Normalize(buildPieces);
     }
+
+    [HarmonyPriority(Priority.Last)]
+    private static void Postfix(PieceTable buildPieces)
+    {
+        PieceOverrideManager.MarkHammerCategoryIdentityResolutionPending(buildPieces);
+    }
 }
 
 [HarmonyPatch(typeof(Hud), "LateUpdate")]
@@ -1449,6 +1455,12 @@ internal static class DataForgePieceTableUpdateAvailableCategoryGuardPatch
     private static void Prefix(PieceTable __instance)
     {
         PieceTableCategoryGuard.Normalize(__instance);
+    }
+
+    [HarmonyPriority(Priority.Last)]
+    private static void Postfix(PieceTable __instance)
+    {
+        PieceOverrideManager.MarkHammerCategoryIdentityResolutionPending(__instance);
     }
 }
 

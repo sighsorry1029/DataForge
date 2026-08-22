@@ -108,10 +108,11 @@ internal static class PieceOverrideManager
     private static bool PieceCategoryConfigurationWasApplied;
     private static bool CraftingStationTopologyChanged;
     private static bool StationExtensionTopologyChanged;
-    private static readonly Dictionary<Piece, Piece.PieceCategory> ExpectedHammerCategories =
+    private static readonly Dictionary<Piece, HammerCategoryClaim> ExpectedHammerCategories =
         new(ReferenceComparer<Piece>.Instance);
     private static int HammerCategoryReconciliationFailures;
     private static int HammerAvailabilityRefreshAttemptsRemaining;
+    private static bool HammerCategoryIdentityResolutionPending;
 
     private static string ConfigDirectory => Path.Combine(Paths.ConfigPath, DataForgePlugin.ModName);
 
@@ -4826,6 +4827,7 @@ internal static class PieceOverrideManager
         try
         {
             if (HammerAvailabilityRefreshAttemptsRemaining == 0 &&
+                !HammerCategoryIdentityResolutionPending &&
                 !HasConfiguredHammerCategoryDrift(hammerPieceTable) &&
                 !PieceTableCategoryGuard.NeedsNormalization(hammerPieceTable))
             {
@@ -4845,9 +4847,10 @@ internal static class PieceOverrideManager
 
     private static void ReconcileConfiguredHammerCategories(PieceTable hammerPieceTable, Player player)
     {
-        bool categoryChanged = false;
+        bool categoryChanged = ResolveCanonicalHammerCategoryClaims(hammerPieceTable);
+        HammerCategoryIdentityResolutionPending = false;
         List<Piece>? discardedPieces = null;
-        foreach (KeyValuePair<Piece, Piece.PieceCategory> expected in ExpectedHammerCategories)
+        foreach (KeyValuePair<Piece, HammerCategoryClaim> expected in ExpectedHammerCategories)
         {
             Piece? piece = expected.Key;
             if (!piece)
@@ -4856,8 +4859,9 @@ internal static class PieceOverrideManager
                 continue;
             }
 
-            bool pieceCategoryChanged = piece.m_category != expected.Value;
-            bool categoryMissing = hammerPieceTable.m_categories?.Contains(expected.Value) != true;
+            Piece.PieceCategory targetCategory = expected.Value.TargetCategory;
+            bool pieceCategoryChanged = piece.m_category != targetCategory;
+            bool categoryMissing = hammerPieceTable.m_categories?.Contains(targetCategory) != true;
             if (!pieceCategoryChanged && !categoryMissing)
             {
                 continue;
@@ -4872,15 +4876,15 @@ internal static class PieceOverrideManager
             {
                 if (pieceCategoryChanged)
                 {
-                    ApplyCategory(piece, expected.Value);
+                    ApplyCategory(piece, targetCategory);
                 }
                 else
                 {
-                    PieceTableCategoryGuard.EnsureCategory(hammerPieceTable, expected.Value);
+                    PieceTableCategoryGuard.EnsureCategory(hammerPieceTable, targetCategory);
                 }
 
                 if (categoryMissing &&
-                    hammerPieceTable.m_categories?.Contains(expected.Value) != true)
+                    hammerPieceTable.m_categories?.Contains(targetCategory) != true)
                 {
                     string prefabName = GetPrefabName(piece.gameObject);
                     ReportPieceCategoryConfigurationIssue(
@@ -4898,8 +4902,8 @@ internal static class PieceOverrideManager
                 ReportPieceCategoryConfigurationIssue(
                     $"hammer-final-piece:{prefabName}",
                     $"Could not reconcile Hammer category for piece '{prefabName}': {ex.Message}");
-                if (piece.m_category != expected.Value ||
-                    hammerPieceTable.m_categories?.Contains(expected.Value) != true)
+                if (piece.m_category != targetCategory ||
+                    hammerPieceTable.m_categories?.Contains(targetCategory) != true)
                 {
                     (discardedPieces ??= new List<Piece>()).Add(expected.Key);
                 }
@@ -4912,6 +4916,11 @@ internal static class PieceOverrideManager
             {
                 ExpectedHammerCategories.Remove(piece);
             }
+        }
+
+        if (categoryChanged)
+        {
+            PruneUnusedInsertedPieceTableCategories();
         }
 
         PieceTableCategoryGuard.Normalize(hammerPieceTable);
@@ -4940,9 +4949,135 @@ internal static class PieceOverrideManager
         }
     }
 
+    private static bool ResolveCanonicalHammerCategoryClaims(PieceTable hammerPieceTable)
+    {
+        if (ExpectedHammerCategories.Count == 0)
+        {
+            return false;
+        }
+
+        HashSet<Piece> managedPieces = new(
+            ExpectedHammerCategories.Keys,
+            ReferenceComparer<Piece>.Instance);
+        HashSet<Piece.PieceCategory> categoriesUsedByUnmanagedPieces = new();
+        if (hammerPieceTable.m_pieces != null)
+        {
+            foreach (GameObject piecePrefab in hammerPieceTable.m_pieces)
+            {
+                Piece? piece = piecePrefab ? piecePrefab.GetComponent<Piece>() : null;
+                if (piece != null && !managedPieces.Contains(piece))
+                {
+                    categoriesUsedByUnmanagedPieces.Add(piece.m_category);
+                }
+            }
+        }
+
+        HashSet<Piece.PieceCategory> categories = new();
+        if (hammerPieceTable.m_categories != null)
+        {
+            foreach (Piece.PieceCategory category in hammerPieceTable.m_categories)
+            {
+                if (IsHammerCategoryCoalescingCandidate(category))
+                {
+                    categories.Add(category);
+                }
+            }
+        }
+
+        foreach (HammerCategoryClaim claim in ExpectedHammerCategories.Values)
+        {
+            if (IsHammerCategoryCoalescingCandidate(claim.TargetCategory))
+            {
+                categories.Add(claim.TargetCategory);
+            }
+        }
+
+        bool changed = false;
+        foreach (IGrouping<string, HammerCategoryClaim> group in ExpectedHammerCategories.Values
+                     .GroupBy(
+                         claim => GetHammerCategoryDisplayName(
+                             hammerPieceTable,
+                             claim.TargetCategory,
+                             claim.ConfiguredName),
+                         StringComparer.Ordinal))
+        {
+            if (group.Key.Length == 0)
+            {
+                continue;
+            }
+
+            List<Piece.PieceCategory> matches = categories
+                .Where(category => group.Key.Equals(
+                    GetHammerCategoryDisplayName(hammerPieceTable, category, ""),
+                    StringComparison.Ordinal))
+                .OrderBy(static category => (int)category)
+                .ToList();
+            if (matches.Count < 2)
+            {
+                continue;
+            }
+
+            List<Piece.PieceCategory> ownerCandidates = matches
+                .Where(categoriesUsedByUnmanagedPieces.Contains)
+                .ToList();
+            if (ownerCandidates.Count == 0)
+            {
+                continue;
+            }
+
+            if (ownerCandidates.Count > 1)
+            {
+                ReportPieceCategoryConfigurationIssue(
+                    $"hammer-display-category-ambiguous:{group.Key}",
+                    $"Hammer has multiple non-DataForge category ids with the displayed name '{group.Key}'; " +
+                    "configured pieces were not merged automatically.");
+                continue;
+            }
+
+            Piece.PieceCategory canonicalCategory = ownerCandidates[0];
+            foreach (HammerCategoryClaim claim in group)
+            {
+                if (claim.TargetCategory == canonicalCategory)
+                {
+                    continue;
+                }
+
+                claim.TargetCategory = canonicalCategory;
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
+    private static bool IsHammerCategoryCoalescingCandidate(Piece.PieceCategory category)
+    {
+        return category is not Piece.PieceCategory.Max and not Piece.PieceCategory.All &&
+               (int)category >= 0 &&
+               !IsOwnerManagedHomesteadCategory(category);
+    }
+
+    private static string GetHammerCategoryDisplayName(
+        PieceTable hammerPieceTable,
+        Piece.PieceCategory category,
+        string fallback)
+    {
+        if (TryGetCategoryDisplayNameFromTable(hammerPieceTable, category, out string displayName))
+        {
+            return displayName.Trim();
+        }
+
+        if (TryFormatCategoryLabel(fallback, out displayName))
+        {
+            return displayName.Trim();
+        }
+
+        return "";
+    }
+
     private static bool HasConfiguredHammerCategoryDrift(PieceTable hammerPieceTable)
     {
-        foreach (KeyValuePair<Piece, Piece.PieceCategory> expected in ExpectedHammerCategories)
+        foreach (KeyValuePair<Piece, HammerCategoryClaim> expected in ExpectedHammerCategories)
         {
             Piece? piece = expected.Key;
             if (!piece)
@@ -4950,8 +5085,9 @@ internal static class PieceOverrideManager
                 return true;
             }
 
-            bool pieceCategoryChanged = piece.m_category != expected.Value;
-            bool categoryMissing = hammerPieceTable.m_categories?.Contains(expected.Value) != true;
+            Piece.PieceCategory targetCategory = expected.Value.TargetCategory;
+            bool pieceCategoryChanged = piece.m_category != targetCategory;
+            bool categoryMissing = hammerPieceTable.m_categories?.Contains(targetCategory) != true;
             if ((pieceCategoryChanged || categoryMissing) &&
                 hammerPieceTable.m_pieces?.Contains(piece.gameObject) == true)
             {
@@ -4995,10 +5131,11 @@ internal static class PieceOverrideManager
         if (!hammerPieceTable)
         {
             ExpectedHammerCategories.Clear();
+            HammerCategoryIdentityResolutionPending = false;
             return;
         }
 
-        Dictionary<Piece, Piece.PieceCategory> expected = new(ReferenceComparer<Piece>.Instance);
+        Dictionary<Piece, HammerCategoryClaim> expected = new(ReferenceComparer<Piece>.Instance);
         foreach (KeyValuePair<string, string> claim in claims)
         {
             if (TryResolvePieceCategory(claim.Value, out Piece.PieceCategory category) &&
@@ -5007,15 +5144,29 @@ internal static class PieceOverrideManager
                 hammerPieceTable.m_pieces?.Contains(piece.gameObject) == true &&
                 !IsOwnerManagedHomesteadCategory(category))
             {
-                expected[piece] = category;
+                expected[piece] = new HammerCategoryClaim(claim.Value, category);
             }
         }
 
         ExpectedHammerCategories.Clear();
-        foreach (KeyValuePair<Piece, Piece.PieceCategory> pair in expected)
+        foreach (KeyValuePair<Piece, HammerCategoryClaim> pair in expected)
         {
             ExpectedHammerCategories[pair.Key] = pair.Value;
         }
+
+        HammerCategoryIdentityResolutionPending = ExpectedHammerCategories.Count > 0;
+    }
+
+    internal static void MarkHammerCategoryIdentityResolutionPending(PieceTable? pieceTable)
+    {
+        if (ExpectedHammerCategories.Count == 0 ||
+            !pieceTable ||
+            !ReferenceEquals(pieceTable, GetHammerPieceTable()))
+        {
+            return;
+        }
+
+        HammerCategoryIdentityResolutionPending = true;
     }
 
     private static PieceTable? GetHammerPieceTable()
@@ -5029,6 +5180,7 @@ internal static class PieceOverrideManager
         ExpectedHammerCategories.Clear();
         HammerCategoryReconciliationFailures = 0;
         HammerAvailabilityRefreshAttemptsRemaining = 0;
+        HammerCategoryIdentityResolutionPending = false;
     }
 
     private static void ReapplyRecipesIfCraftingStationTopologyChanged()
@@ -5855,6 +6007,18 @@ internal static class PieceOverrideManager
 
         internal PieceTable Source { get; }
         internal Piece.PieceCategory SourceCategory { get; }
+    }
+
+    private sealed class HammerCategoryClaim
+    {
+        internal HammerCategoryClaim(string configuredName, Piece.PieceCategory targetCategory)
+        {
+            ConfiguredName = configuredName;
+            TargetCategory = targetCategory;
+        }
+
+        internal string ConfiguredName { get; }
+        internal Piece.PieceCategory TargetCategory { get; set; }
     }
 
     private sealed class PieceTableNameComparer : IComparer<string>
