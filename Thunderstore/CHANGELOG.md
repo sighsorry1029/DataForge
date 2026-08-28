@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.4
+
+- Added server-synced `fermenter.requiresRoof` and `fermenter.requiresCover` piece overrides so the vanilla roof and 70% cover requirements can be controlled independently.
+- Applied requirement changes live to existing fermenters, kept new spawns consistent, and restored vanilla behavior when the fields or piece overrides are removed.
+- Documented the fields in the default override comments and full scaffold while keeping them out of compact piece references.
+
 ## 1.2.3
 
 - Coalesced DataForge-configured Hammer pieces into the existing tab with the same displayed name used by non-DataForge pieces, avoiding duplicate tabs created from independently allocated category IDs.

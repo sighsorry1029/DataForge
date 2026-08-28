@@ -1395,6 +1395,8 @@ internal static class PieceOverrideManager
             "#   beehive: 1200, 4                    # seconds per produced honey, max stored honey.",
             "#   fermenter:",
             "#     duration: 2400                    # fermentation duration in seconds.",
+            "#     requiresRoof: true                # false ignores the vanilla roof requirement.",
+            "#     requiresCover: true               # false ignores the vanilla 70% cover requirement.",
             "#     conversions:",
             "#     - MeadBaseHealthMedium: MeadHealthMedium, 6 # from item: to item, produced amount.",
             "#   cookingStation:",
@@ -1588,7 +1590,22 @@ internal static class PieceOverrideManager
             }
 
             ApplyConfiguredState(piece.gameObject, prefabName, adjustHealthZdo: true, applyVisuals: false);
+            RefreshLoadedFermenterEnvironmentState(piece.gameObject);
         }
+    }
+
+    private static void RefreshLoadedFermenterEnvironmentState(GameObject gameObject)
+    {
+        Fermenter? fermenter = gameObject.GetComponent<Fermenter>();
+        if (fermenter == null ||
+            fermenter.m_nview == null ||
+            !fermenter.m_nview.IsValid() ||
+            fermenter.m_roofCheckPoint == null)
+        {
+            return;
+        }
+
+        fermenter.UpdateCover(0f, forceUpdate: true);
     }
 
     private static bool IsManagedPiece(GameObject gameObject, Piece? piece = null)
@@ -2138,6 +2155,95 @@ internal static class PieceOverrideManager
             TryBuildFermenterConversions(fermenter, definition.Conversions, out List<Fermenter.ItemConversion> conversions))
         {
             fermenter.m_conversion = conversions;
+        }
+    }
+
+    private static bool TryGetFermenterEnvironmentRequirements(
+        Fermenter fermenter,
+        out bool requiresRoof,
+        out bool requiresCover)
+    {
+        requiresRoof = true;
+        requiresCover = true;
+        if (!DataForgePlugin.PieceOverridesEnabled || fermenter == null || fermenter.gameObject == null)
+        {
+            return false;
+        }
+
+        lock (StateLock)
+        {
+            if (!ActiveRuntimeEntriesByPiece.TryGetValue(
+                    GetPrefabName(fermenter.gameObject),
+                    out List<PieceEntry>? entries))
+            {
+                return false;
+            }
+
+            foreach (PieceEntry entry in entries)
+            {
+                FermenterDefinition? definition = entry.Fermenter;
+                if (definition?.RequiresRoof is bool entryRequiresRoof)
+                {
+                    requiresRoof = entryRequiresRoof;
+                }
+
+                if (definition?.RequiresCover is bool entryRequiresCover)
+                {
+                    requiresCover = entryRequiresCover;
+                }
+            }
+        }
+
+        return !requiresRoof || !requiresCover;
+    }
+
+    [HarmonyPatch(typeof(Fermenter), nameof(Fermenter.ResetFermentationTimer))]
+    private static class FermenterResetFermentationTimerPatch
+    {
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.Last)]
+        private static bool Prefix(Fermenter __instance)
+        {
+            if (!TryGetFermenterEnvironmentRequirements(
+                    __instance,
+                    out bool requiresRoof,
+                    out bool requiresCover))
+            {
+                return true;
+            }
+
+            bool vanillaEnvironmentFailed = __instance.m_exposed || !__instance.m_hasRoof;
+            bool configuredEnvironmentFailed =
+                (requiresCover && __instance.m_exposed) ||
+                (requiresRoof && !__instance.m_hasRoof);
+            return !vanillaEnvironmentFailed || configuredEnvironmentFailed;
+        }
+    }
+
+    [HarmonyPatch(typeof(Fermenter), nameof(Fermenter.UpdateCover), typeof(float), typeof(bool))]
+    private static class FermenterUpdateCoverPatch
+    {
+        [HarmonyPostfix]
+        [HarmonyPriority(Priority.Last)]
+        private static void Postfix(Fermenter __instance)
+        {
+            if (!TryGetFermenterEnvironmentRequirements(
+                    __instance,
+                    out bool requiresRoof,
+                    out bool requiresCover))
+            {
+                return;
+            }
+
+            if (!requiresRoof)
+            {
+                __instance.m_hasRoof = true;
+            }
+
+            if (!requiresCover)
+            {
+                __instance.m_exposed = false;
+            }
         }
     }
 
@@ -5674,7 +5780,7 @@ internal static class PieceOverrideManager
                 Resources = PieceResourceDefinition.ToReference(definition.Piece?.Resources),
                 SapCollector = definition.SapCollector,
                 Beehive = definition.Beehive,
-                Fermenter = definition.Fermenter != null ? ReferenceValue.ClonePruned(definition.Fermenter) : null,
+                Fermenter = FermenterDefinition.ToReference(definition.Fermenter),
                 CookingStation = definition.CookingStation != null ? ReferenceValue.ClonePruned(definition.CookingStation) : null,
                 Smelter = definition.Smelter != null ? ReferenceValue.ClonePruned(definition.Smelter) : null,
                 Container = definition.Container,
@@ -6072,6 +6178,8 @@ internal static class PieceOverrideManager
     internal sealed class FermenterDefinition
     {
         public float? Duration { get; set; }
+        public bool? RequiresRoof { get; set; }
+        public bool? RequiresCover { get; set; }
         public List<FermenterConversionDefinition>? Conversions { get; set; }
 
         internal static FermenterDefinition? From(Fermenter? fermenter)
@@ -6081,8 +6189,21 @@ internal static class PieceOverrideManager
                 : new FermenterDefinition
                 {
                     Duration = fermenter.m_fermentationDuration,
+                    RequiresRoof = true,
+                    RequiresCover = true,
                     Conversions = FermenterConversionDefinition.From(fermenter.m_conversion)
                 };
+        }
+
+        internal static FermenterDefinition? ToReference(FermenterDefinition? definition)
+        {
+            return definition == null
+                ? null
+                : ReferenceValue.ClonePruned(new FermenterDefinition
+                {
+                    Duration = definition.Duration,
+                    Conversions = definition.Conversions
+                });
         }
     }
 
