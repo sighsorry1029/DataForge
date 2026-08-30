@@ -131,8 +131,24 @@ internal static class VneiRefreshManager
         }
         catch (Exception ex)
         {
-            backup?.Restore();
-            DataForgePlugin.Log.LogWarning($"Could not refresh VNEI index after DataForge changes: {ex.Message}");
+            Exception refreshError = ex.GetBaseException();
+            string rollbackError = "";
+            if (backup != null)
+            {
+                try
+                {
+                    backup.Restore();
+                }
+                catch (Exception rollbackException)
+                {
+                    Exception rollbackRoot = rollbackException.GetBaseException();
+                    rollbackError = $" Rollback also failed: {rollbackRoot.GetType().Name}: {rollbackRoot.Message}";
+                }
+            }
+
+            DataForgePlugin.Log.LogWarning(
+                $"Could not refresh VNEI index after DataForge changes: " +
+                $"{refreshError.GetType().Name}: {refreshError.Message}{rollbackError}");
         }
         finally
         {

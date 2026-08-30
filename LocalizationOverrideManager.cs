@@ -62,7 +62,6 @@ internal static class LocalizationOverrideManager
     private static DataForgeFileWatcher.DebouncedAction? ReloadDebouncer;
     private static string? LastParsedPayload;
     private static bool LocalFileModeReady;
-    private static bool WatcherResetPending;
 
     private static readonly Dictionary<string, TranslationLease> AppliedTranslations =
         new(StringComparer.Ordinal);
@@ -79,7 +78,7 @@ internal static class LocalizationOverrideManager
         SyncedPayload = new CustomSyncedValue<string>(configSync, SyncedPayloadKey, "", priority: 100);
         SyncedPayload.ValueChanged += OnSyncedPayloadChanged;
         configSync.SourceOfTruthChanged += OnSourceOfTruthChanged;
-        EnsureSourceOfTruthFileMode();
+        _ = EnsureSourceOfTruthFileMode();
     }
 
     internal static void Dispose()
@@ -102,7 +101,6 @@ internal static class LocalizationOverrideManager
         ReloadDebouncer?.Dispose();
         ReloadDebouncer = null;
         LocalFileModeReady = false;
-        WatcherResetPending = false;
         lock (StateLock)
         {
             ActivePayload = CreateEmptyPayload();
@@ -110,21 +108,30 @@ internal static class LocalizationOverrideManager
         }
     }
 
-    internal static void EnsureSourceOfTruthFileMode()
+    internal static bool EnsureSourceOfTruthFileMode()
     {
-        if (!HasLocalAuthority || LocalFileModeReady)
+        if (!HasLocalAuthority)
         {
-            return;
+            return false;
+        }
+
+        if (LocalFileModeReady)
+        {
+            return true;
         }
 
         LocalFileModeReady = true;
         try
         {
             SetupFileWatcher();
+            DataForgeFileWatcher.CancelPendingRecreate("localization");
             if (!ReloadFromDiskAndSync())
             {
                 NotifyLocalizationChanged();
+                ReloadDebouncer?.Schedule();
             }
+
+            return true;
         }
         catch (Exception ex)
         {
@@ -134,6 +141,7 @@ internal static class LocalizationOverrideManager
             ReloadDebouncer?.Dispose();
             ReloadDebouncer = null;
             DataForgePlugin.Log.LogError($"Failed to initialize server localization files: {ex}");
+            return false;
         }
     }
 
@@ -143,7 +151,6 @@ internal static class LocalizationOverrideManager
         Watcher = null;
         ReloadDebouncer?.Dispose();
         ReloadDebouncer = null;
-        WatcherResetPending = false;
         if (!HasLocalAuthority)
         {
             return;
@@ -151,24 +158,12 @@ internal static class LocalizationOverrideManager
 
         EnsureConfigDirectoryAndDefaultOverride();
         ReloadDebouncer = DataForgeFileWatcher.CreateDebouncedAction(ReloadDelayTicks, ReloadYamlValues);
-        CreateLocalizationWatcher();
-    }
-
-    private static void CreateLocalizationWatcher()
-    {
-        Directory.CreateDirectory(LocalizationDirectory);
-        FileSystemWatcher watcher = new(LocalizationDirectory, "*.*")
-        {
-            IncludeSubdirectories = false,
-            SynchronizingObject = ThreadingHelper.SynchronizingObject
-        };
-        watcher.Changed += ReadYamlValues;
-        watcher.Created += ReadYamlValues;
-        watcher.Deleted += ReadYamlValues;
-        watcher.Renamed += (sender, args) => ReadYamlValues(sender, args);
-        watcher.Error += OnWatcherError;
-        watcher.EnableRaisingEvents = true;
-        Watcher = watcher;
+        Watcher = DataForgeFileWatcher.Create(
+            LocalizationDirectory,
+            "*.*",
+            includeSubdirectories: false,
+            ReadYamlValues,
+            OnWatcherError);
     }
 
     private static bool ReloadFromDiskAndSync()
@@ -298,23 +293,6 @@ internal static class LocalizationOverrideManager
         {
             DataForgePlugin.Log.LogError($"Error reloading localization YAML files: {ex}");
         }
-        finally
-        {
-            if (WatcherResetPending && HasLocalAuthority)
-            {
-                WatcherResetPending = false;
-                try
-                {
-                    Watcher?.Dispose();
-                    Watcher = null;
-                    CreateLocalizationWatcher();
-                }
-                catch (Exception ex)
-                {
-                    DataForgePlugin.Log.LogError($"Failed to rebuild the localization file watcher: {ex}");
-                }
-            }
-        }
     }
 
     private static void OnWatcherError(object sender, ErrorEventArgs e)
@@ -325,9 +303,19 @@ internal static class LocalizationOverrideManager
         }
 
         DataForgePlugin.Log.LogWarning(
-            $"Localization file watcher lost events and will be rebuilt: {e.GetException().Message}");
-        WatcherResetPending = true;
-        ReloadDebouncer?.Schedule();
+            $"Localization file watcher lost events; scheduling a full reload: {e.GetException().Message}");
+        if (!DataForgeFileWatcher.TryRecreate(
+                "localization",
+                () =>
+                {
+                    SetupFileWatcher();
+                    LocalFileModeReady = true;
+                    ReloadDebouncer?.Schedule();
+                }))
+        {
+            LocalFileModeReady = false;
+            ReloadYamlValues();
+        }
     }
 
     private static bool ShouldReloadForFileEvent(FileSystemEventArgs e)
@@ -362,11 +350,7 @@ internal static class LocalizationOverrideManager
         if (isSourceOfTruth)
         {
             ClearActivePayloadAndRestore();
-            if (HasLocalAuthority)
-            {
-                EnsureSourceOfTruthFileMode();
-            }
-            else
+            if (!HasLocalAuthority)
             {
                 NotifyLocalizationChanged();
             }
@@ -377,7 +361,6 @@ internal static class LocalizationOverrideManager
         Watcher = null;
         ReloadDebouncer?.Dispose();
         ReloadDebouncer = null;
-        WatcherResetPending = false;
         ClearActivePayloadAndRestore();
         NotifyLocalizationChanged();
     }

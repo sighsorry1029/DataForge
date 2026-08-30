@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 using System.Text;
 using BepInEx;
 using HarmonyLib;
@@ -26,8 +27,6 @@ internal static class RecipeOverrideManager
     private const string FullScaffoldFileName = "recipes.full.yml";
     private const string SyncedPayloadKey = "recipes";
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
-    private const string ReferenceStateKey = "recipes";
-    private const string ReferenceLogicVersion = "2026-08-09-recipe-slots-v4";
 
     private static readonly object StateLock = new();
     private static readonly Dictionary<string, RecipeSlot> RecipeSlots = new(StringComparer.OrdinalIgnoreCase);
@@ -500,11 +499,13 @@ internal static class RecipeOverrideManager
     private static void OnWatcherError(object sender, ErrorEventArgs e)
     {
         DataForgePlugin.Log.LogWarning($"Recipe file watcher lost events; scheduling a full reload: {e.GetException().Message}");
-        if (DataForgeFileWatcher.TryRecreate("recipe", SetupFileWatcher))
-        {
-            ReloadDebouncer?.Schedule();
-        }
-        else
+        if (!DataForgeFileWatcher.TryRecreate(
+                "recipe",
+                () =>
+                {
+                    SetupFileWatcher();
+                    ReloadDebouncer?.Schedule();
+                }))
         {
             ReloadYamlValues();
         }
@@ -642,22 +643,7 @@ internal static class RecipeOverrideManager
 
     private static bool IsOverrideFile(string path)
     {
-        string extension = Path.GetExtension(path);
-        if (!extension.Equals(".yml", StringComparison.OrdinalIgnoreCase) &&
-            !extension.Equals(".yaml", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        string fileName = Path.GetFileName(path);
-        if (fileName.Equals(ReferenceFileName, StringComparison.OrdinalIgnoreCase) ||
-            fileName.Equals(FullScaffoldFileName, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        return fileName.Equals(OverrideFileName, StringComparison.OrdinalIgnoreCase) ||
-               fileName.StartsWith("recipes_", StringComparison.OrdinalIgnoreCase);
+        return DataForgeOverrideFiles.IsDomainOverrideFile(path, OverrideFileName, DomainName);
     }
 
     private static void EnsureConfigDirectoryAndDefaultOverride()
@@ -1004,8 +990,21 @@ internal static class RecipeOverrideManager
 
     private static string BuildRecipeFingerprint(string? recipeName, RecipeDefinition definition)
     {
-        return DataForgeReferenceState.ComputeStableHash(
+        return ComputeStableHash(
             $"{recipeName?.Trim() ?? ""}\n{SparseSerializer.Serialize(definition)}");
+    }
+
+    private static string ComputeStableHash(string value)
+    {
+        using SHA256 sha256 = SHA256.Create();
+        byte[] hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(value));
+        StringBuilder builder = new(hash.Length * 2);
+        foreach (byte part in hash)
+        {
+            builder.Append(part.ToString("x2", CultureInfo.InvariantCulture));
+        }
+
+        return builder.ToString();
     }
 
     private static bool IsCreatedRecipe(Recipe recipe)
@@ -2026,40 +2025,45 @@ internal static class RecipeOverrideManager
             out error);
     }
 
+    internal static bool TryRegenerateReferenceFile(out string path, out bool changed, out string error)
+    {
+        path = Path.Combine(ConfigDirectory, ReferenceFileName);
+        return GeneratedArtifactWriter.TryWriteReferenceIfReady(
+            path,
+            DomainName,
+            OverrideFileName,
+            CanBuildGeneratedArtifacts(),
+            $"{DomainName} game data is not ready yet.",
+            BuildReferenceFileContent,
+            out changed,
+            out error);
+    }
+
     private static void WriteReferenceArtifact()
     {
-        if (!DataForgePlugin.UsesLocalAuthorityFiles || !CanBuildGeneratedArtifacts())
+        if (!DataForgePlugin.UsesLocalAuthorityFiles ||
+            DataForgeWorldLifecycle.IsShuttingDown ||
+            !CanBuildGeneratedArtifacts())
         {
             return;
         }
 
-        try
+        if (!TryRegenerateReferenceFile(out _, out _, out string error))
         {
-            EnsureConfigDirectoryAndDefaultOverride();
-            CaptureAllBaselinesIfNeeded();
-            string sourceSignature = ComputeReferenceSourceSignature();
-            string referencePath = Path.Combine(ConfigDirectory, ReferenceFileName);
-            if (DataForgeReferenceState.ShouldSkip(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion))
-            {
-                return;
-            }
+            DataForgePlugin.Log.LogWarning(error);
+        }
+    }
 
-            bool wrote = GeneratedArtifactWriter.WriteReferenceIfReady(
-                RecipeSlots.Values.Any(slot => slot.Current != null && slot.BaselineEnabled),
-                ConfigDirectory,
-                ReferenceFileName,
-                DomainName,
-                OverrideFileName,
-                BuildReferenceArtifactContent);
-            if (wrote || File.Exists(referencePath))
-            {
-                DataForgeReferenceState.Record(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
-            }
-        }
-        catch (Exception ex)
+    private static string? BuildReferenceFileContent()
+    {
+        EnsureConfigDirectoryAndDefaultOverride();
+        CaptureAllBaselinesIfNeeded();
+        if (!RecipeSlots.Values.Any(slot => slot.Current != null && slot.BaselineEnabled))
         {
-            DataForgePlugin.Log.LogWarning($"Could not write recipe reference artifact: {ex.Message}");
+            return null;
         }
+
+        return BuildReferenceArtifactContent();
     }
 
     private static string BuildReferenceArtifactContent()
@@ -2090,25 +2094,6 @@ internal static class RecipeOverrideManager
         return ObjectDbReady &&
                ZNetScene.instance != null &&
                ObjectDB.instance != null;
-    }
-
-    private static string ComputeReferenceSourceSignature()
-    {
-        StringBuilder builder = new();
-        builder.AppendLine(ReferenceLogicVersion);
-        builder.AppendLine(DataForgeReferenceState.BuildFileStamp(Path.Combine(ConfigDirectory, "z_resourcemap.txt")));
-        foreach (RecipeSlot slot in RecipeSlots.Values
-                     .Where(slot => slot.Current != null && slot.BaselineEnabled)
-                     .OrderBy(slot => slot.PublicKey, StringComparer.OrdinalIgnoreCase))
-        {
-            builder.Append(slot.PublicKey);
-            builder.Append('|');
-            builder.Append(slot.OriginalName);
-            builder.Append('|');
-            builder.AppendLine(SparseSerializer.Serialize(slot.Baseline));
-        }
-
-        return DataForgeReferenceState.ComputeStableHash(builder.ToString());
     }
 
     private static string GetItemName(ItemDrop? item)

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.5
+
+- Added the server-side `dataforge:refer` command for regenerating individual or all compact references and allowed authenticated dedicated-server administrators to run both reference and full-scaffold commands remotely.
+- Made generated references content-driven and deterministic, removed stale reference-state caches, refreshed material and mod-owner lookups, kept unchanged files untouched, and excluded stale item, piece, and status-effect baselines from later worlds.
+- Fixed multiplied crafting outputs to validate inventory capacity for the full adjusted amount before crafting, preventing partial or lost output when only the vanilla amount would fit.
+- Hardened configuration and domain file-watcher recovery with persistent five-second recreation retries, safe source-of-truth transitions, and cleanup that prevents failed watcher creation from leaking resources.
+- Simplified piece override application around one consistent configuration snapshot, stabilized owner-managed category ordering, and isolated recipe or VNEI refresh failures so unrelated entries continue to apply.
+- Expanded the built-in biome resource map with missing keys, trophies, crops, mushrooms, and boss resources, and classified pickaxes separately from axes in generated sorting.
+
 ## 1.2.4
 
 - Added server-synced `fermenter.requiresRoof` and `fermenter.requiresCover` piece overrides so the vanilla roof and 70% cover requirements can be controlled independently.

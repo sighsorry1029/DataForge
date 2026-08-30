@@ -4,7 +4,6 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.CompilerServices;
-using System.Text;
 using BepInEx;
 using HarmonyLib;
 using ServerSync;
@@ -29,8 +28,6 @@ internal static class PieceOverrideManager
     private const int HammerAvailabilityRefreshAttemptLimit = 3;
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
     private const int DefaultPieceSortOrder = 100;
-    private const string ReferenceStateKey = "pieces";
-    private const string ReferenceLogicVersion = "2026-07-21-piece-category-moves-v1";
     private const string HomesteadPluginGuid = "sighsorry.Homestead";
     private const string HomesteadCategoryName = "Homestead";
     private static readonly HashSet<string> IgnoredCategoryNames = new(StringComparer.Ordinal)
@@ -48,8 +45,7 @@ internal static class PieceOverrideManager
     };
 
     private static readonly object StateLock = new();
-    private static readonly Dictionary<string, PieceDefinition> Baselines = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, Piece> BaselinePieces = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, PieceBaseline> Baselines = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<PieceTable, List<GameObject>> PieceTableOrderBaselines = new(ReferenceComparer<PieceTable>.Instance);
     private static readonly Dictionary<GameObject, Piece.PieceCategory> PieceCategoryMoveBaselines = new(ReferenceComparer<GameObject>.Instance);
     private static readonly Dictionary<PieceTable, HashSet<Piece.PieceCategory>> InsertedPieceTableCategories = new(ReferenceComparer<PieceTable>.Instance);
@@ -210,22 +206,31 @@ internal static class PieceOverrideManager
             return;
         }
 
-        bool hasActiveRuntimeDefinitions = HasActiveRuntimeDefinitions();
-        Dictionary<string, int> activeSortOrders = GetActiveSortOrders();
-        Dictionary<string, PieceTableAssignment> activePieceTableAssignments = GetActivePieceTableAssignments();
-        HashSet<string> activeRemovedPieces = GetActiveRemovedPieces();
-        List<PieceCategoryMoveRule> activePieceCategoryMoves = GetActivePieceCategoryMoves();
+        bool pieceOverridesEnabled = DataForgePlugin.PieceOverridesEnabled;
+        List<PieceEntry> activeEntries;
+        PieceCategoryConfiguration activePieceCategoryConfiguration;
         HashSet<string>? changedPieceKeys;
         int pieceCategoryConfigurationVersion;
-        bool hasActivePieceCategoryConfiguration;
         lock (StateLock)
         {
+            activeEntries = ActiveEntries.ToList();
+            activePieceCategoryConfiguration = ActivePieceCategoryConfiguration;
             changedPieceKeys = EntryChanges.ConsumeChangedKeys();
             pieceCategoryConfigurationVersion = PieceCategoryConfigurationVersion;
-            hasActivePieceCategoryConfiguration =
-                DataForgePlugin.PieceOverridesEnabled &&
-                ActivePieceCategoryConfiguration.Tables.Count > 0;
         }
+
+        Dictionary<string, List<PieceEntry>> activeRuntimeEntriesByPiece = pieceOverridesEnabled
+            ? BuildActiveRuntimeEntriesByPiece(activeEntries)
+            : new Dictionary<string, List<PieceEntry>>(StringComparer.OrdinalIgnoreCase);
+        bool hasActiveRuntimeDefinitions = activeRuntimeEntriesByPiece.Count > 0;
+        Dictionary<string, int> activeSortOrders = GetActiveSortOrders(activeEntries, pieceOverridesEnabled);
+        Dictionary<string, PieceTableAssignment> activePieceTableAssignments =
+            GetActivePieceTableAssignments(activeEntries, pieceOverridesEnabled);
+        HashSet<string> activeRemovedPieces = GetActiveRemovedPieces(activeEntries, pieceOverridesEnabled);
+        List<PieceCategoryMoveRule> activePieceCategoryMoves =
+            GetActivePieceCategoryMoves(activePieceCategoryConfiguration, pieceOverridesEnabled);
+        bool hasActivePieceCategoryConfiguration =
+            pieceOverridesEnabled && activePieceCategoryConfiguration.Tables.Count > 0;
 
         bool pieceCategoryConfigurationNeedsApply =
             pieceCategoryConfigurationVersion != AppliedPieceCategoryConfigurationVersion ||
@@ -259,12 +264,12 @@ internal static class PieceOverrideManager
 
         bool shouldTouchRuntime = hasActiveRuntimeDefinitions || RuntimeAppliedPieceKeys.Count > 0;
         HashSet<string>? runtimePieceKeys = shouldTouchRuntime
-            ? GetRuntimeApplyKeys(changedPieceKeys, hasActiveRuntimeDefinitions)
+            ? GetRuntimeApplyKeys(changedPieceKeys, activeRuntimeEntriesByPiece.Keys)
             : null;
         if (shouldTouchRuntime)
         {
             CaptureBaselinesForPiecesIfNeeded(runtimePieceKeys);
-            ApplyToPrefabDefinitions(runtimePieceKeys);
+            ApplyToPrefabDefinitions(activeRuntimeEntriesByPiece, pieceOverridesEnabled, runtimePieceKeys);
         }
 
         List<ResolvedPieceCategoryMove> appliedPieceCategoryMoves = ApplyPieceTableStructure(
@@ -275,7 +280,7 @@ internal static class PieceOverrideManager
 
         if (shouldTouchRuntime)
         {
-            ApplyToLoadedInstances(runtimePieceKeys);
+            ApplyToLoadedInstances(activeRuntimeEntriesByPiece, pieceOverridesEnabled, runtimePieceKeys);
             if (CraftingStationTopologyChanged || StationExtensionTopologyChanged)
             {
                 InvalidateCraftingStationExtensionCaches();
@@ -285,7 +290,7 @@ internal static class PieceOverrideManager
         }
 
         PieceTableCategoryGuard.PruneUnusedCustomCategories();
-        ApplyPieceCategoryConfiguration();
+        ApplyPieceCategoryConfiguration(activePieceCategoryConfiguration, pieceOverridesEnabled);
         foreach (ResolvedPieceCategoryMove move in appliedPieceCategoryMoves)
         {
             PieceTableCategoryGuard.PruneCategoryIfUnused(move.Source, move.SourceCategory);
@@ -301,12 +306,9 @@ internal static class PieceOverrideManager
         ReapplyRecipesIfCraftingStationTopologyChanged();
 
         RuntimeAppliedPieceKeys.Clear();
-        if (hasActiveRuntimeDefinitions)
+        foreach (string key in activeRuntimeEntriesByPiece.Keys)
         {
-            foreach (string key in GetRuntimeApplyKeys(null, hasActiveRuntimeDefinitions))
-            {
-                RuntimeAppliedPieceKeys.Add(key);
-            }
+            RuntimeAppliedPieceKeys.Add(key);
         }
         PieceTableSortWasApplied = hasActiveSortOrders;
         PieceTableMembershipWasApplied =
@@ -315,22 +317,18 @@ internal static class PieceOverrideManager
             hasActivePieceCategoryMoves;
         PieceCategoryConfigurationWasApplied = hasActivePieceCategoryConfiguration;
         AppliedPieceCategoryConfigurationVersion = pieceCategoryConfigurationVersion;
-        CaptureExpectedHammerCategories(activeRemovedPieces);
+        CaptureExpectedHammerCategories(activeEntries, pieceOverridesEnabled, activeRemovedPieces);
         DataForgeLifecycleStep.Run("piece category generated-artifact write", WritePieceCategoryReferenceArtifact);
         VneiRefreshManager.RequestRefresh(DomainName);
     }
 
-    private static void ApplyPieceCategoryConfiguration()
+    private static void ApplyPieceCategoryConfiguration(
+        PieceCategoryConfiguration configuration,
+        bool pieceOverridesEnabled)
     {
-        PieceCategoryConfiguration configuration;
-        lock (StateLock)
-        {
-            configuration = ActivePieceCategoryConfiguration;
-        }
-
         Dictionary<PieceTable, IReadOnlyList<PieceTableCategoryGuard.ConfiguredCategory>> configuredOrders =
             new(ReferenceComparer<PieceTable>.Instance);
-        if (DataForgePlugin.PieceOverridesEnabled)
+        if (pieceOverridesEnabled)
         {
             foreach (KeyValuePair<string, List<PieceCategoryOrderEntry>> tableConfiguration in configuration.Tables)
             {
@@ -586,7 +584,6 @@ internal static class PieceOverrideManager
         if (prefabRestoreSucceeded)
         {
             Baselines.Clear();
-            BaselinePieces.Clear();
         }
         lock (StateLock)
         {
@@ -631,11 +628,11 @@ internal static class PieceOverrideManager
             RestorePieceVisualState(gameObject);
             bool hasStationExtension = false;
             bool hasCraftingStation = false;
-            if (Baselines.TryGetValue(prefabName, out PieceDefinition? baseline))
+            if (Baselines.TryGetValue(prefabName, out PieceBaseline? baseline))
             {
-                hasStationExtension = baseline.StationExtension != null;
-                hasCraftingStation = baseline.CraftingStation != null;
-                ApplyDefinition(gameObject, baseline, adjustHealthZdo: false, applyVisuals: true);
+                hasStationExtension = baseline.Definition.StationExtension != null;
+                hasCraftingStation = baseline.Definition.CraftingStation != null;
+                ApplyDefinition(gameObject, baseline.Definition, adjustHealthZdo: false, applyVisuals: true);
             }
 
             RemoveManagedComponentsIfAbsent(gameObject, hasStationExtension, hasCraftingStation);
@@ -745,11 +742,13 @@ internal static class PieceOverrideManager
             PieceCategoryConfigurationVersion++;
         }
 
-        if (DataForgeFileWatcher.TryRecreate("piece", SetupFileWatcher))
-        {
-            ReloadDebouncer?.Schedule();
-        }
-        else
+        if (!DataForgeFileWatcher.TryRecreate(
+                "piece",
+                () =>
+                {
+                    SetupFileWatcher();
+                    ReloadDebouncer?.Schedule();
+                }))
         {
             ReloadYamlValues();
         }
@@ -1298,21 +1297,7 @@ internal static class PieceOverrideManager
 
     private static bool IsOverrideFile(string path)
     {
-        string extension = Path.GetExtension(path);
-        if (!extension.Equals(".yml", StringComparison.OrdinalIgnoreCase) &&
-            !extension.Equals(".yaml", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        string fileName = Path.GetFileName(path);
-        if (fileName.Equals(ReferenceFileName, StringComparison.OrdinalIgnoreCase) ||
-            fileName.Equals(FullScaffoldFileName, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        return fileName.StartsWith(DomainName, StringComparison.OrdinalIgnoreCase);
+        return DataForgeOverrideFiles.IsDomainOverrideFile(path, $"{DomainName}.yml", DomainName);
     }
 
     private static bool IsPieceCategoryOverrideFile(string path)
@@ -1499,16 +1484,13 @@ internal static class PieceOverrideManager
             return false;
         }
 
-        bool hasBaseline = Baselines.ContainsKey(prefabName);
-        if (hasBaseline &&
-            BaselinePieces.TryGetValue(prefabName, out Piece? baselinePiece) &&
-            ReferenceEquals(baselinePiece, piece))
+        bool hasBaseline = Baselines.TryGetValue(prefabName, out PieceBaseline? baseline);
+        if (hasBaseline && ReferenceEquals(baseline!.Piece, piece))
         {
             return false;
         }
 
-        Baselines[prefabName] = PieceDefinition.From(piece);
-        BaselinePieces[prefabName] = piece;
+        Baselines[prefabName] = new PieceBaseline(piece, PieceDefinition.From(piece));
         return !hasBaseline;
     }
 
@@ -1541,7 +1523,17 @@ internal static class PieceOverrideManager
         }
     }
 
-    private static void ApplyToPrefabDefinitions(HashSet<string>? pieceKeys = null)
+    private static HashSet<string> GetCurrentPrefabPieceNameSet()
+    {
+        return new HashSet<string>(
+            GetPrefabPieces().Select(pair => pair.PrefabName),
+            StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static void ApplyToPrefabDefinitions(
+        Dictionary<string, List<PieceEntry>> activeRuntimeEntriesByPiece,
+        bool pieceOverridesEnabled,
+        HashSet<string>? pieceKeys = null)
     {
         IEnumerable<(string PrefabName, Piece Piece)> pieces = pieceKeys == null
             ? GetPrefabPieces()
@@ -1549,7 +1541,13 @@ internal static class PieceOverrideManager
 
         foreach ((string prefabName, Piece piece) in pieces)
         {
-            ApplyConfiguredState(piece.gameObject, prefabName, adjustHealthZdo: false, applyVisuals: true);
+            ApplyConfiguredState(
+                piece.gameObject,
+                prefabName,
+                activeRuntimeEntriesByPiece,
+                pieceOverridesEnabled,
+                adjustHealthZdo: false,
+                applyVisuals: true);
         }
     }
 
@@ -1571,7 +1569,10 @@ internal static class PieceOverrideManager
         }
     }
 
-    private static void ApplyToLoadedInstances(HashSet<string>? pieceKeys = null)
+    private static void ApplyToLoadedInstances(
+        Dictionary<string, List<PieceEntry>> activeRuntimeEntriesByPiece,
+        bool pieceOverridesEnabled,
+        HashSet<string>? pieceKeys = null)
     {
         foreach (Piece piece in Piece.s_allPieces.ToList())
         {
@@ -1589,7 +1590,13 @@ internal static class PieceOverrideManager
                 continue;
             }
 
-            ApplyConfiguredState(piece.gameObject, prefabName, adjustHealthZdo: true, applyVisuals: false);
+            ApplyConfiguredState(
+                piece.gameObject,
+                prefabName,
+                activeRuntimeEntriesByPiece,
+                pieceOverridesEnabled,
+                adjustHealthZdo: true,
+                applyVisuals: false);
             RefreshLoadedFermenterEnvironmentState(piece.gameObject);
         }
     }
@@ -1618,6 +1625,8 @@ internal static class PieceOverrideManager
     private static void ApplyConfiguredState(
         GameObject gameObject,
         string prefabName,
+        Dictionary<string, List<PieceEntry>> activeRuntimeEntriesByPiece,
+        bool pieceOverridesEnabled,
         bool adjustHealthZdo,
         bool applyVisuals)
     {
@@ -1628,26 +1637,20 @@ internal static class PieceOverrideManager
 
         bool finalHasStationExtension = false;
         bool finalHasCraftingStation = false;
-        if (Baselines.TryGetValue(prefabName, out PieceDefinition? baseline))
+        if (Baselines.TryGetValue(prefabName, out PieceBaseline? baseline))
         {
-            finalHasStationExtension = baseline.StationExtension != null;
-            finalHasCraftingStation = baseline.CraftingStation != null;
-            ApplyDefinition(gameObject, baseline, adjustHealthZdo, applyVisuals);
+            finalHasStationExtension = baseline.Definition.StationExtension != null;
+            finalHasCraftingStation = baseline.Definition.CraftingStation != null;
+            ApplyDefinition(gameObject, baseline.Definition, adjustHealthZdo, applyVisuals);
         }
 
-        if (!DataForgePlugin.PieceOverridesEnabled)
+        if (!pieceOverridesEnabled)
         {
             RemoveManagedComponentsIfAbsent(gameObject, finalHasStationExtension, finalHasCraftingStation);
             return;
         }
 
-        List<PieceEntry>? entries;
-        lock (StateLock)
-        {
-            ActiveRuntimeEntriesByPiece.TryGetValue(prefabName, out entries);
-        }
-
-        if (entries == null)
+        if (!activeRuntimeEntriesByPiece.TryGetValue(prefabName, out List<PieceEntry>? entries))
         {
             RemoveManagedComponentsIfAbsent(gameObject, finalHasStationExtension, finalHasCraftingStation);
             return;
@@ -1680,20 +1683,9 @@ internal static class PieceOverrideManager
         }
     }
 
-    private static bool HasActiveRuntimeDefinitions()
-    {
-        if (!DataForgePlugin.PieceOverridesEnabled)
-        {
-            return false;
-        }
-
-        lock (StateLock)
-        {
-            return ActiveRuntimeEntriesByPiece.Count > 0;
-        }
-    }
-
-    private static HashSet<string> GetRuntimeApplyKeys(HashSet<string>? changedPieceKeys, bool hasActiveRuntimeDefinitions)
+    private static HashSet<string> GetRuntimeApplyKeys(
+        HashSet<string>? changedPieceKeys,
+        IEnumerable<string> activeRuntimeKeys)
     {
         if (changedPieceKeys != null)
         {
@@ -1701,15 +1693,9 @@ internal static class PieceOverrideManager
         }
 
         HashSet<string> keys = new(StringComparer.OrdinalIgnoreCase);
-        if (hasActiveRuntimeDefinitions)
+        foreach (string key in activeRuntimeKeys)
         {
-            lock (StateLock)
-            {
-                foreach (string key in ActiveRuntimeEntriesByPiece.Keys)
-                {
-                    keys.Add(key);
-                }
-            }
+            keys.Add(key);
         }
 
         if (RuntimeAppliedPieceKeys.Count > 0)
@@ -1723,76 +1709,73 @@ internal static class PieceOverrideManager
         return keys;
     }
 
-    private static Dictionary<string, int> GetActiveSortOrders()
+    private static Dictionary<string, int> GetActiveSortOrders(
+        IEnumerable<PieceEntry> entries,
+        bool pieceOverridesEnabled)
     {
         Dictionary<string, int> sortOrders = new(StringComparer.OrdinalIgnoreCase);
-        if (!DataForgePlugin.PieceOverridesEnabled)
+        if (!pieceOverridesEnabled)
         {
             return sortOrders;
         }
 
-        lock (StateLock)
+        foreach (PieceEntry entry in entries)
         {
-            foreach (PieceEntry entry in ActiveEntries)
+            if (entry.Override && !entry.Remove && entry.SortOrder.HasValue)
             {
-                if (entry.Override && !entry.Remove && entry.SortOrder.HasValue)
-                {
-                    sortOrders[entry.Piece] = entry.SortOrder.Value;
-                }
+                sortOrders[entry.Piece] = entry.SortOrder.Value;
             }
         }
 
         return sortOrders;
     }
 
-    private static Dictionary<string, PieceTableAssignment> GetActivePieceTableAssignments()
+    private static Dictionary<string, PieceTableAssignment> GetActivePieceTableAssignments(
+        IEnumerable<PieceEntry> entries,
+        bool pieceOverridesEnabled)
     {
         Dictionary<string, PieceTableAssignment> assignments = new(StringComparer.OrdinalIgnoreCase);
-        if (!DataForgePlugin.PieceOverridesEnabled)
+        if (!pieceOverridesEnabled)
         {
             return assignments;
         }
 
-        lock (StateLock)
+        foreach (PieceEntry entry in entries)
         {
-            foreach (PieceEntry entry in ActiveEntries)
+            string? pieceTable = entry.PieceTable;
+            if (entry.Override &&
+                !entry.Remove &&
+                !string.IsNullOrWhiteSpace(pieceTable) &&
+                !IsIgnoredPieceTableName(pieceTable))
             {
-                string? pieceTable = entry.PieceTable;
-                if (entry.Override &&
-                    !entry.Remove &&
-                    !string.IsNullOrWhiteSpace(pieceTable) &&
-                    !IsIgnoredPieceTableName(pieceTable))
-                {
-                    assignments[entry.Piece] = new PieceTableAssignment(pieceTable!.Trim(), entry.LogContext);
-                }
+                assignments[entry.Piece] = new PieceTableAssignment(pieceTable!.Trim(), entry.LogContext);
             }
         }
 
         return assignments;
     }
 
-    private static List<PieceCategoryMoveRule> GetActivePieceCategoryMoves()
+    private static List<PieceCategoryMoveRule> GetActivePieceCategoryMoves(
+        PieceCategoryConfiguration configuration,
+        bool pieceOverridesEnabled)
     {
         List<PieceCategoryMoveRule> moves = new();
-        if (!DataForgePlugin.PieceOverridesEnabled)
+        if (!pieceOverridesEnabled)
         {
             return moves;
         }
 
-        lock (StateLock)
+        foreach (KeyValuePair<string, List<PieceCategoryOrderEntry>> table in configuration.Tables)
         {
-            foreach (KeyValuePair<string, List<PieceCategoryOrderEntry>> table in ActivePieceCategoryConfiguration.Tables)
+            foreach (PieceCategoryOrderEntry entry in table.Value)
             {
-                foreach (PieceCategoryOrderEntry entry in table.Value)
+                if (entry.SourcePieceTable != null)
                 {
-                    if (entry.SourcePieceTable != null)
-                    {
-                        moves.Add(new PieceCategoryMoveRule(
-                            table.Key,
-                            entry.SourcePieceTable,
-                            entry.Category,
-                            entry.LogContext));
-                    }
+                    moves.Add(new PieceCategoryMoveRule(
+                        table.Key,
+                        entry.SourcePieceTable,
+                        entry.Category,
+                        entry.LogContext));
                 }
             }
         }
@@ -1800,22 +1783,21 @@ internal static class PieceOverrideManager
         return moves;
     }
 
-    private static HashSet<string> GetActiveRemovedPieces()
+    private static HashSet<string> GetActiveRemovedPieces(
+        IEnumerable<PieceEntry> entries,
+        bool pieceOverridesEnabled)
     {
         HashSet<string> removedPieces = new(StringComparer.OrdinalIgnoreCase);
-        if (!DataForgePlugin.PieceOverridesEnabled)
+        if (!pieceOverridesEnabled)
         {
             return removedPieces;
         }
 
-        lock (StateLock)
+        foreach (PieceEntry entry in entries)
         {
-            foreach (PieceEntry entry in ActiveEntries)
+            if (entry.Override && entry.Remove && !string.IsNullOrWhiteSpace(entry.Piece))
             {
-                if (entry.Override && entry.Remove && !string.IsNullOrWhiteSpace(entry.Piece))
-                {
-                    removedPieces.Add(entry.Piece);
-                }
+                removedPieces.Add(entry.Piece);
             }
         }
 
@@ -5204,30 +5186,30 @@ internal static class PieceOverrideManager
         return false;
     }
 
-    private static void CaptureExpectedHammerCategories(ISet<string> removedPieces)
+    private static void CaptureExpectedHammerCategories(
+        IEnumerable<PieceEntry> entries,
+        bool pieceOverridesEnabled,
+        ISet<string> removedPieces)
     {
         Dictionary<string, string> claims = new(StringComparer.OrdinalIgnoreCase);
-        lock (StateLock)
+        if (pieceOverridesEnabled)
         {
-            if (DataForgePlugin.PieceOverridesEnabled)
+            foreach (PieceEntry entry in entries)
             {
-                foreach (PieceEntry entry in ActiveEntries)
+                string prefabName = entry.Piece?.Trim() ?? "";
+                string categoryName = entry.Category?.Trim() ?? "";
+                if (!entry.Override ||
+                    entry.Remove ||
+                    prefabName.Length == 0 ||
+                    categoryName.Length == 0 ||
+                    IsIgnoredCategoryName(categoryName) ||
+                    IsOwnerManagedHomesteadCategoryName(categoryName) ||
+                    removedPieces.Contains(prefabName))
                 {
-                    string prefabName = entry.Piece?.Trim() ?? "";
-                    string categoryName = entry.Category?.Trim() ?? "";
-                    if (!entry.Override ||
-                        entry.Remove ||
-                        prefabName.Length == 0 ||
-                        categoryName.Length == 0 ||
-                        IsIgnoredCategoryName(categoryName) ||
-                        IsOwnerManagedHomesteadCategoryName(categoryName) ||
-                        removedPieces.Contains(prefabName))
-                    {
-                        continue;
-                    }
-
-                    claims[prefabName] = categoryName;
+                    continue;
                 }
+
+                claims[prefabName] = categoryName;
             }
         }
 
@@ -5245,12 +5227,12 @@ internal static class PieceOverrideManager
         foreach (KeyValuePair<string, string> claim in claims)
         {
             if (TryResolvePieceCategory(claim.Value, out Piece.PieceCategory category) &&
-                BaselinePieces.TryGetValue(claim.Key, out Piece? piece) &&
-                piece &&
-                hammerPieceTable.m_pieces?.Contains(piece.gameObject) == true &&
+                Baselines.TryGetValue(claim.Key, out PieceBaseline? baseline) &&
+                baseline.Piece &&
+                hammerPieceTable.m_pieces?.Contains(baseline.Piece.gameObject) == true &&
                 !IsOwnerManagedHomesteadCategory(category))
             {
-                expected[piece] = new HammerCategoryClaim(claim.Value, category);
+                expected[baseline.Piece] = new HammerCategoryClaim(claim.Value, category);
             }
         }
 
@@ -5297,7 +5279,15 @@ internal static class PieceOverrideManager
         }
 
         CraftingStationTopologyChanged = false;
-        RecipeOverrideManager.ApplyCurrentConfiguration();
+        try
+        {
+            RecipeOverrideManager.ApplyCurrentConfiguration();
+        }
+        catch (Exception ex)
+        {
+            DataForgePlugin.Log.LogWarning(
+                $"Could not reapply recipes after a piece crafting-station topology change: {ex.Message}");
+        }
     }
 
     private static void ApplyHealth(WearNTear wearNTear, float maxHealth, bool adjustHealthZdo)
@@ -5325,13 +5315,52 @@ internal static class PieceOverrideManager
     private static void WritePieceCategoryReferenceArtifact()
     {
         if (!DataForgePlugin.UsesLocalAuthorityFiles ||
-            !PieceTablesReady ||
-            ZNetScene.instance == null ||
-            ObjectDB.instance == null)
+            DataForgeWorldLifecycle.IsShuttingDown ||
+            !CanBuildPieceCategoryReferenceArtifact())
         {
             return;
         }
 
+        _ = WritePieceCategoryReferenceArtifactCore();
+    }
+
+    internal static bool TryRegeneratePieceCategoryReferenceFile(
+        out string path,
+        out bool changed,
+        out string error)
+    {
+        path = Path.Combine(ConfigDirectory, PieceCategoryReferenceFileName);
+        changed = false;
+        if (!GeneratedArtifactWriter.CanWriteGeneratedArtifact(
+                CanBuildPieceCategoryReferenceArtifact(),
+                "Piece category game data is not ready yet.",
+                out error))
+        {
+            return false;
+        }
+
+        try
+        {
+            changed = WritePieceCategoryReferenceArtifactCore();
+            error = "";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = $"Could not regenerate the piece category reference file: {ex.Message}";
+            return false;
+        }
+    }
+
+    private static bool CanBuildPieceCategoryReferenceArtifact()
+    {
+        return PieceTablesReady &&
+               ZNetScene.instance != null &&
+               ObjectDB.instance != null;
+    }
+
+    private static bool WritePieceCategoryReferenceArtifactCore()
+    {
         Dictionary<string, List<string>> tables = new(StringComparer.OrdinalIgnoreCase);
         foreach (PieceTable pieceTable in GetAllPieceTables()
                      .OrderBy(GetFriendlyPieceTableName, PieceTableNameComparer.Instance))
@@ -5427,7 +5456,7 @@ internal static class PieceOverrideManager
             "# Listing a category does not create or preserve an empty build tab.",
             "# When Homestead is installed, its owner-managed category is omitted and always remains last."
         }) + Environment.NewLine;
-        GeneratedArtifactWriter.WriteTextIfChanged(
+        return GeneratedArtifactWriter.WriteTextIfChanged(
             Path.Combine(ConfigDirectory, PieceCategoryReferenceFileName),
             header + SparseSerializer.Serialize(tables));
     }
@@ -5482,16 +5511,18 @@ internal static class PieceOverrideManager
                 EnsureConfigDirectoryAndDefaultOverride();
                 CaptureAllBaselinesIfNeeded();
                 PieceTableMembershipSnapshot pieceTableMembership = BuildPieceTableMembershipSnapshot();
+                HashSet<string> currentPieces = GetCurrentPrefabPieceNameSet();
                 var fullEntries = Baselines
-                    .Where(pair => ShouldGeneratePieceEntry(pair.Key, pieceTableMembership))
+                    .Where(pair => currentPieces.Contains(pair.Key) &&
+                                   ShouldGeneratePieceEntry(pair.Key, pieceTableMembership))
                     .Select(pair => new
                     {
-                        Entry = PieceEntry.FromDefinition(pair.Key, pair.Value, GetFullScaffoldPieceTableName(pair.Key, pieceTableMembership)),
+                        Entry = PieceEntry.FromDefinition(pair.Key, pair.Value.Definition, GetFullScaffoldPieceTableName(pair.Key, pieceTableMembership)),
                         OwnerKey = pair.Key,
                         SortKey = DataForgeResourceMap.BuildSortKey(
-                            GetPieceGroupSortRank(pair.Value),
+                            GetPieceGroupSortRank(pair.Value.Definition),
                             DataForgeResourceMap.GetResourceTierSortValue(
-                                pair.Value.Piece?.Resources?.SelectMany(resource => resource.Keys) ?? Array.Empty<string>()),
+                                pair.Value.Definition.Piece?.Resources?.SelectMany(resource => resource.Keys) ?? Array.Empty<string>()),
                             pair.Key)
                     })
                     .OrderBy(pair => pair.SortKey, StringComparer.OrdinalIgnoreCase)
@@ -5508,48 +5539,61 @@ internal static class PieceOverrideManager
             out error);
     }
 
-    private static void WriteReferenceArtifact()
+    internal static bool TryRegenerateReferenceFile(out string path, out bool changed, out string error)
     {
-        if (!CanBuildGeneratedArtifacts())
-        {
-            return;
-        }
-
-        EnsureConfigDirectoryAndDefaultOverride();
-        string sourceSignature = ComputeReferenceSourceSignature();
-        string referencePath = Path.Combine(ConfigDirectory, ReferenceFileName);
-        if (DataForgeReferenceState.ShouldSkip(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion))
-        {
-            return;
-        }
-
-        CaptureAllBaselinesIfNeeded();
-
-        bool wrote = GeneratedArtifactWriter.WriteReferenceIfReady(
-            Baselines.Count > 0,
-            ConfigDirectory,
-            ReferenceFileName,
+        path = Path.Combine(ConfigDirectory, ReferenceFileName);
+        return GeneratedArtifactWriter.TryWriteReferenceIfReady(
+            path,
             DomainName,
             $"{DomainName}.yml",
-            BuildReferenceArtifactContent);
-        if (wrote || File.Exists(referencePath))
+            CanBuildGeneratedArtifacts(),
+            $"{DomainName} game data is not ready yet.",
+            BuildReferenceFileContent,
+            out changed,
+            out error);
+    }
+
+    private static void WriteReferenceArtifact()
+    {
+        if (!DataForgePlugin.UsesLocalAuthorityFiles ||
+            DataForgeWorldLifecycle.IsShuttingDown ||
+            !CanBuildGeneratedArtifacts())
         {
-            DataForgeReferenceState.Record(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
+            return;
         }
+
+        if (!TryRegenerateReferenceFile(out _, out _, out string error))
+        {
+            DataForgePlugin.Log.LogWarning(error);
+        }
+    }
+
+    private static string? BuildReferenceFileContent()
+    {
+        EnsureConfigDirectoryAndDefaultOverride();
+        CaptureAllBaselinesIfNeeded();
+        if (Baselines.Count == 0)
+        {
+            return null;
+        }
+
+        return BuildReferenceArtifactContent();
     }
 
     private static string BuildReferenceArtifactContent()
     {
         PieceTableMembershipSnapshot pieceTableMembership = BuildPieceTableMembershipSnapshot();
+        HashSet<string> currentPieces = GetCurrentPrefabPieceNameSet();
         var referenceEntries = Baselines
-            .Where(pair => ShouldGeneratePieceEntry(pair.Key, pieceTableMembership))
+            .Where(pair => currentPieces.Contains(pair.Key) &&
+                           ShouldGeneratePieceEntry(pair.Key, pieceTableMembership))
             .Select(pair => new
             {
-                Entry = PieceReferenceEntry.From(pair.Key, pair.Value),
+                Entry = PieceReferenceEntry.From(pair.Key, pair.Value.Definition),
                 SortKey = DataForgeResourceMap.BuildSortKey(
-                    GetPieceGroupSortRank(pair.Value),
+                    GetPieceGroupSortRank(pair.Value.Definition),
                     DataForgeResourceMap.GetResourceTierSortValue(
-                        pair.Value.Piece?.Resources?.SelectMany(resource => resource.Keys) ?? Array.Empty<string>()),
+                        pair.Value.Definition.Piece?.Resources?.SelectMany(resource => resource.Keys) ?? Array.Empty<string>()),
                     pair.Key)
             })
             .ToList();
@@ -5568,20 +5612,6 @@ internal static class PieceOverrideManager
                PieceTablesReady &&
                ZNetScene.instance != null &&
                ObjectDB.instance != null;
-    }
-
-    private static string ComputeReferenceSourceSignature()
-    {
-        StringBuilder builder = new();
-        builder.AppendLine(ReferenceLogicVersion);
-        builder.AppendLine(DataForgeReferenceState.BuildFileStamp(Path.Combine(ConfigDirectory, "z_resourcemap.txt")));
-        foreach ((string prefabName, _) in GetPrefabPieces()
-                     .OrderBy(pair => pair.PrefabName, StringComparer.OrdinalIgnoreCase))
-        {
-            builder.AppendLine(prefabName);
-        }
-
-        return DataForgeReferenceState.ComputeStableHash(builder.ToString());
     }
 
     private static int GetPieceGroupSortRank(PieceDefinition definition)
@@ -5992,6 +6022,18 @@ internal static class PieceOverrideManager
                 OriginalIndex = originalIndex
             };
         }
+    }
+
+    private sealed class PieceBaseline
+    {
+        internal PieceBaseline(Piece piece, PieceDefinition definition)
+        {
+            Piece = piece;
+            Definition = definition;
+        }
+
+        internal Piece Piece { get; }
+        internal PieceDefinition Definition { get; }
     }
 
     private sealed class PieceTableAssignment

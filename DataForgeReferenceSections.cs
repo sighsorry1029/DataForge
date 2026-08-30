@@ -29,6 +29,7 @@ internal static class DataForgeReferenceSections
         Func<TSource, TOutput> getOutput,
         ISerializer serializer)
     {
+        DataForgeAssetOwnerCatalog.PrepareForReferenceGeneration();
         List<IGrouping<string, GroupedEntry<TSource>>> sections = entries
             .Select(entry =>
             {
@@ -42,7 +43,9 @@ internal static class DataForgeReferenceSections
             })
             .OrderBy(entry => GetOwnerSortBucket(entry.OwnerName))
             .ThenBy(entry => entry.OwnerName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(entry => entry.OwnerName, StringComparer.Ordinal)
             .ThenBy(entry => entry.SortKey, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(entry => entry.SortKey, StringComparer.Ordinal)
             .GroupBy(entry => entry.OwnerName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -338,11 +341,22 @@ internal static class DataForgeAssetOwnerCatalog
 
     private static readonly object Sync = new();
     private static readonly Dictionary<string, string> AssetOwners = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> AmbiguousAssetNames = new(StringComparer.OrdinalIgnoreCase);
     private static string _loadedSignature = "";
+    private static bool _mappingsInitialized;
+
+    internal static void PrepareForReferenceGeneration()
+    {
+        EnsureMappingsLoaded();
+    }
 
     internal static string GetOwnerName(string assetName)
     {
-        EnsureMappingsLoaded();
+        if (!_mappingsInitialized)
+        {
+            EnsureMappingsLoaded();
+        }
+
         foreach (string candidate in EnumerateLookupCandidates(assetName))
         {
             if (AssetOwners.TryGetValue(candidate, out string ownerName) &&
@@ -358,21 +372,26 @@ internal static class DataForgeAssetOwnerCatalog
     private static void EnsureMappingsLoaded()
     {
         string signature = BuildSignature();
-        if (string.Equals(signature, _loadedSignature, StringComparison.Ordinal))
+        if (_mappingsInitialized &&
+            string.Equals(signature, _loadedSignature, StringComparison.Ordinal))
         {
             return;
         }
 
         lock (Sync)
         {
-            if (string.Equals(signature, _loadedSignature, StringComparison.Ordinal))
+            if (_mappingsInitialized &&
+                string.Equals(signature, _loadedSignature, StringComparison.Ordinal))
             {
                 return;
             }
 
             AssetOwners.Clear();
+            AmbiguousAssetNames.Clear();
             List<PluginResourceSnapshot> plugins = GetPluginResources();
-            foreach (AssetBundle assetBundle in AssetBundle.GetAllLoadedAssetBundles())
+            foreach (AssetBundle assetBundle in AssetBundle.GetAllLoadedAssetBundles()
+                         .OrderBy(bundle => bundle.name ?? "", StringComparer.OrdinalIgnoreCase)
+                         .ThenBy(bundle => bundle.name ?? "", StringComparer.Ordinal))
             {
                 string bundleName = assetBundle.name ?? "";
                 if (bundleName.Length == 0)
@@ -395,7 +414,18 @@ internal static class DataForgeAssetOwnerCatalog
                     }
 
                     string assetName = Path.GetFileNameWithoutExtension(assetPath);
-                    if (!string.IsNullOrWhiteSpace(assetName))
+                    if (string.IsNullOrWhiteSpace(assetName) || AmbiguousAssetNames.Contains(assetName))
+                    {
+                        continue;
+                    }
+
+                    if (AssetOwners.TryGetValue(assetName, out string existingOwner) &&
+                        !string.Equals(existingOwner, ownerName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        AssetOwners.Remove(assetName);
+                        AmbiguousAssetNames.Add(assetName);
+                    }
+                    else
                     {
                         AssetOwners[assetName] = ownerName;
                     }
@@ -403,7 +433,10 @@ internal static class DataForgeAssetOwnerCatalog
             }
 
             _loadedSignature = signature;
-            DataForgePlugin.Log.LogDebug($"Tracked {AssetOwners.Count} mod asset owner mapping(s) for reference sections.");
+            _mappingsInitialized = true;
+            DataForgePlugin.Log.LogDebug(
+                $"Tracked {AssetOwners.Count} mod asset owner mapping(s) for reference sections; " +
+                $"{AmbiguousAssetNames.Count} ambiguous name(s) remain untracked.");
         }
     }
 
@@ -452,6 +485,10 @@ internal static class DataForgeAssetOwnerCatalog
                 };
             })
             .Where(plugin => plugin.OwnerName.Length > 0)
+            .OrderBy(plugin => plugin.PluginGuid, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(plugin => plugin.PluginGuid, StringComparer.Ordinal)
+            .ThenBy(plugin => plugin.OwnerName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(plugin => plugin.OwnerName, StringComparer.Ordinal)
             .ToList();
     }
 
@@ -515,7 +552,8 @@ internal static class DataForgeAssetOwnerCatalog
         IEnumerable<string> bundleTokens = AssetBundle.GetAllLoadedAssetBundles()
             .Select(bundle => bundle.name ?? "")
             .Where(name => name.Length > 0)
-            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase);
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(name => name, StringComparer.Ordinal);
         IEnumerable<string> pluginTokens = Chainloader.PluginInfos.Values
             .Select(pluginInfo =>
             {
@@ -533,7 +571,8 @@ internal static class DataForgeAssetOwnerCatalog
 
                 return $"{pluginGuid}:{pluginName}:{assemblyName}";
             })
-            .OrderBy(token => token, StringComparer.OrdinalIgnoreCase);
+            .OrderBy(token => token, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(token => token, StringComparer.Ordinal);
 
         return string.Join("|", bundleTokens) + "||" + string.Join("|", pluginTokens);
     }

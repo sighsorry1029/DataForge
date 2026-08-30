@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
 using HarmonyLib;
@@ -238,6 +239,30 @@ internal static class DataForgeCookingStationRemoveDoneItemAmountMultiplierPatch
 [HarmonyPatch(typeof(InventoryGui), nameof(InventoryGui.DoCrafting))]
 internal static class DataForgeInventoryGuiDoCraftingAmountMultiplierPatch
 {
+    private readonly struct CraftAmountReservation
+    {
+        internal CraftAmountReservation(Inventory inventory, string prefabName, int originalStack, int adjustedStack)
+        {
+            Inventory = inventory;
+            PrefabName = prefabName;
+            OriginalStack = originalStack;
+            AdjustedStack = adjustedStack;
+        }
+
+        internal Inventory Inventory { get; }
+        internal string PrefabName { get; }
+        internal int OriginalStack { get; }
+        internal int AdjustedStack { get; }
+    }
+
+    [ThreadStatic]
+    private static CraftAmountReservation? PendingCraftAmount;
+    private static bool MissingCraftAmountReservationReported;
+
+    private static readonly MethodInfo? CanAddItemMethod = AccessTools.DeclaredMethod(
+        typeof(Inventory),
+        nameof(Inventory.CanAddItem),
+        new[] { typeof(GameObject), typeof(int) });
     private static readonly MethodInfo? AddItemMethod = AccessTools.DeclaredMethod(
         typeof(Inventory),
         nameof(Inventory.AddItem),
@@ -255,32 +280,116 @@ internal static class DataForgeInventoryGuiDoCraftingAmountMultiplierPatch
 
     private static readonly MethodInfo AddItemWithMultiplierMethod =
         AccessTools.DeclaredMethod(typeof(DataForgeInventoryGuiDoCraftingAmountMultiplierPatch), nameof(AddItemWithMultiplier));
+    private static readonly MethodInfo CanAddCraftedItemWithMultiplierMethod =
+        AccessTools.DeclaredMethod(typeof(DataForgeInventoryGuiDoCraftingAmountMultiplierPatch), nameof(CanAddCraftedItemWithMultiplier));
 
+    [HarmonyPriority(Priority.First)]
+    private static void Prefix()
+    {
+        PendingCraftAmount = null;
+    }
+
+    [HarmonyPriority(Priority.Last)]
+    private static Exception? Finalizer(Exception? __exception)
+    {
+        PendingCraftAmount = null;
+        return __exception;
+    }
+
+    [HarmonyPriority(Priority.Last)]
     private static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
     {
-        int replacements = 0;
-        foreach (CodeInstruction instruction in instructions)
+        List<CodeInstruction> patched = instructions.ToList();
+        List<int> capacityChecks = new();
+        List<int> addItemCalls = new();
+        for (int index = 0; index < patched.Count; index++)
         {
-            if (AddItemMethod != null && instruction.Calls(AddItemMethod))
+            CodeInstruction instruction = patched[index];
+            if (CanAddItemMethod != null && instruction.Calls(CanAddItemMethod))
             {
-                CodeInstruction replacement = new(instruction)
-                {
-                    opcode = OpCodes.Call,
-                    operand = AddItemWithMultiplierMethod
-                };
-                replacements++;
-                yield return replacement;
+                capacityChecks.Add(index);
                 continue;
             }
 
-            yield return instruction;
+            if (AddItemMethod != null && instruction.Calls(AddItemMethod))
+            {
+                addItemCalls.Add(index);
+            }
         }
 
-        if (replacements != 1)
+        if (capacityChecks.Count != 1 || addItemCalls.Count != 1)
         {
             DataForgePlugin.Log.LogWarning(
-                $"Crafting output multiplier patch expected one Inventory.AddItem call but replaced {replacements}; crafting output multipliers may be unavailable.");
+                $"Crafting output multiplier patch expected one capacity check and one Inventory.AddItem call but found " +
+                $"{capacityChecks.Count} and {addItemCalls.Count}; the crafting multiplier patch was disabled safely.");
+            return patched;
         }
+
+        patched[capacityChecks[0]] = new CodeInstruction(patched[capacityChecks[0]])
+        {
+            opcode = OpCodes.Call,
+            operand = CanAddCraftedItemWithMultiplierMethod
+        };
+        patched[addItemCalls[0]] = new CodeInstruction(patched[addItemCalls[0]])
+        {
+            opcode = OpCodes.Call,
+            operand = AddItemWithMultiplierMethod
+        };
+        return patched;
+    }
+
+    private static bool CanAddCraftedItemWithMultiplier(Inventory inventory, GameObject prefab, int stack)
+    {
+        int originalStack = stack;
+        stack = ItemOverrideManager.ApplyAcquisitionAmountMultiplier(prefab, originalStack);
+        if (!HasExactCraftCapacity(inventory, prefab, stack, quality: 1))
+        {
+            return false;
+        }
+
+        PendingCraftAmount = new CraftAmountReservation(
+            inventory,
+            prefab != null ? prefab.name : "",
+            originalStack,
+            stack);
+        return true;
+    }
+
+    private static bool HasExactCraftCapacity(
+        Inventory inventory,
+        GameObject? prefab,
+        int stack,
+        int quality)
+    {
+        if (prefab == null || stack <= 0 || !inventory.CanAddItem(prefab, stack))
+        {
+            return false;
+        }
+
+        ItemDrop? itemDrop = prefab.GetComponent<ItemDrop>();
+        if (itemDrop?.m_itemData?.m_shared == null)
+        {
+            return false;
+        }
+
+        ItemDrop.ItemData.SharedData shared = itemDrop.m_itemData.m_shared;
+        byte outputWorldLevel = (byte)Game.m_worldLevel;
+        List<ItemDrop.ItemData> items = inventory.GetAllItems();
+        int freeSlots = Math.Max(0, inventory.GetWidth() * inventory.GetHeight() - items.Count);
+        long capacity = (long)freeSlots *
+                        Math.Max(1, shared.m_maxStackSize);
+        foreach (ItemDrop.ItemData item in items)
+        {
+            if (item != null &&
+                item.m_shared.m_name == shared.m_name &&
+                item.m_quality == quality &&
+                item.m_worldLevel == outputWorldLevel)
+            {
+                capacity += Math.Max(0, item.m_shared.m_maxStackSize - item.m_stack);
+            }
+        }
+
+        return capacity >= stack;
     }
 
     private static ItemDrop.ItemData AddItemWithMultiplier(
@@ -294,8 +403,43 @@ internal static class DataForgeInventoryGuiDoCraftingAmountMultiplierPatch
         Vector2i position,
         bool pickedUp)
     {
-        GameObject? prefab = ObjectDB.instance != null ? ObjectDB.instance.GetItemPrefab(name) : null;
-        stack = ItemOverrideManager.ApplyAcquisitionAmountMultiplier(prefab, stack);
+        bool isUpgrade = position.x >= 0 &&
+                         position.y >= 0 &&
+                         position.x < inventory.GetWidth() &&
+                         position.y < inventory.GetHeight();
+        if (!isUpgrade)
+        {
+            CraftAmountReservation? reservation = PendingCraftAmount;
+            PendingCraftAmount = null;
+            bool reservationMatches = reservation.HasValue &&
+                                      ReferenceEquals(reservation.Value.Inventory, inventory) &&
+                                      string.Equals(reservation.Value.PrefabName, name, StringComparison.Ordinal) &&
+                                      reservation.Value.OriginalStack == stack &&
+                                      quality == 1;
+            if (reservationMatches)
+            {
+                stack = reservation!.Value.AdjustedStack;
+            }
+            else
+            {
+                if (!MissingCraftAmountReservationReported)
+                {
+                    MissingCraftAmountReservationReported = true;
+                    DataForgePlugin.Log.LogWarning(
+                        "Crafting output multiplier reservation was unavailable; the vanilla amount will only be added when it fits completely.");
+                }
+
+                if (!HasExactCraftCapacity(
+                        inventory,
+                        ObjectDB.instance != null ? ObjectDB.instance.GetItemPrefab(name) : null,
+                        stack,
+                        quality))
+                {
+                    return null!;
+                }
+            }
+        }
+
         return inventory.AddItem(name, stack, quality, variant, crafterID, crafterName, position, pickedUp);
     }
 }

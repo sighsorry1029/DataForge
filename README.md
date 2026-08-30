@@ -246,6 +246,20 @@ Reference files are meant for browsing and copy-paste edits:
 - piece references use tier sorting
 - `pieceCategory.reference.yml` records the effective per-hammer category order and labels
 
+Regenerate one compact reference, or all references, after the relevant game data is ready:
+
+```text
+dataforge:refer item
+dataforge:refer recipe
+dataforge:refer effect
+dataforge:refer piece
+dataforge:refer pieceCategory
+dataforge:refer material
+dataforge:refer all
+```
+
+The command recalculates the selected reference without deleting cache files, and leaves an unchanged file untouched.
+
 Full scaffold files are generated only by command:
 
 ```text
@@ -257,6 +271,8 @@ dataforge:full all
 ```
 
 Full scaffold files expose the supported field surface more completely and are useful when a reference entry hides a default value you want to override.
+
+Both commands execute on the server/source-of-truth host. A client listed in the dedicated server's `adminlist.txt` can enter them remotely; Valheim validates the administrator and runs the command on the server, so the server's DataForge files are updated. Detailed results are printed to the server console rather than returned to the client.
 
 ## Localization
 

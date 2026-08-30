@@ -5,6 +5,7 @@ namespace DataForge;
 internal static class DataForgeConsoleCommands
 {
     private const string WriteFullCommandName = "dataforge:full";
+    private const string WriteReferenceCommandName = "dataforge:refer";
     private static readonly List<string> FullTabOptions = new()
     {
         "item",
@@ -13,7 +14,22 @@ internal static class DataForgeConsoleCommands
         "piece",
         "all"
     };
+    private static readonly List<string> ReferenceTabOptions = new()
+    {
+        "item",
+        "recipe",
+        "effect",
+        "piece",
+        "pieceCategory",
+        "material",
+        "all"
+    };
     private static bool _registered;
+
+    private delegate bool TryRegenerateReference(
+        out string path,
+        out bool changed,
+        out string error);
 
     internal static void Register()
     {
@@ -27,12 +43,28 @@ internal static class DataForgeConsoleCommands
             WriteFullCommandName,
             "Write DataForge full scaffold YAML files with explicit defaults. Usage: dataforge:full [item|recipe|effect|piece|all]",
             WriteFullScaffoldFiles,
-            optionsFetcher: GetFullTabOptions);
+            optionsFetcher: GetFullTabOptions,
+            onlyServer: true,
+            remoteCommand: true,
+            onlyAdmin: true);
+        new Terminal.ConsoleCommand(
+            WriteReferenceCommandName,
+            "Regenerate DataForge compact reference files. Usage: dataforge:refer [item|recipe|effect|piece|pieceCategory|material|all]",
+            WriteReferenceFiles,
+            optionsFetcher: GetReferenceTabOptions,
+            onlyServer: true,
+            remoteCommand: true,
+            onlyAdmin: true);
     }
 
     private static List<string> GetFullTabOptions()
     {
         return FullTabOptions;
+    }
+
+    private static List<string> GetReferenceTabOptions()
+    {
+        return ReferenceTabOptions;
     }
 
     private static void WriteFullScaffoldFiles(Terminal.ConsoleEventArgs args)
@@ -89,6 +121,72 @@ internal static class DataForgeConsoleCommands
                 args.Context?.AddString(pieceError);
             }
         }
+    }
+
+    private static void WriteReferenceFiles(Terminal.ConsoleEventArgs args)
+    {
+        string scope = args.Length >= 2 ? (args[1] ?? "").Trim().ToLowerInvariant() : "all";
+        if (scope.Length == 0)
+        {
+            scope = "all";
+        }
+
+        switch (scope)
+        {
+            case "all":
+                WriteReferenceResult(args, "item", ItemOverrideManager.TryRegenerateReferenceFile);
+                WriteReferenceResult(args, "recipe", RecipeOverrideManager.TryRegenerateReferenceFile);
+                WriteReferenceResult(args, "effect", StatusEffectOverrideManager.TryRegenerateReferenceFile);
+                WriteReferenceResult(args, "piece", PieceOverrideManager.TryRegenerateReferenceFile);
+                WriteReferenceResult(args, "piece category", PieceOverrideManager.TryRegeneratePieceCategoryReferenceFile);
+                WriteReferenceResult(args, "material", MaterialReferenceWriter.TryRegenerateReferenceFile);
+                return;
+            case "item":
+            case "items":
+                WriteReferenceResult(args, "item", ItemOverrideManager.TryRegenerateReferenceFile);
+                return;
+            case "recipe":
+            case "recipes":
+                WriteReferenceResult(args, "recipe", RecipeOverrideManager.TryRegenerateReferenceFile);
+                return;
+            case "effect":
+            case "effects":
+                WriteReferenceResult(args, "effect", StatusEffectOverrideManager.TryRegenerateReferenceFile);
+                return;
+            case "piece":
+            case "pieces":
+                WriteReferenceResult(args, "piece", PieceOverrideManager.TryRegenerateReferenceFile);
+                return;
+            case "piececategory":
+            case "piece-category":
+            case "category":
+            case "categories":
+                WriteReferenceResult(args, "piece category", PieceOverrideManager.TryRegeneratePieceCategoryReferenceFile);
+                return;
+            case "material":
+            case "materials":
+                WriteReferenceResult(args, "material", MaterialReferenceWriter.TryRegenerateReferenceFile);
+                return;
+            default:
+                args.Context?.AddString($"Syntax: {WriteReferenceCommandName} [item|recipe|effect|piece|pieceCategory|material|all]");
+                return;
+        }
+    }
+
+    private static void WriteReferenceResult(
+        Terminal.ConsoleEventArgs args,
+        string label,
+        TryRegenerateReference regenerate)
+    {
+        if (!regenerate(out string path, out bool changed, out string error))
+        {
+            args.Context?.AddString(error);
+            return;
+        }
+
+        args.Context?.AddString(changed
+            ? $"Wrote {label} reference to {path}"
+            : $"{label} reference is already up to date at {path}");
     }
 
     private static bool TryParseScope(

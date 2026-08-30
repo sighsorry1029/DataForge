@@ -83,6 +83,11 @@ internal static class DataForgeItemSortClassifier
             return Group(Melee, 0, SwordDetail(itemName, shared));
         }
 
+        if (MatchPickaxe(itemName, shared))
+        {
+            return Group(Melee, 8);
+        }
+
         if (MatchAxe(itemName, shared))
         {
             return Group(Melee, 1, AxeDetail(itemName, shared));
@@ -116,11 +121,6 @@ internal static class DataForgeItemSortClassifier
         if (MatchShield(itemName, shared))
         {
             return Group(Melee, 7, ShieldDetail(itemName));
-        }
-
-        if (MatchPickaxe(itemName, shared))
-        {
-            return Group(Melee, 8);
         }
 
         if (MatchTool(itemName, shared))
@@ -238,6 +238,11 @@ internal static class DataForgeItemSortClassifier
             return Group(Melee, 0, SwordDetail(itemName, null));
         }
 
+        if (HasToken(itemName, "pickaxe"))
+        {
+            return Group(Melee, 8);
+        }
+
         if (HasToken(itemName, "axe", "battleaxe"))
         {
             return Group(Melee, 1, AxeDetail(itemName, null));
@@ -271,11 +276,6 @@ internal static class DataForgeItemSortClassifier
         if (HasToken(itemName, "shield", "buckler"))
         {
             return Group(Melee, 7, ShieldDetail(itemName));
-        }
-
-        if (HasToken(itemName, "pickaxe"))
-        {
-            return Group(Melee, 8);
         }
 
         if (HasToken(itemName, "hammer", "hoe", "cultivator", "torch", "fishingrod", "tankard"))

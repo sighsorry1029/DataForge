@@ -15,7 +15,7 @@ namespace DataForge;
 public class DataForgePlugin : BaseUnityPlugin
 {
     internal const string ModName = "DataForge";
-    internal const string ModVersion = "1.2.4";
+    internal const string ModVersion = "1.2.5";
     internal const string Author = "sighsorry";
     internal const string ModGUID = $"{Author}.{ModName}";
 
@@ -238,6 +238,9 @@ public class DataForgePlugin : BaseUnityPlugin
 
     private void OnDestroy()
     {
+        DataForgeLifecycleStep.Run(
+            "file watcher recovery cleanup",
+            DataForgeFileWatcher.CancelPendingRecreates);
         DataForgeLifecycleStep.Run("configuration save", () => SaveWithRespectToConfigSet());
         DataForgeLifecycleStep.Run(
             "configuration watcher cleanup",
@@ -282,13 +285,14 @@ public class DataForgePlugin : BaseUnityPlugin
     private static void OnSourceOfTruthChanged(bool isSourceOfTruth)
     {
         DataForgeIconSync.OnSourceOfTruthChanged();
+        _sourceOfTruthFileModeReady = false;
         if (isSourceOfTruth)
         {
             EnsureSourceOfTruthFileMode();
             return;
         }
 
-        _sourceOfTruthFileModeReady = false;
+        CancelDomainWatcherRecovery();
         DataForgeLifecycleStep.Run(
             "status-effect local-file cleanup",
             StatusEffectOverrideManager.SetupFileWatcher);
@@ -305,40 +309,74 @@ public class DataForgePlugin : BaseUnityPlugin
 
     internal static void EnsureSourceOfTruthFileMode()
     {
-        if (!UsesLocalAuthorityFiles || _sourceOfTruthFileModeReady)
+        if (!UsesLocalAuthorityFiles)
+        {
+            return;
+        }
+
+        DataForgeLifecycleStep.Run(
+            "localization source-of-truth setup",
+            () => _ = LocalizationOverrideManager.EnsureSourceOfTruthFileMode());
+        if (_sourceOfTruthFileModeReady)
         {
             return;
         }
 
         bool ready = true;
-        ready &= DataForgeLifecycleStep.Run(
-            "localization source-of-truth setup",
-            LocalizationOverrideManager.EnsureSourceOfTruthFileMode);
-        ready &= DataForgeLifecycleStep.Run(
+        bool statusEffectWatcherReady = DataForgeLifecycleStep.Run(
             "status-effect source-of-truth watcher setup",
             StatusEffectOverrideManager.SetupFileWatcher);
+        ready &= statusEffectWatcherReady;
+        if (statusEffectWatcherReady)
+        {
+            DataForgeFileWatcher.CancelPendingRecreate("status-effect");
+        }
         ready &= DataForgeLifecycleStep.Run(
             "status-effect source-of-truth reload",
             StatusEffectOverrideManager.ReloadFromDiskAndSync);
-        ready &= DataForgeLifecycleStep.Run(
+        bool itemWatcherReady = DataForgeLifecycleStep.Run(
             "item source-of-truth watcher setup",
             ItemOverrideManager.SetupFileWatcher);
+        ready &= itemWatcherReady;
+        if (itemWatcherReady)
+        {
+            DataForgeFileWatcher.CancelPendingRecreate("item");
+        }
         ready &= DataForgeLifecycleStep.Run(
             "item source-of-truth reload",
             ItemOverrideManager.ReloadFromDiskAndSync);
-        ready &= DataForgeLifecycleStep.Run(
+        bool recipeWatcherReady = DataForgeLifecycleStep.Run(
             "recipe source-of-truth watcher setup",
             RecipeOverrideManager.SetupFileWatcher);
+        ready &= recipeWatcherReady;
+        if (recipeWatcherReady)
+        {
+            DataForgeFileWatcher.CancelPendingRecreate("recipe");
+        }
         ready &= DataForgeLifecycleStep.Run(
             "recipe source-of-truth reload",
             RecipeOverrideManager.ReloadFromDiskAndSync);
-        ready &= DataForgeLifecycleStep.Run(
+        bool pieceWatcherReady = DataForgeLifecycleStep.Run(
             "piece source-of-truth watcher setup",
             PieceOverrideManager.SetupFileWatcher);
+        ready &= pieceWatcherReady;
+        if (pieceWatcherReady)
+        {
+            DataForgeFileWatcher.CancelPendingRecreate("piece");
+        }
         ready &= DataForgeLifecycleStep.Run(
             "piece source-of-truth reload",
             PieceOverrideManager.ReloadFromDiskAndSync);
         _sourceOfTruthFileModeReady = ready;
+    }
+
+    private static void CancelDomainWatcherRecovery()
+    {
+        DataForgeFileWatcher.CancelPendingRecreate("localization");
+        DataForgeFileWatcher.CancelPendingRecreate("status-effect");
+        DataForgeFileWatcher.CancelPendingRecreate("item");
+        DataForgeFileWatcher.CancelPendingRecreate("recipe");
+        DataForgeFileWatcher.CancelPendingRecreate("piece");
     }
 
     private void Update()
@@ -377,11 +415,13 @@ public class DataForgePlugin : BaseUnityPlugin
     private void OnConfigWatcherError(object sender, ErrorEventArgs e)
     {
         Log.LogWarning($"Configuration file watcher lost events; scheduling a full reload: {e.GetException().Message}");
-        if (DataForgeFileWatcher.TryRecreate("configuration", SetupWatcher))
-        {
-            _configReloadDebouncer?.Schedule();
-        }
-        else
+        if (!DataForgeFileWatcher.TryRecreate(
+                "configuration",
+                () =>
+                {
+                    SetupWatcher();
+                    _configReloadDebouncer?.Schedule();
+                }))
         {
             ReloadConfigValues();
         }

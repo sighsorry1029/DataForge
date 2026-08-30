@@ -42,8 +42,17 @@ internal static class VneiPrefabCleanupGuard
             return;
         }
 
-        harmony.Patch(indexAllMethod, prefix: new HarmonyMethod(prefixMethod));
-        VneiIndexAllPatchInstalled = true;
+        try
+        {
+            harmony.Patch(indexAllMethod, prefix: new HarmonyMethod(prefixMethod));
+            VneiIndexAllPatchInstalled = true;
+        }
+        catch (Exception ex)
+        {
+            VneiIndexAllPatchFailed = true;
+            DataForgePlugin.Log.LogWarning(
+                $"Could not install VNEI invalid prefab cleanup patch: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     internal static void RemoveInvalidEntriesBeforeVnei()

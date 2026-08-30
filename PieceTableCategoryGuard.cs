@@ -387,28 +387,22 @@ internal static class PieceTableCategoryGuard
             return;
         }
 
-        for (int index = pieceTable.m_categories.Count - 2; index >= 0; index--)
+        List<CategorySlot> current = CaptureCategorySlots(pieceTable);
+        List<CategorySlot> ordered = current
+            .Where(slot => !OwnerManagedCategories.Contains(slot.Category))
+            .Concat(current.Where(slot => OwnerManagedCategories.Contains(slot.Category)))
+            .ToList();
+        if (CategorySlotsMatch(current, ordered))
         {
-            Piece.PieceCategory category = pieceTable.m_categories[index];
-            if (!OwnerManagedCategories.Contains(category))
-            {
-                continue;
-            }
+            return;
+        }
 
-            string label = pieceTable.m_categoryLabels != null && index < pieceTable.m_categoryLabels.Count
-                ? pieceTable.m_categoryLabels[index]
-                : GetLabel(category);
-            pieceTable.m_categories.RemoveAt(index);
-            pieceTable.m_categories.Add(category);
-            if (pieceTable.m_categoryLabels != null)
-            {
-                if (index < pieceTable.m_categoryLabels.Count)
-                {
-                    pieceTable.m_categoryLabels.RemoveAt(index);
-                }
-
-                pieceTable.m_categoryLabels.Add(label);
-            }
+        pieceTable.m_categories.Clear();
+        pieceTable.m_categories.AddRange(ordered.Select(static slot => slot.Category));
+        if (pieceTable.m_categoryLabels != null)
+        {
+            pieceTable.m_categoryLabels.Clear();
+            pieceTable.m_categoryLabels.AddRange(ordered.Select(static slot => slot.Label));
         }
     }
 

@@ -5,6 +5,30 @@ namespace DataForge;
 
 internal static class GeneratedArtifactWriter
 {
+    internal static bool CanWriteGeneratedArtifact(bool isReady, string notReadyError, out string error)
+    {
+        if (!DataForgePlugin.UsesLocalAuthorityFiles)
+        {
+            error = "DataForge generated files can only be written by the local source-of-truth host.";
+            return false;
+        }
+
+        if (DataForgeWorldLifecycle.IsShuttingDown)
+        {
+            error = "DataForge generated files cannot be written while the world is shutting down.";
+            return false;
+        }
+
+        if (!isReady)
+        {
+            error = notReadyError;
+            return false;
+        }
+
+        error = "";
+        return true;
+    }
+
     internal static string GeneratedHeader(string domainName, string overrideFileName, string label)
     {
         return
@@ -36,41 +60,50 @@ internal static class GeneratedArtifactWriter
         Func<string> buildContent,
         out string error)
     {
-        if (!isReady)
+        if (!CanWriteGeneratedArtifact(isReady, notReadyError, out error))
         {
-            error = notReadyError;
             return false;
         }
 
         return TryWriteFullScaffold(path, domainName, buildContent, out error);
     }
 
-    internal static bool WriteReference(
-        string directory,
-        string referenceFileName,
+    internal static bool TryWriteReferenceIfReady(
+        string path,
         string domainName,
         string overrideFileName,
-        string content)
-    {
-        return WriteTextIfChanged(
-            Path.Combine(directory, referenceFileName),
-            GeneratedHeader(domainName, overrideFileName, "compact lookup") + content);
-    }
-
-    internal static bool WriteReferenceIfReady(
         bool isReady,
-        string directory,
-        string referenceFileName,
-        string domainName,
-        string overrideFileName,
-        Func<string> buildContent)
+        string notReadyError,
+        Func<string?> buildContent,
+        out bool changed,
+        out string error)
     {
-        if (!isReady)
+        changed = false;
+        if (!CanWriteGeneratedArtifact(isReady, notReadyError, out error))
         {
             return false;
         }
 
-        return WriteReference(directory, referenceFileName, domainName, overrideFileName, buildContent());
+        try
+        {
+            string? content = buildContent();
+            if (content == null)
+            {
+                error = $"No {domainName} game data is available for the reference file.";
+                return false;
+            }
+
+            changed = WriteTextIfChanged(
+                path,
+                GeneratedHeader(domainName, overrideFileName, "compact lookup") + content);
+            error = "";
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = $"Could not regenerate the {domainName} reference file: {ex.Message}";
+            return false;
+        }
     }
 
     internal static bool WriteTextIfChanged(string path, string content)

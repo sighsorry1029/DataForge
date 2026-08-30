@@ -7,6 +7,30 @@ namespace DataForge;
 
 internal static class DataForgeOverrideFiles
 {
+    internal static bool IsDomainOverrideFile(
+        string path,
+        string baseFileName,
+        string fileNamePrefix)
+    {
+        string extension = Path.GetExtension(path);
+        if (!extension.Equals(".yml", StringComparison.OrdinalIgnoreCase) &&
+            !extension.Equals(".yaml", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        string fileName = Path.GetFileName(path);
+        if (fileName.Equals(baseFileName, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        string stem = Path.GetFileNameWithoutExtension(fileName);
+        string prefixedStem = fileNamePrefix + "_";
+        return stem.Length > prefixedStem.Length &&
+               stem.StartsWith(prefixedStem, StringComparison.OrdinalIgnoreCase);
+    }
+
     internal static IEnumerable<string> GetOverrideFiles(string directory, Func<string, bool> isOverrideFile)
     {
         if (!Directory.Exists(directory))

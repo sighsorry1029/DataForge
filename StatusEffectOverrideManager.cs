@@ -4,7 +4,6 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Text;
 using BepInEx;
 using HarmonyLib;
 using ServerSync;
@@ -25,12 +24,11 @@ internal static class StatusEffectOverrideManager
     private const string SyncedPayloadKey = "effects";
     private const string ItemIconPrefix = "item:";
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
-    private const string ReferenceStateKey = "effects";
-    private const string ReferenceLogicVersion = "2026-07-24-effect-reference-state-v7";
     private const string MagicPluginAssemblyName = "MagicPlugin";
 
     private static readonly object StateLock = new();
     private static readonly Dictionary<string, BaselineSnapshot> Baselines = new(StringComparer.OrdinalIgnoreCase);
+    private static ObjectDB? BaselineObjectDb;
     private static readonly Dictionary<string, OwnedClone> CreatedClones = new(StringComparer.OrdinalIgnoreCase);
     private static readonly List<StatusEffect> RetiredEffectClones = new();
     private static readonly HashSet<string> RuntimeAppliedEffectKeys = new(StringComparer.OrdinalIgnoreCase);
@@ -165,6 +163,7 @@ internal static class StatusEffectOverrideManager
         }
 
         ObjectDbReady = true;
+        PruneBaselinesForNewObjectDb();
         lock (StateLock)
         {
             ActiveMaxStats = BuildMaxStatsOverrides(ActiveEntries);
@@ -833,11 +832,13 @@ internal static class StatusEffectOverrideManager
             EntryChanges.RequireFullApply();
         }
 
-        if (DataForgeFileWatcher.TryRecreate("status-effect", SetupFileWatcher))
-        {
-            ReloadDebouncer?.Schedule();
-        }
-        else
+        if (!DataForgeFileWatcher.TryRecreate(
+                "status-effect",
+                () =>
+                {
+                    SetupFileWatcher();
+                    ReloadDebouncer?.Schedule();
+                }))
         {
             ReloadYamlValues();
         }
@@ -1059,22 +1060,7 @@ internal static class StatusEffectOverrideManager
 
     private static bool IsOverrideFile(string path)
     {
-        string extension = Path.GetExtension(path);
-        if (!extension.Equals(".yml", StringComparison.OrdinalIgnoreCase) &&
-            !extension.Equals(".yaml", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        string fileName = Path.GetFileName(path);
-        if (fileName.Equals(ReferenceFileName, StringComparison.OrdinalIgnoreCase) ||
-            fileName.Equals(FullScaffoldFileName, StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        return fileName.Equals(OverrideFileName, StringComparison.OrdinalIgnoreCase) ||
-               fileName.StartsWith("effects_", StringComparison.OrdinalIgnoreCase);
+        return DataForgeOverrideFiles.IsDomainOverrideFile(path, OverrideFileName, DomainName);
     }
 
     private static bool IsIconFile(string path)
@@ -1240,6 +1226,50 @@ internal static class StatusEffectOverrideManager
         }
 
         return added > 0;
+    }
+
+    private static void PruneBaselinesForNewObjectDb()
+    {
+        ObjectDB? objectDb = ObjectDB.instance;
+        if (objectDb == null || ReferenceEquals(BaselineObjectDb, objectDb))
+        {
+            return;
+        }
+
+        if (Baselines.Count == 0)
+        {
+            BaselineObjectDb = objectDb;
+            return;
+        }
+
+        HashSet<string> currentEffectNames = GetCurrentStatusEffectNameSet();
+        int removed = 0;
+        foreach (string effectName in Baselines.Keys
+                     .Where(effectName => !currentEffectNames.Contains(effectName))
+                     .ToArray())
+        {
+            Baselines.Remove(effectName);
+            removed++;
+        }
+
+        BaselineObjectDb = objectDb;
+
+        if (removed > 0)
+        {
+            DataForgePlugin.Log.LogDebug(
+                $"Pruned {removed} stale status effect baselines for the new ObjectDB.");
+        }
+    }
+
+    private static HashSet<string> GetCurrentStatusEffectNameSet()
+    {
+        return ObjectDB.instance == null
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(
+                ObjectDB.instance.m_StatusEffects
+                    .Where(effect => effect != null && !string.IsNullOrWhiteSpace(effect.name))
+                    .Select(effect => NormalizeStatusEffectName(effect.name)),
+                StringComparer.OrdinalIgnoreCase);
     }
 
     private static void CaptureBaselinesForEntriesIfNeeded(List<StatusEffectEntry> entries)
@@ -2628,7 +2658,9 @@ internal static class StatusEffectOverrideManager
             {
                 EnsureConfigDirectoryAndDefaultOverride();
                 CaptureAllBaselinesIfNeeded();
+                HashSet<string> currentEffects = GetCurrentStatusEffectNameSet();
                 var fullEntries = Baselines
+                    .Where(pair => currentEffects.Contains(pair.Key))
                     .Select(pair =>
                     {
                         string effectName = pair.Value.Effect.name.Trim();
@@ -2653,39 +2685,52 @@ internal static class StatusEffectOverrideManager
             out error);
     }
 
-    private static void WriteReferenceArtifact()
+    internal static bool TryRegenerateReferenceFile(out string path, out bool changed, out string error)
     {
-        if (!CanBuildGeneratedArtifacts())
-        {
-            return;
-        }
-
-        EnsureConfigDirectoryAndDefaultOverride();
-        string sourceSignature = ComputeReferenceSourceSignature();
-        string referencePath = Path.Combine(ConfigDirectory, ReferenceFileName);
-        if (DataForgeReferenceState.ShouldSkip(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion))
-        {
-            return;
-        }
-
-        CaptureAllBaselinesIfNeeded();
-
-        bool wrote = GeneratedArtifactWriter.WriteReferenceIfReady(
-            Baselines.Count > 0,
-            ConfigDirectory,
-            ReferenceFileName,
+        path = Path.Combine(ConfigDirectory, ReferenceFileName);
+        return GeneratedArtifactWriter.TryWriteReferenceIfReady(
+            path,
             DomainName,
             OverrideFileName,
-            BuildReferenceArtifactContent);
-        if (wrote || File.Exists(referencePath))
+            CanBuildGeneratedArtifacts(),
+            $"{DomainName} game data is not ready yet.",
+            BuildReferenceFileContent,
+            out changed,
+            out error);
+    }
+
+    private static void WriteReferenceArtifact()
+    {
+        if (!DataForgePlugin.UsesLocalAuthorityFiles ||
+            DataForgeWorldLifecycle.IsShuttingDown ||
+            !CanBuildGeneratedArtifacts())
         {
-            DataForgeReferenceState.Record(ReferenceStateKey, referencePath, sourceSignature, ReferenceLogicVersion);
+            return;
         }
+
+        if (!TryRegenerateReferenceFile(out _, out _, out string error))
+        {
+            DataForgePlugin.Log.LogWarning(error);
+        }
+    }
+
+    private static string? BuildReferenceFileContent()
+    {
+        EnsureConfigDirectoryAndDefaultOverride();
+        CaptureAllBaselinesIfNeeded();
+        if (Baselines.Count == 0)
+        {
+            return null;
+        }
+
+        return BuildReferenceArtifactContent();
     }
 
     private static string BuildReferenceArtifactContent()
     {
+        HashSet<string> currentEffects = GetCurrentStatusEffectNameSet();
         List<StatusEffectReferenceEntry> referenceEntries = Baselines
+            .Where(pair => currentEffects.Contains(pair.Key))
             .Select(pair => StatusEffectReferenceEntry.From(pair.Value.Effect.name.Trim(), pair.Value.Definition))
             .OrderBy(entry => entry.Effect, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -2703,25 +2748,6 @@ internal static class StatusEffectOverrideManager
         return ObjectDbReady &&
                ZNetScene.instance != null &&
                ObjectDB.instance != null;
-    }
-
-    private static string ComputeReferenceSourceSignature()
-    {
-        StringBuilder builder = new();
-        builder.AppendLine(ReferenceLogicVersion);
-        if (ObjectDB.instance != null)
-        {
-            foreach (StatusEffect statusEffect in ObjectDB.instance.m_StatusEffects
-                         .Where(statusEffect => statusEffect != null && !string.IsNullOrWhiteSpace(statusEffect.name))
-                         .OrderBy(statusEffect => statusEffect.name, StringComparer.OrdinalIgnoreCase))
-            {
-                builder.Append(statusEffect.name.Trim());
-                builder.Append('|');
-                builder.AppendLine(SparseSerializer.Serialize(StatusEffectDefinition.From(statusEffect)));
-            }
-        }
-
-        return DataForgeReferenceState.ComputeStableHash(builder.ToString());
     }
 
     internal sealed class StatusEffectEntry
