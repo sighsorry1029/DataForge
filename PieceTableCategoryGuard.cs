@@ -996,6 +996,15 @@ internal static class PieceTableCategoryGuard
             return true;
         }
 
+        if ((int)category >= VanillaCategorySlots &&
+            TryResolveLabel(expectedLabel, out Piece.PieceCategory expectedCategory) &&
+            expectedCategory == category &&
+            TryResolveLabel(current, out Piece.PieceCategory currentCategory) &&
+            currentCategory != category)
+        {
+            return true;
+        }
+
         bool hasAuthoritativeName = CustomCategoryNames.ContainsKey(category);
         if (!hasAuthoritativeName || (int)category < VanillaCategorySlots)
         {

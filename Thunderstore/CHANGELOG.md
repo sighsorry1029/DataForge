@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.6
+
+- Repaired clearly cross-wired labels on externally managed Hammer categories while preserving vanilla labels, localization tokens, and unknown third-party display names.
+- Added a status-effect clone example using `icon: item:MeadHealthMinor` to the generated override YAML header.
+
 ## 1.2.5
 
 - Added the server-side `dataforge:refer` command for regenerating individual or all compact references and allowed authenticated dedicated-server administrators to run both reference and full-scaffold commands remotely.
