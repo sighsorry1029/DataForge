@@ -9,6 +9,8 @@ namespace DataForge;
 
 internal static class VneiPrefabCleanupGuard
 {
+    private static readonly MethodInfo? CleanupPrefixMethod =
+        AccessTools.DeclaredMethod(typeof(VneiPrefabCleanupGuard), nameof(RemoveInvalidEntriesBeforeVnei));
     private static bool VneiIndexAllPatchInstalled;
     private static bool VneiIndexAllPatchFailed;
     private static DateTime NextPatchAttemptUtc = DateTime.MinValue;
@@ -34,8 +36,7 @@ internal static class VneiPrefabCleanupGuard
         }
 
         MethodInfo? indexAllMethod = AccessTools.DeclaredMethod(indexingType, "IndexAll");
-        MethodInfo? prefixMethod = AccessTools.DeclaredMethod(typeof(VneiPrefabCleanupGuard), nameof(RemoveInvalidEntriesBeforeVnei));
-        if (indexAllMethod == null || prefixMethod == null)
+        if (indexAllMethod == null || CleanupPrefixMethod == null)
         {
             VneiIndexAllPatchFailed = true;
             DataForgePlugin.Log.LogWarning("Could not install VNEI invalid prefab cleanup patch.");
@@ -44,7 +45,7 @@ internal static class VneiPrefabCleanupGuard
 
         try
         {
-            harmony.Patch(indexAllMethod, prefix: new HarmonyMethod(prefixMethod));
+            harmony.Patch(indexAllMethod, prefix: new HarmonyMethod(CleanupPrefixMethod));
             VneiIndexAllPatchInstalled = true;
         }
         catch (Exception ex)
@@ -53,6 +54,27 @@ internal static class VneiPrefabCleanupGuard
             DataForgePlugin.Log.LogWarning(
                 $"Could not install VNEI invalid prefab cleanup patch: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    internal static void RemoveInvalidEntriesBeforeRefresh(MethodInfo indexAllMethod)
+    {
+        try
+        {
+            var prefixes = Harmony.GetPatchInfo(indexAllMethod)?.Prefixes;
+            // Keep the direct cleanup ahead of every external prefix. Only skip it when
+            // this exact IndexAll currently has our cleanup as its sole kind of prefix.
+            if (CleanupPrefixMethod != null && prefixes != null && prefixes.Count > 0 &&
+                prefixes.All(static prefix => prefix.PatchMethod == CleanupPrefixMethod))
+            {
+                return;
+            }
+        }
+        catch
+        {
+            // If patch inspection fails, retain the original direct cleanup path.
+        }
+
+        RemoveInvalidEntriesBeforeVnei();
     }
 
     internal static void RemoveInvalidEntriesBeforeVnei()

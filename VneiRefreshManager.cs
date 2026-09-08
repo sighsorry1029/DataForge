@@ -117,7 +117,7 @@ internal static class VneiRefreshManager
 
             backup = new IndexBackup();
             ClearIndex(indexingType, recipeInfoType, backup);
-            VneiPrefabCleanupGuard.RemoveInvalidEntriesBeforeVnei();
+            VneiPrefabCleanupGuard.RemoveInvalidEntriesBeforeRefresh(indexAllMethod);
             indexAllMethod.Invoke(null, Array.Empty<object>());
             bool indexedAfterRefresh = (bool)(hasIndexedMethod.Invoke(null, Array.Empty<object>()) ?? false);
             if (!indexedAfterRefresh)

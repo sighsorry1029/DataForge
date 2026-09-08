@@ -37,6 +37,14 @@ The goal is to make large modpacks easier to tune without turning every item, re
 - Cloning, material/icon tweaks, localization, and live-safe refreshes are handled in one place.
 - Several modpack stability helpers are included for common Valheim mod conflicts.
 
+## Mod integration API
+
+DataForge 1.3.0 adds a public read-only API for applied item, recipe, piece,
+status-effect and localization changes. It provides coalesced local notifications,
+readiness/session revisions, configured-target queries and actual clone-source
+queries. Existing status-effect ownership events are preserved. See
+[API.md](API.md) for contracts, examples, authority rules and verification.
+
 ## Supported Domains
 
 ### Items
@@ -327,6 +335,29 @@ To keep login and texture memory bounded, each manifest accepts at most 128 refe
 `visual.scale` changes the item model's attach/drop mesh scale without shrinking `icon: auto` snapshots, so small world models can still keep readable inventory icons.
 
 Status effects can reuse an item icon with `icon: item:ItemPrefabName`, including DataForge-generated `icon: auto` item icons.
+
+## Development Checks
+
+From the repository root, use PowerShell with the .NET Framework 4.8 targeting pack, a .NET SDK supporting `net8.0`, and the .NET 8 runtime. Set the installed Valheim, BepInEx, and publicized assembly paths in `environment.props` before building.
+
+Run the product build and both check programs in order. Each failure stops the sequence, and the API checks inspect the DLL produced by this build:
+
+```powershell
+dotnet build DataForge.sln -c Debug -p:DeployToGame=true
+if ($LASTEXITCODE -ne 0) { throw "DataForge build failed." }
+
+dotnet run --project tests/DataForge.LogicChecks/DataForge.LogicChecks.csproj -c Debug --no-build
+if ($LASTEXITCODE -ne 0) { throw "DataForge logic checks failed." }
+
+dotnet run --project tests/DataForge.ApiChecks/DataForge.ApiChecks.csproj -c Debug --no-build -- bin/Debug/DataForge.dll
+if ($LASTEXITCODE -ne 0) { throw "DataForge API or merged DLL checks failed." }
+```
+
+Both check projects are included in the solution, but building the solution does not run them. Omitting the DLL argument from ApiChecks runs only its source-linked checks. The Debug build above copies only the final merged DataForge DLL to the configured game plugin folder. Use `-p:DeployToGame=false` to skip the copy. Debug validation does not create release packages.
+
+For an explicitly requested release, build with `dotnet build DataForge.sln -c Release`, run both check programs with `-c Release --no-build` and pass `bin/Release/DataForge.dll` to ApiChecks, then package with `dotnet build DataForge.csproj -c Release -t:PackageRelease`. Packaging validates and writes ZIPs to `Thunderstore` and `Nexus`. A registered Mod Release Manager watch folder can automatically publish the Thunderstore ZIP to its configured sites; confirm that project's folder, team, sites, and install location before packaging.
+
+These checks cover pure logic and the public API, including reflection against the merged DLL. Harmony behavior, Unity resource cleanup, UI updates, and multiplayer inventory/RPC behavior still require in-game verification on a host, a remote client, and a dedicated server.
 
 ## Github
 https://github.com/sighsorry1029/DataForge

@@ -155,6 +155,7 @@
         <Compile Include="ReferenceDefaultRules.cs"/>
         <Compile Include="ReferenceValue.cs"/>
         <Compile Include="StatusEffectOwnershipApi.cs"/>
+        <Compile Include="DataForgeApi.cs"/>
         <Compile Include="StatusEffectOverrideManager.cs"/>
         <Compile Include="PieceOverrideManager.cs"/>
     </ItemGroup>
@@ -167,6 +168,7 @@
         </Content>
         <Content Include="LICENSE.txt"/>
         <Content Include="README.md"/>
+        <Content Include="API.md"/>
         <Content Include="Thunderstore\CHANGELOG.md"/>
         <Content Include="Thunderstore\icon.png"/>
         <Content Include="Thunderstore\manifest.json"/>
@@ -224,7 +226,13 @@
         </PropertyGroup>
     </Target>
 
-    <Target Name="DeployToGame" DependsOnTargets="Build">
+    <Target Name="DeployDebugToGame" AfterTargets="Build"
+            DependsOnTargets="ILRepacker;CopyFinalModToGame"
+            Condition="'$(Configuration)' == 'Debug' AND '$(DeployToGame)' == 'true'"/>
+
+    <Target Name="DeployToGame" DependsOnTargets="Build;CopyFinalModToGame"/>
+
+    <Target Name="CopyFinalModToGame">
         <Error Text="DLL not found in target directory." Condition="!Exists('$(TargetDir)$(AssemblyName).dll')"/>
         <Error Text="CopyOutputDLLPath is not configured." Condition="'$(CopyOutputDLLPath)' == ''"/>
         <Error Text="Configured game plugin directory '$(CopyOutputDLLPath)' does not exist." Condition="!Exists('$(CopyOutputDLLPath)')"/>
@@ -236,6 +244,7 @@
     <Target Name="ValidatePackageReleaseInputs">
         <Error Text="PackageRelease requires Configuration=Release." Condition="'$(Configuration)' != 'Release'"/>
         <Error Text="README.md not found in project directory." Condition="!Exists('$(ProjectDir)README.md')"/>
+        <Error Text="API.md not found in project directory." Condition="!Exists('$(ProjectDir)API.md')"/>
         <Error Text="Thunderstore manifest.json not found in project directory." Condition="!Exists('$(ProjectDir)Thunderstore\manifest.json')"/>
         <Error Text="Thunderstore icon.png not found in project directory." Condition="!Exists('$(ProjectDir)Thunderstore\icon.png')"/>
         <Error Text="Thunderstore CHANGELOG.md not found in project directory." Condition="!Exists('$(ProjectDir)Thunderstore\CHANGELOG.md')"/>
@@ -249,6 +258,7 @@
         <ItemGroup>
             <ThunderstorePackageFiles Include="$(TargetDir)$(AssemblyName).dll"/>
             <ThunderstorePackageFiles Include="$(ProjectDir)README.md"/>
+            <ThunderstorePackageFiles Include="$(ProjectDir)API.md"/>
             <ThunderstorePackageFiles Include="$(ProjectDir)Thunderstore\CHANGELOG.md"/>
             <ThunderstorePackageFiles Include="$(ProjectDir)Thunderstore\manifest.json"/>
             <ThunderstorePackageFiles Include="$(ProjectDir)Thunderstore\icon.png"/>

@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.1
+
+- Removed temporary recipe-list allocations when checking for external recipe-object changes, preserving recipe identity, order, and null handling.
+- Avoided duplicate prefab cleanup during VNEI refreshes when DataForge's cleanup is the only installed prefix. Keep the original early cleanup when other prefixes are present or patch inspection is unavailable.
+- Simplified piece visual application so scale, material, and icon handling follow one explicit sequence while preserving warnings and failure behavior.
+- Connected `DeployToGame=true` to Debug builds so the final merged plugin DLL is copied to the configured game folder after successful compilation and merging.
+- Included the public API check project in the solution and documented Debug validation, local deployment, and merged-DLL checks.
+- Updated release-package validation to require the bundled API documentation alongside the existing package files.
+
+## 1.3.0
+
+- Added the public read-only `DataForgeApi` v1 for items, recipes, pieces, status effects and localization: immutable local state/revisions, affected-key/full-refresh notifications, configured override queries, and actual item/effect clone-source queries.
+- Coalesce notifications after runtime application, isolate subscriber failures, distinguish applied/failed/reset states, and invalidate state at world boundaries. Preserve the synchronous status-effect ownership API and server authority.
+- Added integration documentation and automated API/merged-assembly checks. No public mutation or YAML-writing API is introduced.
+
 ## 1.2.6
 
 - Repaired clearly cross-wired labels on externally managed Hammer categories while preserving vanilla labels, localization tokens, and unknown third-party display names.

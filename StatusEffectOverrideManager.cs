@@ -228,6 +228,14 @@ internal static class StatusEffectOverrideManager
             : BuildEnabledDefinitionEntriesByEffect(entries);
         HashSet<string> runtimeEffectKeys = GetRuntimeApplyEffectKeys(activeEntriesByEffect, affectedEffectKeys);
 
+        using DataForgeApplyScope apiApply = DataForgeApi.BeginApply(
+            DataForgeDomain.StatusEffects,
+            DataForgePlugin.UsesLocalAuthorityFiles,
+            affectedEffectKeys,
+            fullRefresh: affectedEffectKeys == null || !DataForgePlugin.StatusEffectOverridesEnabled ||
+                         CreatedClones.Count > 0 ||
+                         entries.Any(entry => entry.Override && !string.IsNullOrWhiteSpace(entry.CloneFrom)));
+        bool applyCompleted = false;
         DataForgeStatusEffectOwnership.NotifyStatusEffectOverridesWillApply();
         try
         {
@@ -241,6 +249,7 @@ internal static class StatusEffectOverrideManager
             {
                 CleanupCreatedEffects(Array.Empty<StatusEffectEntry>());
                 RuntimeAppliedEffectKeys.Clear();
+                applyCompleted = true;
                 return;
             }
 
@@ -269,6 +278,7 @@ internal static class StatusEffectOverrideManager
 
             ApplyLiveSafeToActiveStatusEffects(entriesToApplyByEffect, affectedEffectKeys, restoreBaselines: false);
             UpdateRuntimeAppliedEffectState(activeEntriesByEffect);
+            applyCompleted = true;
         }
         finally
         {
@@ -281,6 +291,19 @@ internal static class StatusEffectOverrideManager
             {
                 DataForgePlugin.Log.LogWarning(
                     $"Could not refresh item status-effect references after effect changes: {ex.Message}");
+            }
+            // Keep ownership handoff synchronous and in its original order.
+            // The general API queues its notification only after item references
+            // were refreshed, and does not call a failed apply successful.
+            if (applyCompleted)
+            {
+                apiApply.Complete(
+                    DataForgePlugin.StatusEffectOverridesEnabled
+                        ? entries.Where(entry => entry.Override && entry.HasDefinition)
+                            .Select(entry => GetCanonicalEffectKey(entry.Effect))
+                        : Array.Empty<string>(),
+                    CreatedClones.Where(pair => pair.Value.Effect != null)
+                        .Select(pair => new KeyValuePair<string, string>(pair.Key, pair.Value.SourceKey)));
             }
         }
     }

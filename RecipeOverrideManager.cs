@@ -201,6 +201,15 @@ internal static class RecipeOverrideManager
             entries = ActiveEntries.ToList();
         }
 
+        // Recipe slot resolution and baseline restoration can affect variants outside
+        // the current YAML keys. Consumers must re-read the complete recipe domain.
+        using DataForgeApplyScope apiApply = DataForgeApi.BeginApply(
+            DataForgeDomain.Recipes,
+            DataForgePlugin.UsesLocalAuthorityFiles,
+            entries.Select(entry => ToRecipeKey(entry.Recipe))
+                .Concat(RuntimeAppliedRecipeSlots.Select(slot => slot.PublicKey))
+                .Concat(CreatedRecipeObjects.Keys),
+            fullRefresh: true);
         ApplyingConfiguration = true;
         try
         {
@@ -235,6 +244,12 @@ internal static class RecipeOverrideManager
                 ApplyingConfiguration = false;
             }
         }
+
+        // Do not complete from finally: a failed apply or failed refresh is not an
+        // applied notification, even if some recipes were already modified.
+        apiApply.Complete(DataForgePlugin.RecipeOverridesEnabled
+            ? entries.Where(entry => entry.Override).Select(entry => ToRecipeKey(entry.Recipe))
+            : Array.Empty<string>());
     }
 
     private static void ApplyEntry(RecipeEntry entry, HashSet<string> cleanedCreatedRecipes)
@@ -333,8 +348,22 @@ internal static class RecipeOverrideManager
             return;
         }
 
+        // A settings change can refresh a menu ObjectDB before world recipes have
+        // been applied. Do not mark that domain ready until its actual apply.
+        using DataForgeApplyScope? apiApply = DataForgeApi.GetState(DataForgeDomain.Recipes).IsReady
+            ? DataForgeApi.BeginApply(
+                DataForgeDomain.Recipes,
+                DataForgePlugin.UsesLocalAuthorityFiles,
+                fullRefresh: true)
+            : null;
         RefreshLiveRecipeState();
         VneiRefreshManager.RequestRefresh(DomainName);
+        lock (StateLock)
+        {
+            apiApply?.Complete(DataForgePlugin.RecipeOverridesEnabled
+                ? ActiveEntries.Where(entry => entry.Override).Select(entry => ToRecipeKey(entry.Recipe))
+                : Array.Empty<string>());
+        }
     }
 
     internal static void RebindItemPrefabReferences(ItemDrop previous, ItemDrop replacement)
@@ -1019,9 +1048,24 @@ internal static class RecipeOverrideManager
             return false;
         }
 
-        List<Recipe> current = ObjectDB.instance.m_recipes.Where(recipe => recipe != null).ToList();
-        return current.Count != ObservedRecipeObjects.Count ||
-               current.Where((recipe, index) => !ReferenceEquals(recipe, ObservedRecipeObjects[index])).Any();
+        int index = 0;
+        foreach (Recipe recipe in ObjectDB.instance.m_recipes)
+        {
+            if (recipe == null)
+            {
+                continue;
+            }
+
+            if (index >= ObservedRecipeObjects.Count ||
+                !ReferenceEquals(recipe, ObservedRecipeObjects[index]))
+            {
+                return true;
+            }
+
+            index++;
+        }
+
+        return index != ObservedRecipeObjects.Count;
     }
 
     private static void RememberCurrentRecipeObjects()

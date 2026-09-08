@@ -29,6 +29,7 @@ internal static class DataForgeWorldLifecycle
 
     internal static void MarkShuttingDown()
     {
+        if (!IsShuttingDown) DataForgeApi.ResetSession(false);
         IsShuttingDown = true;
         IsGameStarted = false;
     }
@@ -185,6 +186,7 @@ internal static class DataForgeZNetSceneAwakePatch
     {
         DataForgeRuntimeCleanup.PrepareForNewWorld();
         bool startingAfterShutdown = DataForgeWorldLifecycle.MarkStarting();
+        DataForgeApi.ResetSession(DataForgePlugin.UsesLocalAuthorityFiles);
         if (startingAfterShutdown)
         {
             DataForgeLifecycleStep.Run(

@@ -205,11 +205,20 @@ internal static class ItemOverrideManager
             changedItemKeys = EntryChanges.ConsumeChangedKeys();
         }
 
+        List<ItemEntry> configuredEntries = entries;
         entries = BuildWorldCompatibleCloneEntries(entries, logDeferrals: false);
         if (changedItemKeys is { Count: 0 })
         {
             return;
         }
+
+        using DataForgeApplyScope apiApply = DataForgeApi.BeginApply(
+            DataForgeDomain.Items,
+            DataForgePlugin.UsesLocalAuthorityFiles,
+            changedItemKeys,
+            fullRefresh: changedItemKeys == null || HasGlobalItemMultiplierOverrides() ||
+                         GlobalMultiplierStateWasApplied || CreatedCloneStates.Count > 0 ||
+                         entries.Any(entry => entry.Override && !string.IsNullOrWhiteSpace(entry.CloneFrom)));
 
         int cloneRevisionBeforeApply = CreatedCloneRevision;
         bool hasLocalAuthority = DataForgePlugin.UsesLocalAuthorityFiles;
@@ -273,6 +282,17 @@ internal static class ItemOverrideManager
             }
         }
         VneiRefreshManager.RequestRefresh(DomainName);
+        // Configured intent is distinct from the world-pinned clone definitions
+        // retained above for networking. Report live clone ownership separately.
+        apiApply.Complete(
+            DataForgePlugin.ItemOverridesEnabled
+                ? configuredEntries.Where(entry => entry.Override &&
+                        (entry.HasPrefabDefinition || entry.AmountMultiplier.HasValue ||
+                         !string.IsNullOrWhiteSpace(entry.CloneFrom)))
+                    .Select(entry => entry.Item)
+                : Array.Empty<string>(),
+            CreatedCloneStates.Where(pair => pair.Value.Prefab != null)
+                .Select(pair => new KeyValuePair<string, string>(pair.Key, pair.Value.SourceName)));
     }
 
     internal static void OnStatusEffectDefinitionsChanged()

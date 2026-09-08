@@ -15,7 +15,7 @@ namespace DataForge;
 public class DataForgePlugin : BaseUnityPlugin
 {
     internal const string ModName = "DataForge";
-    internal const string ModVersion = "1.2.6";
+    internal const string ModVersion = "1.3.1";
     internal const string Author = "sighsorry";
     internal const string ModGUID = $"{Author}.{ModName}";
 
@@ -97,6 +97,7 @@ public class DataForgePlugin : BaseUnityPlugin
 
     public void Awake()
     {
+        DataForgeApi.SetWarningSink(message => Log.LogWarning(message));
         bool saveOnSet = Config.SaveOnConfigSet;
         Config.SaveOnConfigSet = false;
 
@@ -280,6 +281,7 @@ public class DataForgePlugin : BaseUnityPlugin
             "source-of-truth event cleanup",
             () => ConfigSync.SourceOfTruthChanged -= OnSourceOfTruthChanged);
         DataForgeLifecycleStep.Run("Harmony cleanup", _harmony.UnpatchSelf);
+        DataForgeApi.Shutdown();
     }
 
     private static void OnSourceOfTruthChanged(bool isSourceOfTruth)
@@ -383,6 +385,7 @@ public class DataForgePlugin : BaseUnityPlugin
     {
         DataForgeIconSync.Update();
         VneiPrefabCleanupGuard.TryPatchVneiIndexAll(_harmony);
+        DataForgeApi.DispatchPending();
     }
 
     private static void ClampMaxStoredFireplaceFuel()

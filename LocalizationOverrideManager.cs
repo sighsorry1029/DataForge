@@ -214,18 +214,34 @@ internal static class LocalizationOverrideManager
         }
 
         string languageKey = NormalizeLanguage(language);
-        if (!ReferenceEquals(AppliedLocalization, localization) ||
-            !AppliedLanguage.Equals(languageKey, StringComparison.OrdinalIgnoreCase))
-        {
-            RestoreAppliedTranslations();
-            AppliedLocalization = localization;
-            AppliedLanguage = languageKey;
-        }
-
+        bool contextChanged = !ReferenceEquals(AppliedLocalization, localization) ||
+                              !AppliedLanguage.Equals(languageKey, StringComparison.OrdinalIgnoreCase);
         Dictionary<string, string> translations;
         lock (StateLock)
         {
             translations = BuildTranslationsForLanguage(ActivePayload, languageKey);
+        }
+
+        // Localization is reapplied by several UI/language hooks. Suppress identical
+        // applications, but include acquiring/releasing a lease even if its text is
+        // identical so the read-only override index stays accurate.
+        if (!contextChanged && DataForgeApi.GetState(DataForgeDomain.Localization).IsReady &&
+            !NeedsTranslationApply(localization, translations))
+        {
+            return;
+        }
+
+        using DataForgeApplyScope apiApply = DataForgeApi.BeginApply(
+            DataForgeDomain.Localization,
+            HasLocalAuthority,
+            AppliedTranslations.Keys.Concat(translations.Keys).Select(token => "$" + token),
+            fullRefresh: contextChanged,
+            language: languageKey);
+        if (contextChanged)
+        {
+            RestoreAppliedTranslations();
+            AppliedLocalization = localization;
+            AppliedLanguage = languageKey;
         }
 
         bool changed = RestoreRemovedTranslations(localization, translations.Keys);
@@ -238,6 +254,30 @@ internal static class LocalizationOverrideManager
         {
             localization.m_cache.EvictAll();
         }
+        apiApply.Complete(translations.Keys.Select(token => "$" + token));
+    }
+
+    private static bool NeedsTranslationApply(
+        Localization localization,
+        Dictionary<string, string> translations)
+    {
+        if (AppliedTranslations.Count != translations.Count)
+        {
+            return true;
+        }
+
+        foreach (KeyValuePair<string, string> translation in translations)
+        {
+            if (!AppliedTranslations.TryGetValue(translation.Key, out TranslationLease? lease) ||
+                !string.Equals(lease.LastAppliedValue, translation.Value, StringComparison.Ordinal) ||
+                !localization.m_translations.TryGetValue(translation.Key, out string? current) ||
+                !string.Equals(current, translation.Value, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     internal static void BeforeLanguageSetup(Localization localization)
@@ -727,6 +767,16 @@ internal static class LocalizationOverrideManager
             return;
         }
 
+        // A source-of-truth or language transition can restore translations without
+        // immediately applying a replacement payload; publish that rollback too.
+        using DataForgeApplyScope? apiApply = !DataForgeWorldLifecycle.IsShuttingDown &&
+                                              IsLiveLocalization(localization) && AppliedTranslations.Count > 0
+            ? DataForgeApi.BeginApply(
+                DataForgeDomain.Localization,
+                HasLocalAuthority,
+                AppliedTranslations.Keys.Select(token => "$" + token),
+                language: AppliedLanguage)
+            : null;
         bool changed = false;
         foreach (string token in AppliedTranslations.Keys.ToArray())
         {
@@ -738,6 +788,7 @@ internal static class LocalizationOverrideManager
         }
 
         ClearAppliedTranslationState();
+        apiApply?.Complete(Array.Empty<string>());
     }
 
     private static bool RestoreTranslationIfOwned(Localization localization, string token)

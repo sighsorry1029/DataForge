@@ -196,7 +196,7 @@ try {
             }
             Test-Manifest ([System.IO.File]::ReadAllText($ManifestFile)) $ManifestFile $ExpectedName $VersionString
             Test-Icon $IconFile
-            Test-Zip $ThunderstoreZip @($DllFileName, "manifest.json", "icon.png", "README.md", "CHANGELOG.md") $ExpectedName $VersionString -HasManifest
+            Test-Zip $ThunderstoreZip @($DllFileName, "manifest.json", "icon.png", "README.md", "API.md", "CHANGELOG.md") $ExpectedName $VersionString -HasManifest
             Test-Zip $NexusZip @($DllFileName) $ExpectedName $VersionString
         }
         "PromotePackages" {

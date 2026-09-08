@@ -102,6 +102,7 @@ internal static class PieceOverrideManager
     private static bool PieceTableSortWasApplied;
     private static bool PieceTableMembershipWasApplied;
     private static bool PieceCategoryConfigurationWasApplied;
+    private static bool? ApiPieceOverridesEnabled;
     private static bool CraftingStationTopologyChanged;
     private static bool StationExtensionTopologyChanged;
     private static readonly Dictionary<Piece, HammerCategoryClaim> ExpectedHammerCategories =
@@ -235,11 +236,19 @@ internal static class PieceOverrideManager
         bool pieceCategoryConfigurationNeedsApply =
             pieceCategoryConfigurationVersion != AppliedPieceCategoryConfigurationVersion ||
             hasActivePieceCategoryConfiguration != PieceCategoryConfigurationWasApplied;
-        if (changedPieceKeys is { Count: 0 } && !pieceCategoryConfigurationNeedsApply)
+        bool apiEnabledStateChanged = ApiPieceOverridesEnabled != pieceOverridesEnabled;
+        // Enable/disable changes affect every prior runtime override, even when
+        // a simultaneous YAML reload contributed an empty or scoped key set.
+        if (apiEnabledStateChanged) changedPieceKeys = null;
+        if (changedPieceKeys is { Count: 0 } && !pieceCategoryConfigurationNeedsApply &&
+            !apiEnabledStateChanged && DataForgeApi.GetState(DataForgeDomain.Pieces).IsReady)
         {
             return;
         }
 
+        string[] configuredOverrideKeys = pieceOverridesEnabled
+            ? activeEntries.Where(entry => entry.Override).Select(entry => entry.Piece).ToArray()
+            : Array.Empty<string>();
         bool hasActiveSortOrders = activeSortOrders.Count > 0;
         bool hasActivePieceTableAssignments = activePieceTableAssignments.Count > 0;
         bool hasActiveRemovedPieces = activeRemovedPieces.Count > 0;
@@ -255,9 +264,33 @@ internal static class PieceOverrideManager
             !PieceCategoryConfigurationWasApplied)
         {
             AppliedPieceCategoryConfigurationVersion = pieceCategoryConfigurationVersion;
+            // Even an empty first configuration establishes readiness for late
+            // subscribers. Explicitly changed no-op entries also update ownership.
+            if (!DataForgeApi.GetState(DataForgeDomain.Pieces).IsReady ||
+                changedPieceKeys is { Count: > 0 } || pieceCategoryConfigurationNeedsApply || apiEnabledStateChanged)
+            {
+                using DataForgeApplyScope emptyApply = DataForgeApi.BeginApply(
+                    DataForgeDomain.Pieces,
+                    DataForgePlugin.UsesLocalAuthorityFiles,
+                    changedPieceKeys,
+                    fullRefresh: changedPieceKeys == null || pieceCategoryConfigurationNeedsApply || apiEnabledStateChanged);
+                emptyApply.Complete(configuredOverrideKeys);
+                ApiPieceOverridesEnabled = pieceOverridesEnabled;
+            }
             return;
         }
 
+        using DataForgeApplyScope apiApply = DataForgeApi.BeginApply(
+            DataForgeDomain.Pieces,
+            DataForgePlugin.UsesLocalAuthorityFiles,
+            changedPieceKeys != null
+                ? changedPieceKeys
+                : activeEntries.Select(entry => entry.Piece).Concat(RuntimeAppliedPieceKeys),
+            // Table/category changes can move or hide pieces not named in pieces.yml.
+            fullRefresh: changedPieceKeys == null || pieceCategoryConfigurationNeedsApply || apiEnabledStateChanged ||
+                         hasActiveSortOrders || PieceTableSortWasApplied ||
+                         hasActivePieceTableAssignments || hasActiveRemovedPieces ||
+                         hasActivePieceCategoryMoves || PieceTableMembershipWasApplied);
         PieceTableCategoryGuard.RestoreTemporarilyPrunedCategories();
         RestorePieceCategoryMoveBaselines();
         RefreshPieceCategoryRegistry();
@@ -320,6 +353,8 @@ internal static class PieceOverrideManager
         CaptureExpectedHammerCategories(activeEntries, pieceOverridesEnabled, activeRemovedPieces);
         DataForgeLifecycleStep.Run("piece category generated-artifact write", WritePieceCategoryReferenceArtifact);
         VneiRefreshManager.RequestRefresh(DomainName);
+        apiApply.Complete(configuredOverrideKeys);
+        ApiPieceOverridesEnabled = pieceOverridesEnabled;
     }
 
     private static void ApplyPieceCategoryConfiguration(
@@ -2570,19 +2605,23 @@ internal static class PieceOverrideManager
         PieceVisualDefinition definition)
     {
         ApplyVisualScale(gameObject, definition.Scale);
-        if (string.IsNullOrWhiteSpace(definition.Material))
+        ApplyPieceMaterialDefinition(gameObject, definition.Material);
+        ApplyPieceIconDefinition(gameObject, definition);
+    }
+
+    private static void ApplyPieceMaterialDefinition(GameObject gameObject, string? configuredMaterial)
+    {
+        if (string.IsNullOrWhiteSpace(configuredMaterial))
         {
-            ApplyPieceIconDefinition(gameObject, definition);
             return;
         }
 
         string prefabName = GetPrefabName(gameObject);
-        string materialName = (definition.Material ?? "").Trim();
+        string materialName = configuredMaterial!.Trim();
         Material? material = ItemVisualOverrides.ResolveMaterial(materialName);
         if (material == null)
         {
             DataForgeLogContext.Warning($"{prefabName} has unknown visual material '{materialName}'. Check z_materials.reference.txt.");
-            ApplyPieceIconDefinition(gameObject, definition);
             return;
         }
 
@@ -2590,7 +2629,6 @@ internal static class PieceOverrideManager
         if (renderers.Count == 0)
         {
             DataForgeLogContext.Warning($"{prefabName} has no piece renderers for visual material override.");
-            ApplyPieceIconDefinition(gameObject, definition);
             return;
         }
 
@@ -2614,8 +2652,6 @@ internal static class PieceOverrideManager
             TrackPieceMaterialOverride(gameObject, renderer, materials, material);
             renderer.sharedMaterials = updatedMaterials;
         }
-
-        ApplyPieceIconDefinition(gameObject, definition);
     }
 
     private static void ApplyPieceIconDefinition(
