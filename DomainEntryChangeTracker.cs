@@ -9,7 +9,6 @@ internal sealed class DomainEntryChangeTracker<TEntry>
     private readonly Func<IReadOnlyList<TEntry>, string> _signatureBuilder;
     private Dictionary<string, string> _signatures = new(StringComparer.OrdinalIgnoreCase);
     private HashSet<string>? _pendingChangedKeys;
-    private bool _hasPendingScopedApply;
     private bool _forceNextFullApply = true;
 
     internal DomainEntryChangeTracker(
@@ -26,7 +25,6 @@ internal sealed class DomainEntryChangeTracker<TEntry>
         if (!_forceNextFullApply)
         {
             _pendingChangedKeys = GetChangedKeys(_signatures, signatures);
-            _hasPendingScopedApply = true;
         }
 
         _signatures = signatures;
@@ -38,18 +36,16 @@ internal sealed class DomainEntryChangeTracker<TEntry>
         {
             _forceNextFullApply = false;
             _pendingChangedKeys = null;
-            _hasPendingScopedApply = false;
             return null;
         }
 
-        if (!_hasPendingScopedApply)
+        if (_pendingChangedKeys == null)
         {
             return null;
         }
 
-        HashSet<string> changedKeys = _pendingChangedKeys ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> changedKeys = _pendingChangedKeys;
         _pendingChangedKeys = null;
-        _hasPendingScopedApply = false;
         return changedKeys;
     }
 
@@ -57,7 +53,6 @@ internal sealed class DomainEntryChangeTracker<TEntry>
     {
         _forceNextFullApply = true;
         _pendingChangedKeys = null;
-        _hasPendingScopedApply = false;
     }
 
     private Dictionary<string, string> BuildSignatures(IReadOnlyList<TEntry> entries)
