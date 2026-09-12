@@ -11,7 +11,7 @@ namespace DataForge;
 
 internal static class PieceTableCategoryGuard
 {
-    private const int VanillaCategorySlots = (int)Piece.PieceCategory.Max;
+    private static readonly int VanillaCategorySlots = GetRuntimeVanillaCategorySlotCount();
 
     private static readonly Dictionary<Piece.PieceCategory, string> CategoryLabels = new();
     private static readonly Dictionary<string, Piece.PieceCategory> KnownCategoriesByName = new(StringComparer.Ordinal);
@@ -26,9 +26,20 @@ internal static class PieceTableCategoryGuard
     private static readonly Dictionary<PieceTable, List<RemovedCategorySlot>> TemporarilyPrunedCategories = new(ReferenceComparer<PieceTable>.Instance);
     private static readonly HashSet<GameObject> CreatedHudCategoryTabs = new(ReferenceComparer<GameObject>.Instance);
     private static readonly FieldInfo? SelectedCategoryField = AccessTools.Field(typeof(PieceTable), "m_selectedCategory");
-    private static readonly FieldInfo? AvailablePiecesField = AccessTools.Field(typeof(PieceTable), "m_availablePieces");
+    // 1.0 keeps the membership HashSet separate from the indexed category storage.
+    private static readonly FieldInfo? AvailablePiecesField = AccessTools.Field(typeof(PieceTable), "m_availablePiecesByCategory");
     private static readonly FieldInfo? HudCategoryClickField = AccessTools.Field(typeof(UIInputHandler), "m_onLeftDown");
     private static int CustomCategoryVersion;
+
+    private static int GetRuntimeVanillaCategorySlotCount()
+    {
+        FieldInfo? maxField = typeof(Piece.PieceCategory).GetField(
+            nameof(Piece.PieceCategory.Max),
+            BindingFlags.Public | BindingFlags.Static);
+        return maxField?.GetRawConstantValue() is object rawValue
+            ? Math.Max(0, Convert.ToInt32(rawValue))
+            : Math.Max(0, (int)Piece.PieceCategory.Max);
+    }
 
     internal static void ResetWorldState()
     {
@@ -1467,7 +1478,7 @@ internal static class DataForgePieceTableUpdateAvailableCategoryGuardPatch
     }
 }
 
-[HarmonyPatch(typeof(PieceTable), nameof(PieceTable.SetCategory))]
+[HarmonyPatch(typeof(PieceTable), nameof(PieceTable.SetCategory), typeof(int))]
 internal static class DataForgePieceTableSetCategoryGuardPatch
 {
     [HarmonyPriority(Priority.First)]

@@ -193,7 +193,10 @@ internal static class DataForgeSmelterSpawnAmountMultiplierPatch
 internal static class DataForgeCookingStationRemoveDoneItemAmountMultiplierPatch
 {
     private static readonly MethodInfo? SpawnItemMethod =
-        AccessTools.DeclaredMethod(typeof(CookingStation), nameof(CookingStation.SpawnItem));
+        AccessTools.DeclaredMethod(typeof(CookingStation), "SpawnItem",
+            new[] { typeof(string), typeof(int), typeof(Vector3), typeof(bool) });
+    private static readonly Action<CookingStation, string, int, Vector3, bool> SpawnItem =
+        AccessTools.MethodDelegate<Action<CookingStation, string, int, Vector3, bool>>(SpawnItemMethod!);
 
     private static readonly MethodInfo SpawnItemWithMultiplierMethod =
         AccessTools.DeclaredMethod(typeof(DataForgeCookingStationRemoveDoneItemAmountMultiplierPatch), nameof(SpawnItemWithMultiplier));
@@ -225,13 +228,13 @@ internal static class DataForgeCookingStationRemoveDoneItemAmountMultiplierPatch
         }
     }
 
-    private static void SpawnItemWithMultiplier(CookingStation station, string prefabName, int slot, Vector3 userPoint)
+    private static void SpawnItemWithMultiplier(CookingStation station, string prefabName, int slot, Vector3 userPoint, bool cheated)
     {
         GameObject? prefab = ObjectDB.instance != null ? ObjectDB.instance.GetItemPrefab(prefabName) : null;
         int amount = ItemOverrideManager.ApplyAcquisitionAmountMultiplier(prefab, 1);
         for (int index = 0; index < amount; index++)
         {
-            station.SpawnItem(prefabName, slot, userPoint);
+            SpawnItem(station, prefabName, slot, userPoint, cheated);
         }
     }
 }
@@ -275,6 +278,8 @@ internal static class DataForgeInventoryGuiDoCraftingAmountMultiplierPatch
             typeof(long),
             typeof(string),
             typeof(Vector2i),
+            typeof(bool),
+            typeof(bool),
             typeof(bool)
         });
 
@@ -317,10 +322,12 @@ internal static class DataForgeInventoryGuiDoCraftingAmountMultiplierPatch
             }
         }
 
-        if (capacityChecks.Count != 1 || addItemCalls.Count != 1)
+        // 1.0 has three upgrader/refund calls followed by the ordinary crafting call.
+        // Only the latter owns the capacity reservation. Upgrader returns must stay vanilla.
+        if (capacityChecks.Count != 1 || addItemCalls.Count != 4)
         {
             DataForgePlugin.Log.LogWarning(
-                $"Crafting output multiplier patch expected one capacity check and one Inventory.AddItem call but found " +
+                $"Crafting output multiplier patch expected one capacity check and four Inventory.AddItem calls but found " +
                 $"{capacityChecks.Count} and {addItemCalls.Count}; the crafting multiplier patch was disabled safely.");
             return patched;
         }
@@ -330,7 +337,8 @@ internal static class DataForgeInventoryGuiDoCraftingAmountMultiplierPatch
             opcode = OpCodes.Call,
             operand = CanAddCraftedItemWithMultiplierMethod
         };
-        patched[addItemCalls[0]] = new CodeInstruction(patched[addItemCalls[0]])
+        int craftOutputCall = addItemCalls[addItemCalls.Count - 1];
+        patched[craftOutputCall] = new CodeInstruction(patched[craftOutputCall])
         {
             opcode = OpCodes.Call,
             operand = AddItemWithMultiplierMethod
@@ -401,7 +409,9 @@ internal static class DataForgeInventoryGuiDoCraftingAmountMultiplierPatch
         long crafterID,
         string crafterName,
         Vector2i position,
-        bool pickedUp)
+        bool cheated,
+        bool pickedUp,
+        bool dropIfFullInv)
     {
         bool isUpgrade = position.x >= 0 &&
                          position.y >= 0 &&
@@ -440,6 +450,6 @@ internal static class DataForgeInventoryGuiDoCraftingAmountMultiplierPatch
             }
         }
 
-        return inventory.AddItem(name, stack, quality, variant, crafterID, crafterName, position, pickedUp);
+        return inventory.AddItem(name, stack, quality, variant, crafterID, crafterName, position, cheated, pickedUp, dropIfFullInv);
     }
 }

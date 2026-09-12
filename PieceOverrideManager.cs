@@ -47,7 +47,9 @@ internal static class PieceOverrideManager
     private static readonly object StateLock = new();
     private static readonly Dictionary<string, PieceBaseline> Baselines = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<PieceTable, List<GameObject>> PieceTableOrderBaselines = new(ReferenceComparer<PieceTable>.Instance);
+    private static readonly Dictionary<PieceTable, PieceCategoryReferenceBaseline> PieceCategoryReferenceBaselines = new(ReferenceComparer<PieceTable>.Instance);
     private static readonly Dictionary<GameObject, Piece.PieceCategory> PieceCategoryMoveBaselines = new(ReferenceComparer<GameObject>.Instance);
+    private static readonly Dictionary<GameObject, Piece.UsageTagFlags> PieceUsageMoveBaselines = new(ReferenceComparer<GameObject>.Instance);
     private static readonly Dictionary<PieceTable, HashSet<Piece.PieceCategory>> InsertedPieceTableCategories = new(ReferenceComparer<PieceTable>.Instance);
     private static readonly Dictionary<GameObject, List<StationExtensionSnapshot>> StationExtensionRemovalSnapshots =
         new(ReferenceComparer<GameObject>.Instance);
@@ -350,7 +352,11 @@ internal static class PieceOverrideManager
             hasActivePieceCategoryMoves;
         PieceCategoryConfigurationWasApplied = hasActivePieceCategoryConfiguration;
         AppliedPieceCategoryConfigurationVersion = pieceCategoryConfigurationVersion;
-        CaptureExpectedHammerCategories(activeEntries, pieceOverridesEnabled, activeRemovedPieces);
+        CaptureExpectedHammerCategories(
+            activeEntries,
+            pieceOverridesEnabled,
+            activeRemovedPieces,
+            appliedPieceCategoryMoves);
         DataForgeLifecycleStep.Run("piece category generated-artifact write", WritePieceCategoryReferenceArtifact);
         VneiRefreshManager.RequestRefresh(DomainName);
         apiApply.Complete(configuredOverrideKeys);
@@ -540,18 +546,33 @@ internal static class PieceOverrideManager
         }
 
         bool hadMovedCategoryBaseline = PieceCategoryMoveBaselines.ContainsKey(previousPrefab);
+        bool hadMovedUsageBaseline = PieceUsageMoveBaselines.ContainsKey(previousPrefab);
         Piece.PieceCategory activeCategory = previousPiece != null
             ? previousPiece.m_category
             : default;
+        Piece.UsageTagFlags activeUsage = previousPiece != null
+            ? previousPiece.m_usage
+            : 0;
         PieceCategoryMoveBaselines.Remove(previousPrefab);
+        PieceUsageMoveBaselines.Remove(previousPrefab);
         if (hadMovedCategoryBaseline && replacementPiece != null)
         {
             PieceCategoryMoveBaselines[replacementPrefab] = replacementPiece.m_category;
         }
 
+        if (hadMovedUsageBaseline && replacementPiece != null)
+        {
+            PieceUsageMoveBaselines[replacementPrefab] = replacementPiece.m_usage;
+        }
+
         if (hadMovedCategoryBaseline && replacementPiece != null)
         {
             replacementPiece.m_category = activeCategory;
+        }
+
+        if (hadMovedUsageBaseline && replacementPiece != null)
+        {
+            replacementPiece.m_usage = activeUsage;
         }
 
         lock (StateLock)
@@ -607,7 +628,9 @@ internal static class PieceOverrideManager
         RuntimeAppliedPieceKeys.Clear();
         StationExtensionRemovalSnapshots.Clear();
         PieceTableOrderBaselines.Clear();
+        PieceCategoryReferenceBaselines.Clear();
         PieceCategoryMoveBaselines.Clear();
+        PieceUsageMoveBaselines.Clear();
         InsertedPieceTableCategories.Clear();
         CraftingStationTopologyChanged = false;
         StationExtensionTopologyChanged = false;
@@ -1363,6 +1386,7 @@ internal static class PieceOverrideManager
             "# Use '- Furniture: GB_Parchment_Tool' to move every Furniture piece from that source tool into this section's tool.",
             "# Use '- Furniture, $token: GB_Parchment_Tool' to move and set the destination tab's localized label together.",
             "# An exact category already present on the destination is merged; otherwise the source category is added there.",
+            "# When an embedded PieceManager added a same-name usage tag, moved pieces use the matching vanilla usage tag so Categories does not show a duplicate filter.",
             "# Keep one plain category entry for its order/label, then repeat that category as mappings to merge one or more source tools.",
             "# A source tool/category pair can move to only one destination tool.",
             "# A pieces.yml pieceTable value has final priority over a category move. Removing a move restores its baseline membership.",
@@ -3475,6 +3499,7 @@ internal static class PieceOverrideManager
         PieceTableOrderBaselines[pieceTable] = pieceTable.m_pieces
             .Where(piece => piece != null)
             .ToList();
+        PieceCategoryReferenceBaselines[pieceTable] = PieceCategoryReferenceBaseline.From(pieceTable);
     }
 
     private static void RestorePieceCategoryMoveBaselines()
@@ -3489,6 +3514,17 @@ internal static class PieceOverrideManager
         }
 
         PieceCategoryMoveBaselines.Clear();
+
+        foreach (KeyValuePair<GameObject, Piece.UsageTagFlags> baseline in PieceUsageMoveBaselines.ToArray())
+        {
+            Piece? piece = baseline.Key ? baseline.Key.GetComponent<Piece>() : null;
+            if (piece != null)
+            {
+                piece.m_usage = baseline.Value;
+            }
+        }
+
+        PieceUsageMoveBaselines.Clear();
     }
 
     private static List<ResolvedPieceCategoryMove> ApplyPieceTableStructure(
@@ -3685,6 +3721,10 @@ internal static class PieceOverrideManager
                 TryResolvePieceTableCategory(move.Target, move.CategoryName, out Piece.PieceCategory existingTargetCategory)
                     ? existingTargetCategory
                     : sourceCategory;
+            bool normalizeUsage = TryResolveVanillaUsageTag(move.CategoryName, out Piece.UsageTagFlags vanillaUsageTag);
+            Piece.UsageTagFlags redundantUsageTags = normalizeUsage
+                ? GetEmbeddedPieceManagerUsageTags(move.CategoryName) & ~vanillaUsageTag
+                : 0;
             List<GameObject> matchingPieces = (move.Source.m_pieces ?? new List<GameObject>())
                 .Where(piecePrefab =>
                 {
@@ -3700,6 +3740,7 @@ internal static class PieceOverrideManager
                 continue;
             }
 
+            List<Piece> movedPieces = new();
             foreach (GameObject piecePrefab in matchingPieces)
             {
                 if (!piecePrefab)
@@ -3713,6 +3754,12 @@ internal static class PieceOverrideManager
                 }
 
                 Piece? piece = piecePrefab ? piecePrefab.GetComponent<Piece>() : null;
+                if (piece != null)
+                {
+                    movedPieces.Add(piece);
+                    NormalizeMovedPieceUsage(piece, normalizeUsage, vanillaUsageTag, redundantUsageTags);
+                }
+
                 if (piece != null && piece.m_category != targetCategory)
                 {
                     if (!PieceCategoryMoveBaselines.ContainsKey(piecePrefab!))
@@ -3726,7 +3773,15 @@ internal static class PieceOverrideManager
                 MovePiecePrefabToTable(piecePrefab!, move.Target, affectedTables);
             }
 
-            applied.Add(new ResolvedPieceCategoryMove(move.Source, sourceCategory));
+            applied.Add(new ResolvedPieceCategoryMove(
+                move.Target,
+                move.Source,
+                sourceCategory,
+                targetCategory,
+                move.CategoryName,
+                movedPieces,
+                normalizeUsage ? vanillaUsageTag : 0,
+                redundantUsageTags));
         }
 
         return applied;
@@ -4188,10 +4243,18 @@ internal static class PieceOverrideManager
         KnownPieceCategoryNameSources.Clear();
         KnownPieceCategoryValueSources.Clear();
 
-        for (int value = 0; value < (int)Piece.PieceCategory.Max; value++)
+        foreach (System.Reflection.FieldInfo field in typeof(Piece.PieceCategory)
+                     .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+                     .OrderBy(static field => Convert.ToInt32(field.GetRawConstantValue())))
         {
-            Piece.PieceCategory category = (Piece.PieceCategory)value;
-            RegisterKnownPieceCategory(category.ToString(), category, 1000, "Valheim");
+            if (field.Name is nameof(Piece.PieceCategory.Max) or nameof(Piece.PieceCategory.All) ||
+                field.GetRawConstantValue() is not object rawValue)
+            {
+                continue;
+            }
+
+            Piece.PieceCategory category = (Piece.PieceCategory)Convert.ToInt32(rawValue);
+            RegisterKnownPieceCategory(field.Name, category, 1000, "Valheim");
         }
 
         RegisterJotunnPieceCategories();
@@ -4276,6 +4339,104 @@ internal static class PieceOverrideManager
                 DataForgePlugin.Log.LogDebug($"Could not inspect piece categories from '{assembly.GetName().Name}': {ex.Message}");
             }
         }
+    }
+
+    private static bool TryResolveVanillaUsageTag(string categoryName, out Piece.UsageTagFlags usageTag)
+    {
+        string exactName = categoryName.Trim();
+        foreach (System.Reflection.FieldInfo field in typeof(Piece.UsageTagFlags)
+                     .GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static))
+        {
+            if (field.GetRawConstantValue() is not object rawValue)
+            {
+                continue;
+            }
+
+            string displayLabel = field.GetCustomAttributes(typeof(DisplayNameAttribute), false)
+                .OfType<DisplayNameAttribute>()
+                .Select(static attribute => attribute.DisplayName)
+                .FirstOrDefault() ?? "";
+            if (!field.Name.Equals(exactName, StringComparison.Ordinal) &&
+                !CategoryLabelMatches(exactName, displayLabel))
+            {
+                continue;
+            }
+
+            usageTag = (Piece.UsageTagFlags)Convert.ToInt32(rawValue);
+            return true;
+        }
+
+        usageTag = 0;
+        return false;
+    }
+
+    private static Piece.UsageTagFlags GetEmbeddedPieceManagerUsageTags(string categoryName)
+    {
+        Piece.UsageTagFlags result = 0;
+        foreach (System.Reflection.Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type? type = assembly.GetType("PieceManager.PiecePrefabManager", throwOnError: false);
+            if (type == null)
+            {
+                continue;
+            }
+
+            try
+            {
+                const System.Reflection.BindingFlags flags =
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic |
+                    System.Reflection.BindingFlags.Static;
+                System.Reflection.FieldInfo? field = type.GetField("CustomUsageTags", flags);
+                if (field?.GetValue(null) is not System.Collections.IDictionary tags)
+                {
+                    continue;
+                }
+
+                foreach (System.Collections.DictionaryEntry entry in tags)
+                {
+                    if (entry.Key is string name &&
+                        name.Trim().Equals(categoryName.Trim(), StringComparison.Ordinal) &&
+                        entry.Value is Piece.UsageTagFlags usageTag)
+                    {
+                        result |= usageTag;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                DataForgePlugin.Log.LogDebug(
+                    $"Could not inspect usage tags from '{assembly.GetName().Name}': {ex.Message}");
+            }
+        }
+
+        return result;
+    }
+
+    private static bool NormalizeMovedPieceUsage(
+        Piece piece,
+        bool enabled,
+        Piece.UsageTagFlags vanillaUsageTag,
+        Piece.UsageTagFlags redundantUsageTags)
+    {
+        if (!enabled || redundantUsageTags == 0)
+        {
+            return false;
+        }
+
+        Piece.UsageTagFlags normalized = (piece.m_usage & ~redundantUsageTags) | vanillaUsageTag;
+        if (normalized == piece.m_usage)
+        {
+            return false;
+        }
+
+        if (!PieceUsageMoveBaselines.ContainsKey(piece.gameObject))
+        {
+            PieceUsageMoveBaselines[piece.gameObject] = piece.m_usage;
+        }
+
+        piece.m_usage = normalized;
+        return true;
     }
 
     private static void RegisterPieceManagerCategoryDictionary(
@@ -4971,6 +5132,11 @@ internal static class PieceOverrideManager
 
     private static void ReconcileConfiguredHammerCategories(PieceTable hammerPieceTable, Player player)
     {
+        if (HammerCategoryIdentityResolutionPending)
+        {
+            RefreshExpectedHammerUsageTags();
+        }
+
         bool categoryChanged = ResolveCanonicalHammerCategoryClaims(hammerPieceTable);
         HammerCategoryIdentityResolutionPending = false;
         List<Piece>? discardedPieces = null;
@@ -4986,7 +5152,10 @@ internal static class PieceOverrideManager
             Piece.PieceCategory targetCategory = expected.Value.TargetCategory;
             bool pieceCategoryChanged = piece.m_category != targetCategory;
             bool categoryMissing = hammerPieceTable.m_categories?.Contains(targetCategory) != true;
-            if (!pieceCategoryChanged && !categoryMissing)
+            bool usageChanged = expected.Value.RedundantUsageTags != 0 &&
+                                ((piece.m_usage & expected.Value.RedundantUsageTags) != 0 ||
+                                 (piece.m_usage & expected.Value.CanonicalUsageTag) == 0);
+            if (!pieceCategoryChanged && !categoryMissing && !usageChanged)
             {
                 continue;
             }
@@ -5018,6 +5187,12 @@ internal static class PieceOverrideManager
                     continue;
                 }
 
+                NormalizeMovedPieceUsage(
+                    piece,
+                    expected.Value.CanonicalUsageTag != 0,
+                    expected.Value.CanonicalUsageTag,
+                    expected.Value.RedundantUsageTags);
+
                 categoryChanged = true;
             }
             catch (Exception ex)
@@ -5040,6 +5215,11 @@ internal static class PieceOverrideManager
             {
                 ExpectedHammerCategories.Remove(piece);
             }
+        }
+
+        if (PruneUnusedDuplicateHammerCategories(hammerPieceTable))
+        {
+            categoryChanged = true;
         }
 
         if (categoryChanged)
@@ -5070,6 +5250,27 @@ internal static class PieceOverrideManager
                     "hammer-final-availability",
                     $"Could not refresh Hammer availability after category reconciliation: {ex.Message}");
             }
+        }
+    }
+
+    private static void RefreshExpectedHammerUsageTags()
+    {
+        Dictionary<string, Piece.UsageTagFlags> tagsByName = new(StringComparer.Ordinal);
+        foreach (HammerCategoryClaim claim in ExpectedHammerCategories.Values)
+        {
+            if (claim.CanonicalUsageTag == 0)
+            {
+                continue;
+            }
+
+            if (!tagsByName.TryGetValue(claim.ConfiguredName, out Piece.UsageTagFlags redundantUsageTags))
+            {
+                redundantUsageTags = GetEmbeddedPieceManagerUsageTags(claim.ConfiguredName) &
+                                     ~claim.CanonicalUsageTag;
+                tagsByName[claim.ConfiguredName] = redundantUsageTags;
+            }
+
+            claim.RedundantUsageTags |= redundantUsageTags;
         }
     }
 
@@ -5212,8 +5413,58 @@ internal static class PieceOverrideManager
             Piece.PieceCategory targetCategory = expected.Value.TargetCategory;
             bool pieceCategoryChanged = piece.m_category != targetCategory;
             bool categoryMissing = hammerPieceTable.m_categories?.Contains(targetCategory) != true;
-            if ((pieceCategoryChanged || categoryMissing) &&
+            bool usageChanged = expected.Value.RedundantUsageTags != 0 &&
+                                ((piece.m_usage & expected.Value.RedundantUsageTags) != 0 ||
+                                 (piece.m_usage & expected.Value.CanonicalUsageTag) == 0);
+            if ((pieceCategoryChanged || categoryMissing || usageChanged) &&
                 hammerPieceTable.m_pieces?.Contains(piece.gameObject) == true)
+            {
+                return true;
+            }
+        }
+
+        return HasUnusedDuplicateHammerCategory(hammerPieceTable);
+    }
+
+    private static bool HasUnusedDuplicateHammerCategory(PieceTable hammerPieceTable)
+    {
+        if (hammerPieceTable.m_categories == null || ExpectedHammerCategories.Count == 0)
+        {
+            return false;
+        }
+
+        HashSet<string> configuredNames = ExpectedHammerCategories.Values
+            .Select(claim => GetHammerCategoryDisplayName(
+                hammerPieceTable,
+                claim.TargetCategory,
+                claim.ConfiguredName))
+            .Where(static name => name.Length > 0)
+            .ToHashSet(StringComparer.Ordinal);
+
+        HashSet<Piece.PieceCategory> usedCategories = new();
+        if (hammerPieceTable.m_pieces != null)
+        {
+            foreach (GameObject piecePrefab in hammerPieceTable.m_pieces)
+            {
+                Piece? piece = piecePrefab ? piecePrefab.GetComponent<Piece>() : null;
+                if (piece != null)
+                {
+                    usedCategories.Add(piece.m_category);
+                }
+            }
+        }
+
+        foreach (IGrouping<string, Piece.PieceCategory> group in hammerPieceTable.m_categories
+                     .Where(IsHammerCategoryCoalescingCandidate)
+                     .Distinct()
+                     .GroupBy(
+                         category => GetHammerCategoryDisplayName(hammerPieceTable, category, ""),
+                         StringComparer.Ordinal))
+        {
+            if (group.Key.Length > 0 &&
+                configuredNames.Contains(group.Key) &&
+                group.Count() > 1 &&
+                group.Any(category => !usedCategories.Contains(category)))
             {
                 return true;
             }
@@ -5222,10 +5473,50 @@ internal static class PieceOverrideManager
         return false;
     }
 
+    private static bool PruneUnusedDuplicateHammerCategories(PieceTable hammerPieceTable)
+    {
+        if (hammerPieceTable.m_categories == null || ExpectedHammerCategories.Count == 0)
+        {
+            return false;
+        }
+
+        bool changed = false;
+        HashSet<string> configuredNames = ExpectedHammerCategories.Values
+            .Select(claim => GetHammerCategoryDisplayName(
+                hammerPieceTable,
+                claim.TargetCategory,
+                claim.ConfiguredName))
+            .Where(static name => name.Length > 0)
+            .ToHashSet(StringComparer.Ordinal);
+        List<Piece.PieceCategory> categories = hammerPieceTable.m_categories
+            .Where(IsHammerCategoryCoalescingCandidate)
+            .Distinct()
+            .ToList();
+        foreach (IGrouping<string, Piece.PieceCategory> group in categories.GroupBy(
+                     category => GetHammerCategoryDisplayName(hammerPieceTable, category, ""),
+                     StringComparer.Ordinal))
+        {
+            if (group.Key.Length == 0 || !configuredNames.Contains(group.Key) || group.Count() < 2)
+            {
+                continue;
+            }
+
+            foreach (Piece.PieceCategory category in group.OrderBy(static category => (int)category))
+            {
+                int previousCount = hammerPieceTable.m_categories.Count;
+                PieceTableCategoryGuard.PruneCategoryIfUnused(hammerPieceTable, category);
+                changed |= hammerPieceTable.m_categories.Count != previousCount;
+            }
+        }
+
+        return changed;
+    }
+
     private static void CaptureExpectedHammerCategories(
         IEnumerable<PieceEntry> entries,
         bool pieceOverridesEnabled,
-        ISet<string> removedPieces)
+        ISet<string> removedPieces,
+        IReadOnlyList<ResolvedPieceCategoryMove> categoryMoves)
     {
         Dictionary<string, string> claims = new(StringComparer.OrdinalIgnoreCase);
         if (pieceOverridesEnabled)
@@ -5269,6 +5560,29 @@ internal static class PieceOverrideManager
                 !IsOwnerManagedHomesteadCategory(category))
             {
                 expected[baseline.Piece] = new HammerCategoryClaim(claim.Value, category);
+            }
+        }
+
+        foreach (ResolvedPieceCategoryMove move in categoryMoves)
+        {
+            if (!ReferenceEquals(move.Target, hammerPieceTable) ||
+                IsOwnerManagedHomesteadCategory(move.TargetCategory))
+            {
+                continue;
+            }
+
+            foreach (Piece piece in move.MovedPieces)
+            {
+                if (piece &&
+                    hammerPieceTable.m_pieces?.Contains(piece.gameObject) == true &&
+                    !removedPieces.Contains(GetPrefabName(piece.gameObject)))
+                {
+                    expected[piece] = new HammerCategoryClaim(
+                        move.CategoryName,
+                        move.TargetCategory,
+                        move.CanonicalUsageTag,
+                        move.RedundantUsageTags);
+                }
             }
         }
 
@@ -5413,35 +5727,50 @@ internal static class PieceOverrideManager
             }
 
             PieceTableCategoryGuard.Normalize(pieceTable);
+            List<Piece.PieceCategory> referenceCategoryOrder;
+            List<string> referenceCategoryLabels;
+            if (PieceCategoryReferenceBaselines.TryGetValue(
+                    pieceTable,
+                    out PieceCategoryReferenceBaseline? categoryBaseline))
+            {
+                referenceCategoryOrder = categoryBaseline.Categories;
+                referenceCategoryLabels = categoryBaseline.Labels;
+            }
+            else
+            {
+                referenceCategoryOrder = pieceTable.m_categories.ToList();
+                referenceCategoryLabels = pieceTable.m_categoryLabels?.ToList() ?? new List<string>();
+            }
             Dictionary<Piece.PieceCategory, string> labelsByCategory = new();
             int pairedCount = Math.Min(
-                pieceTable.m_categories.Count,
-                pieceTable.m_categoryLabels?.Count ?? 0);
+                referenceCategoryOrder.Count,
+                referenceCategoryLabels.Count);
             for (int index = 0; index < pairedCount; index++)
             {
-                Piece.PieceCategory category = pieceTable.m_categories[index];
+                Piece.PieceCategory category = referenceCategoryOrder[index];
                 if (!labelsByCategory.ContainsKey(category))
                 {
-                    labelsByCategory[category] = pieceTable.m_categoryLabels![index]?.Trim() ?? "";
+                    labelsByCategory[category] = referenceCategoryLabels[index]?.Trim() ?? "";
                 }
             }
 
             HashSet<Piece.PieceCategory> usedCategories = new();
-            if (pieceTable.m_pieces != null)
+            IReadOnlyList<GameObject> referencePieces =
+                PieceTableOrderBaselines.TryGetValue(pieceTable, out List<GameObject>? pieceTableBaseline)
+                    ? pieceTableBaseline
+                    : pieceTable.m_pieces ?? new List<GameObject>();
+            foreach (GameObject piecePrefab in referencePieces)
             {
-                foreach (GameObject piecePrefab in pieceTable.m_pieces)
+                Piece? piece = piecePrefab ? piecePrefab.GetComponent<Piece>() : null;
+                Piece.PieceCategory category = GetReferencePieceCategory(piecePrefab, piece);
+                if (category is not Piece.PieceCategory.Max and not Piece.PieceCategory.All &&
+                    (int)category >= 0)
                 {
-                    Piece? piece = piecePrefab ? piecePrefab.GetComponent<Piece>() : null;
-                    Piece.PieceCategory category = piece != null ? piece.m_category : Piece.PieceCategory.Max;
-                    if (category is not Piece.PieceCategory.Max and not Piece.PieceCategory.All &&
-                        (int)category >= 0)
-                    {
-                        usedCategories.Add(category);
-                    }
+                    usedCategories.Add(category);
                 }
             }
 
-            List<Piece.PieceCategory> categoryOrder = pieceTable.m_categories
+            List<Piece.PieceCategory> categoryOrder = referenceCategoryOrder
                 .Where(usedCategories.Contains)
                 .Distinct()
                 .ToList();
@@ -5485,16 +5814,36 @@ internal static class PieceOverrideManager
             "# In pieceCategory.yml, '- Furniture: GB_Parchment_Tool' moves that entire source category into the destination section.",
             "# Add a label before the colon to move and translate together: '- Furniture, $hud_furniture: GB_Parchment_Tool'.",
             "# Exact destination category names merge, and individual pieces.yml pieceTable assignments have final priority.",
+            "# A same-name embedded PieceManager usage tag is merged into the matching vanilla Categories filter for moved pieces.",
             "# A plain category entry and one or more mappings may share the same destination category name.",
             "# A source tool/category pair can move to only one destination tool.",
             "# After moving all categories out of a source tool, use 'GB_Parchment_Tool: []' for its empty section.",
             "# Categories omitted from pieceCategory.yml remain after configured categories in their existing relative order.",
             "# Listing a category does not create or preserve an empty build tab.",
+            "# This reference describes the detected state before DataForge category moves and ordering are applied.",
             "# When Homestead is installed, its owner-managed category is omitted and always remains last."
         }) + Environment.NewLine;
         return GeneratedArtifactWriter.WriteTextIfChanged(
             Path.Combine(ConfigDirectory, PieceCategoryReferenceFileName),
             header + SparseSerializer.Serialize(tables));
+    }
+
+    private static Piece.PieceCategory GetReferencePieceCategory(GameObject? piecePrefab, Piece? piece)
+    {
+        if (piecePrefab &&
+            Baselines.TryGetValue(GetPrefabName(piecePrefab), out PieceBaseline? baseline) &&
+            ReferenceEquals(baseline.Piece, piece) &&
+            baseline.Definition.Piece?.BaselineCategory is Piece.PieceCategory baselineCategory)
+        {
+            return baselineCategory;
+        }
+
+        if (piecePrefab && PieceCategoryMoveBaselines.TryGetValue(piecePrefab, out Piece.PieceCategory movedCategory))
+        {
+            return movedCategory;
+        }
+
+        return piece != null ? piece.m_category : Piece.PieceCategory.Max;
     }
 
     private static string GetPieceCategoryReferenceName(Piece.PieceCategory category, string rawLabel)
@@ -6183,26 +6532,54 @@ internal static class PieceOverrideManager
 
     private sealed class ResolvedPieceCategoryMove
     {
-        internal ResolvedPieceCategoryMove(PieceTable source, Piece.PieceCategory sourceCategory)
+        internal ResolvedPieceCategoryMove(
+            PieceTable target,
+            PieceTable source,
+            Piece.PieceCategory sourceCategory,
+            Piece.PieceCategory targetCategory,
+            string categoryName,
+            IReadOnlyList<Piece> movedPieces,
+            Piece.UsageTagFlags canonicalUsageTag,
+            Piece.UsageTagFlags redundantUsageTags)
         {
+            Target = target;
             Source = source;
             SourceCategory = sourceCategory;
+            TargetCategory = targetCategory;
+            CategoryName = categoryName;
+            MovedPieces = movedPieces;
+            CanonicalUsageTag = canonicalUsageTag;
+            RedundantUsageTags = redundantUsageTags;
         }
 
+        internal PieceTable Target { get; }
         internal PieceTable Source { get; }
         internal Piece.PieceCategory SourceCategory { get; }
+        internal Piece.PieceCategory TargetCategory { get; }
+        internal string CategoryName { get; }
+        internal IReadOnlyList<Piece> MovedPieces { get; }
+        internal Piece.UsageTagFlags CanonicalUsageTag { get; }
+        internal Piece.UsageTagFlags RedundantUsageTags { get; }
     }
 
     private sealed class HammerCategoryClaim
     {
-        internal HammerCategoryClaim(string configuredName, Piece.PieceCategory targetCategory)
+        internal HammerCategoryClaim(
+            string configuredName,
+            Piece.PieceCategory targetCategory,
+            Piece.UsageTagFlags canonicalUsageTag = 0,
+            Piece.UsageTagFlags redundantUsageTags = 0)
         {
             ConfiguredName = configuredName;
             TargetCategory = targetCategory;
+            CanonicalUsageTag = canonicalUsageTag;
+            RedundantUsageTags = redundantUsageTags;
         }
 
         internal string ConfiguredName { get; }
         internal Piece.PieceCategory TargetCategory { get; set; }
+        internal Piece.UsageTagFlags CanonicalUsageTag { get; }
+        internal Piece.UsageTagFlags RedundantUsageTags { get; set; }
     }
 
     private sealed class PieceTableNameComparer : IComparer<string>
@@ -6220,6 +6597,27 @@ internal static class PieceOverrideManager
 
             int comparison = StringComparer.OrdinalIgnoreCase.Compare(left, right);
             return comparison != 0 ? comparison : StringComparer.Ordinal.Compare(left, right);
+        }
+    }
+
+    private sealed class PieceCategoryReferenceBaseline
+    {
+        private PieceCategoryReferenceBaseline(
+            List<Piece.PieceCategory> categories,
+            List<string> labels)
+        {
+            Categories = categories;
+            Labels = labels;
+        }
+
+        internal List<Piece.PieceCategory> Categories { get; }
+        internal List<string> Labels { get; }
+
+        internal static PieceCategoryReferenceBaseline From(PieceTable pieceTable)
+        {
+            return new PieceCategoryReferenceBaseline(
+                pieceTable.m_categories?.ToList() ?? new List<Piece.PieceCategory>(),
+                pieceTable.m_categoryLabels?.ToList() ?? new List<string>());
         }
     }
 

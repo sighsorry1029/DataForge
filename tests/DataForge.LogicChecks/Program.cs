@@ -11,6 +11,7 @@ internal static class Program
 
     private static void Main()
     {
+        Run(nameof(AssetOwnerChecks), () => AssetOwnerChecks.Run(Assert));
         Run(nameof(ChangeTrackerScopesChangedKeys), ChangeTrackerScopesChangedKeys);
         Run(nameof(ChangeTrackerHandlesLayeredEntries), ChangeTrackerHandlesLayeredEntries);
         Run(nameof(ChangeTrackerHandlesEmptyAndReaddedEntries), ChangeTrackerHandlesEmptyAndReaddedEntries);

@@ -7,6 +7,7 @@ using BepInEx;
 using BepInEx.Bootstrap;
 using UnityEngine;
 using YamlDotNet.Serialization;
+using ModAssetOwnership;
 
 namespace DataForge;
 
@@ -330,17 +331,8 @@ internal static class DataForgeVanillaAssetCatalog
 
 internal static class DataForgeAssetOwnerCatalog
 {
-    private sealed class PluginResourceSnapshot
-    {
-        public string OwnerName { get; set; } = "";
-        public string PluginName { get; set; } = "";
-        public string PluginGuid { get; set; } = "";
-        public string AssemblyName { get; set; } = "";
-        public string[] ResourceNames { get; set; } = Array.Empty<string>();
-    }
-
     private static readonly object Sync = new();
-    private static readonly Dictionary<string, string> AssetOwners = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, AssetOwner> AssetOwners = new(StringComparer.OrdinalIgnoreCase);
     private static readonly HashSet<string> AmbiguousAssetNames = new(StringComparer.OrdinalIgnoreCase);
     private static string _loadedSignature = "";
     private static bool _mappingsInitialized;
@@ -359,10 +351,10 @@ internal static class DataForgeAssetOwnerCatalog
 
         foreach (string candidate in EnumerateLookupCandidates(assetName))
         {
-            if (AssetOwners.TryGetValue(candidate, out string ownerName) &&
-                !string.IsNullOrWhiteSpace(ownerName))
+            if (AssetOwners.TryGetValue(candidate, out AssetOwner owner) &&
+                !string.IsNullOrWhiteSpace(owner.Guid))
             {
-                return ownerName;
+                return owner.Name;
             }
         }
 
@@ -371,7 +363,9 @@ internal static class DataForgeAssetOwnerCatalog
 
     private static void EnsureMappingsLoaded()
     {
-        string signature = BuildSignature();
+        List<AssetOwner> plugins = GetPluginResources();
+        AssetBundle[] bundles = AssetBundle.GetAllLoadedAssetBundles().ToArray();
+        string signature = BuildSignature(bundles, plugins);
         if (_mappingsInitialized &&
             string.Equals(signature, _loadedSignature, StringComparison.Ordinal))
         {
@@ -388,8 +382,7 @@ internal static class DataForgeAssetOwnerCatalog
 
             AssetOwners.Clear();
             AmbiguousAssetNames.Clear();
-            List<PluginResourceSnapshot> plugins = GetPluginResources();
-            foreach (AssetBundle assetBundle in AssetBundle.GetAllLoadedAssetBundles()
+            foreach (AssetBundle assetBundle in bundles
                          .OrderBy(bundle => bundle.name ?? "", StringComparer.OrdinalIgnoreCase)
                          .ThenBy(bundle => bundle.name ?? "", StringComparer.Ordinal))
             {
@@ -399,8 +392,8 @@ internal static class DataForgeAssetOwnerCatalog
                     continue;
                 }
 
-                string ownerName = ResolveOwnerName(bundleName, plugins);
-                if (string.IsNullOrWhiteSpace(ownerName))
+                AssetOwner? owner = AssetOwnerMatching.Resolve(bundleName, plugins);
+                if (owner == null)
                 {
                     continue;
                 }
@@ -419,16 +412,7 @@ internal static class DataForgeAssetOwnerCatalog
                         continue;
                     }
 
-                    if (AssetOwners.TryGetValue(assetName, out string existingOwner) &&
-                        !string.Equals(existingOwner, ownerName, StringComparison.OrdinalIgnoreCase))
-                    {
-                        AssetOwners.Remove(assetName);
-                        AmbiguousAssetNames.Add(assetName);
-                    }
-                    else
-                    {
-                        AssetOwners[assetName] = ownerName;
-                    }
+                    AssetOwnerMatching.Add(AssetOwners, AmbiguousAssetNames, assetName, owner);
                 }
             }
 
@@ -456,124 +440,28 @@ internal static class DataForgeAssetOwnerCatalog
         }
     }
 
-    private static List<PluginResourceSnapshot> GetPluginResources()
+    private static List<AssetOwner> GetPluginResources()
     {
-        return Chainloader.PluginInfos.Values
-            .Select(pluginInfo =>
+        List<AssetOwner> plugins = new();
+        foreach (var info in Chainloader.PluginInfos.Values)
+        {
+            try
             {
-                string pluginName = (pluginInfo.Metadata.Name ?? "").Trim();
-                string pluginGuid = (pluginInfo.Metadata.GUID ?? "").Trim();
-                string assemblyName = "";
-                string[] resourceNames = Array.Empty<string>();
-                try
-                {
-                    assemblyName = pluginInfo.Instance?.GetType().Assembly.GetName().Name ?? "";
-                    resourceNames = pluginInfo.Instance?.GetType().Assembly.GetManifestResourceNames() ?? Array.Empty<string>();
-                }
-                catch
-                {
-                    // Some plugin assemblies can be in a partially initialized state while ObjectDB is being copied.
-                }
-
-                return new PluginResourceSnapshot
-                {
-                    OwnerName = pluginName.Length > 0 ? pluginName : pluginGuid,
-                    PluginName = pluginName,
-                    PluginGuid = pluginGuid,
-                    AssemblyName = assemblyName,
-                    ResourceNames = resourceNames
-                };
-            })
-            .Where(plugin => plugin.OwnerName.Length > 0)
-            .OrderBy(plugin => plugin.PluginGuid, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(plugin => plugin.PluginGuid, StringComparer.Ordinal)
-            .ThenBy(plugin => plugin.OwnerName, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(plugin => plugin.OwnerName, StringComparer.Ordinal)
-            .ToList();
-    }
-
-    private static string ResolveOwnerName(string bundleName, List<PluginResourceSnapshot> plugins)
-    {
-        PluginResourceSnapshot? embeddedOwner = plugins.FirstOrDefault(plugin =>
-            plugin.ResourceNames.Any(resourceName =>
-                resourceName.EndsWith(bundleName, StringComparison.OrdinalIgnoreCase)));
-        if (embeddedOwner != null)
-        {
-            return embeddedOwner.OwnerName;
-        }
-
-        string normalizedBundleName = NormalizeToken(Path.GetFileNameWithoutExtension(bundleName));
-        if (normalizedBundleName.Length == 0)
-        {
-            return "";
-        }
-
-        PluginResourceSnapshot? tokenOwner = plugins.FirstOrDefault(plugin =>
-        {
-            string normalizedPluginName = NormalizeToken(plugin.PluginName);
-            string normalizedPluginGuid = NormalizeToken(plugin.PluginGuid);
-            string normalizedAssemblyName = NormalizeToken(plugin.AssemblyName);
-            return IsTokenMatch(normalizedBundleName, normalizedPluginName) ||
-                   IsTokenMatch(normalizedBundleName, normalizedPluginGuid) ||
-                   IsTokenMatch(normalizedBundleName, normalizedAssemblyName);
-        });
-
-        return tokenOwner?.OwnerName ?? "";
-    }
-
-    private static bool IsTokenMatch(string bundleName, string pluginToken)
-    {
-        return pluginToken.Length > 0 &&
-               (bundleName.IndexOf(pluginToken, StringComparison.OrdinalIgnoreCase) >= 0 ||
-                pluginToken.IndexOf(bundleName, StringComparison.OrdinalIgnoreCase) >= 0);
-    }
-
-    private static string NormalizeToken(string value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return "";
-        }
-
-        StringBuilder builder = new();
-        foreach (char character in value)
-        {
-            if (char.IsLetterOrDigit(character))
-            {
-                builder.Append(char.ToLowerInvariant(character));
+                var assembly = info.Instance?.GetType().Assembly;
+                if (assembly == null) continue;
+                plugins.Add(new AssetOwner(info.Metadata.GUID, info.Metadata.Name,
+                    assembly.GetName().Name ?? "", assembly.GetManifestResourceNames()));
             }
+            catch { /* Retry at the next reference generation after plugin initialization. */ }
         }
-
-        return builder.ToString();
+        return plugins;
     }
 
-    private static string BuildSignature()
+    private static string BuildSignature(AssetBundle[] bundles, List<AssetOwner> plugins)
     {
-        IEnumerable<string> bundleTokens = AssetBundle.GetAllLoadedAssetBundles()
-            .Select(bundle => bundle.name ?? "")
-            .Where(name => name.Length > 0)
-            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(name => name, StringComparer.Ordinal);
-        IEnumerable<string> pluginTokens = Chainloader.PluginInfos.Values
-            .Select(pluginInfo =>
-            {
-                string pluginName = pluginInfo.Metadata.Name ?? "";
-                string pluginGuid = pluginInfo.Metadata.GUID ?? "";
-                string assemblyName = "";
-                try
-                {
-                    assemblyName = pluginInfo.Instance?.GetType().Assembly.GetName().Name ?? "";
-                }
-                catch
-                {
-                    // The signature only needs to notice stable ownership inputs; ignore transient reflection failures.
-                }
-
-                return $"{pluginGuid}:{pluginName}:{assemblyName}";
-            })
-            .OrderBy(token => token, StringComparer.OrdinalIgnoreCase)
-            .ThenBy(token => token, StringComparer.Ordinal);
-
-        return string.Join("|", bundleTokens) + "||" + string.Join("|", pluginTokens);
+        // Same-name reloads and late initialization must not reuse an incomplete catalog.
+        return string.Join("|", bundles.Select(bundle => $"{bundle.GetInstanceID()}:{bundle.name}").OrderBy(x => x, StringComparer.Ordinal))
+            + "||" + string.Join("|", plugins.Select(plugin => $"{plugin.Guid}:{plugin.Name}:{plugin.AssemblyName}:"
+                + string.Join(",", plugin.Resources.OrderBy(x => x, StringComparer.Ordinal))).OrderBy(x => x, StringComparer.Ordinal));
     }
 }

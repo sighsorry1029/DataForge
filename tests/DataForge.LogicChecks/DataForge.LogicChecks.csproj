@@ -7,6 +7,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="..\..\AssetOwnerMatching.cs" Link="AssetOwnerMatching.cs" />
     <Compile Include="..\..\DataForgeIconProtocol.cs" Link="DataForgeIconProtocol.cs" />
     <Compile Include="..\..\DataForgeValue.cs" Link="DataForgeValue.cs" />
     <Compile Include="..\..\DomainEntryChangeTracker.cs" Link="DomainEntryChangeTracker.cs" />

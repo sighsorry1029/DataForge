@@ -57,7 +57,6 @@
                 <BepInExPath Condition="!Exists('$(BepInExPath)')AND Exists('$(GamePath)')">$(GamePath)\BepInEx</BepInExPath>
                 <CorlibPath Condition="!Exists('$(CorlibPath)') AND Exists('$(GamePath)')">$(GamePath)\valheim_Data\Managed</CorlibPath>
                 <CorlibPath Condition="!Exists('$(CorlibPath)') AND Exists('$(GamePath)')">$(GamePath)\unstripped_corlib</CorlibPath>
-                <PublicizedAssembliesPath Condition="!Exists('$(PublicizedAssembliesPath)') AND Exists('$(GamePath)')">$(GamePath)\valheim_Data\Managed\publicized_assemblies</PublicizedAssembliesPath>
                 <AfterTargets Condition="'$(AfterTargets)' == ''">ILRepacker</AfterTargets>
             </PropertyGroup>
         </When>
@@ -67,13 +66,14 @@
             <HintPath>$(BepInExPath)\core\0Harmony.dll</HintPath>
         </Reference>
         <Reference Include="assembly_guiutils">
-            <HintPath>$(PublicizedAssembliesPath)\assembly_guiutils_publicized.dll</HintPath>
+            <HintPath>$(CorlibPath)\assembly_guiutils.dll</HintPath>
         </Reference>
         <Reference Include="assembly_utils">
-            <HintPath>$(PublicizedAssembliesPath)\assembly_utils_publicized.dll</HintPath>
+            <HintPath>$(CorlibPath)\assembly_utils.dll</HintPath>
         </Reference>
-        <Reference Include="assembly_valheim">
-            <HintPath>$(PublicizedAssembliesPath)\assembly_valheim_publicized.dll</HintPath>
+        <!-- Build-only references are regenerated from the installed original, never from a stale game-folder copy. -->
+        <Reference Include="assembly_valheim" Publicize="true">
+            <HintPath>$(CorlibPath)\assembly_valheim.dll</HintPath>
         </Reference>
         <Reference Include="BepInEx">
             <HintPath>$(BepInExPath)\core\BepInEx.dll</HintPath>
@@ -128,6 +128,7 @@
         <Compile Include="DataForgeLogContext.cs"/>
         <Compile Include="DataForgeIconProtocol.cs"/>
         <Compile Include="DataForgeReferenceSections.cs"/>
+        <Compile Include="AssetOwnerMatching.cs"/>
         <Compile Include="DataForgeItemSortClassifier.cs"/>
         <Compile Include="DataForgeResourceMap.cs"/>
         <Compile Include="DataForgeValue.cs"/>
@@ -183,6 +184,7 @@
           <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
         </PackageReference>
         <PackageReference Include="YamlDotNet" Version="16.3.0" />
+        <PackageReference Include="BepInEx.AssemblyPublicizer.MSBuild" Version="0.4.2" PrivateAssets="all" ExcludeAssets="build" GeneratePathProperty="true" />
     </ItemGroup>
     <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets"/>
     <!-- To modify your build process, add your task inside one of the targets below and uncomment it. 
@@ -300,4 +302,23 @@
         <Message Text="Created Thunderstore and Nexus packages for $(PackageName)." Importance="high"/>
     </Target>
 
+    <!-- The upstream MSBuild integration is SDK-only; use its task with this legacy project's ReferencePath. -->
+    <PropertyGroup>
+        <PublicizerTaskFramework Condition="'$(MSBuildRuntimeType)' == 'Core'">netstandard2.1</PublicizerTaskFramework>
+        <PublicizerTaskFramework Condition="'$(MSBuildRuntimeType)' != 'Core'">net472</PublicizerTaskFramework>
+    </PropertyGroup>
+    <UsingTask TaskName="PublicizeTask" AssemblyFile="$(PkgBepInEx_AssemblyPublicizer_MSBuild)\lib\$(PublicizerTaskFramework)\BepInEx.AssemblyPublicizer.MSBuild.dll" />
+    <Target Name="PrepareGameCompileReferences" AfterTargets="ResolveReferences" BeforeTargets="CoreCompile">
+        <PublicizeTask IntermediateOutputPath="$(IntermediateOutputPath)" GeneratedIgnoresAccessChecksToFile="$(IntermediateOutputPath)DataForge.IgnoresAccessChecksTo.cs" ReferencePath="@(ReferencePath)" PackageReference="@(PackageReference)" Publicize="@(Publicize)">
+            <Output TaskParameter="RemovedReferences" ItemName="DataForgeRemovedReferences" />
+            <Output TaskParameter="PublicizedReferences" ItemName="DataForgePublicizedReferences" />
+        </PublicizeTask>
+        <ItemGroup>
+            <ReferencePath Remove="@(DataForgeRemovedReferences)" />
+            <ReferencePath Include="@(DataForgePublicizedReferences)" />
+            <Compile Include="$(IntermediateOutputPath)DataForge.IgnoresAccessChecksTo.cs" />
+            <Compile Include="$(PkgBepInEx_AssemblyPublicizer_MSBuild)\contentFiles\cs\any\IgnoresAccessChecksToAttribute.cs" />
+            <FileWrites Include="$(IntermediateOutputPath)DataForge.IgnoresAccessChecksTo.cs" />
+        </ItemGroup>
+    </Target>
 </Project>

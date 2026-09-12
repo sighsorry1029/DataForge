@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.3.4
+
+- Reduced recurring allocations while synchronized icons wait, retry, expire, or retain per-peer rate-limit state, while preserving request order, transfer limits, and disconnect cleanup.
+- Simplified shared domain change tracking by removing redundant pending-state bookkeeping while preserving full and scoped apply behavior.
+- Added final-DLL checks that verify ServerSync and YamlDotNet remain merged and internalized in release artifacts.
+
+## 1.3.3
+
+- Removed the redundant top-level DataForge build-menu tab and kept configured pieces in Valheim's existing Categories view.
+- Updated vanilla piece-category discovery to read the runtime enum metadata, including the categories added in Valheim 1.0.
+- Merged same-name embedded PieceManager usage tags into the matching vanilla Categories filter for whole-category moves, preventing entries such as Furniture from appearing twice after external menu refreshes.
+- Generated `pieceCategory.reference.yml` from the detected piece-table and category state before DataForge moves and ordering are applied.
+
+## 1.3.2
+
+- Updated DataForge for Valheim 1.0.7, including the bundled ServerSync constant access, crafting and cooking state propagation, PieceTable integration, Build UI integration, and compilation against the installed original game assemblies with build-time access generation.
+- Added a dedicated DataForge category list to Valheim 1.0's build menu while preserving the four vanilla lists, category order and labels, search and favorites behavior, comfort badges, refreshes, and lifecycle cleanup.
+- Added the Deep North resource tier and verified prefab mappings to the default resource map. Kept Writhan resources in Swamp, Hook in Mistlands, and the lava blob trophy in Ashlands, and documented safe merging for existing customized maps.
+- Made generated-reference asset ownership deterministic by accepting only unique embedded-resource or complete-token matches, preserving ambiguous same-name owners, and refreshing mappings when bundle instances or resources change.
+- Expanded compatibility, logic, API, and transpiler checks for original client and dedicated-server assemblies, Harmony targets, crafting and cooking signatures, asset ownership, and the final merged plugin.
+- Updated the packaged BepInEx dependency to `denikson-BepInExPack_Valheim-5.4.2350`.
+
 ## 1.3.1
 
 - Removed temporary recipe-list allocations when checking for external recipe-object changes, preserving recipe identity, order, and null handling.

@@ -152,7 +152,7 @@ Example:
 - Wood: 4
 ```
 
-`pieceCategory.reference.yml` records the detected category order for every build tool. Copy only the sections you want to control into `pieceCategory.yml`:
+`pieceCategory.reference.yml` records the detected category order for every build tool before DataForge applies category moves or ordering. Copy only the sections you want to control into `pieceCategory.yml`:
 
 ```yaml
 Hammer:
@@ -165,6 +165,8 @@ GB_Parchment_Tool: []
 ```
 
 Category names are exact and case-sensitive. The optional second value is a literal tab label or a `$` localization token. A scalar entry controls order and label. A mapping such as `Furniture: GB_Parchment_Tool` moves every matching source-table piece into the destination table named by the surrounding section; adding `, $hud_furniture` before the colon applies the label at the same time. A plain category entry and multiple mappings may share a destination category, allowing several source tools to merge into one tab. Conflicting labels for that destination are rejected. An exact category already present at the destination is merged, while a missing category is added. A source tool/category pair can move to only one destination. Individual `pieces.yml` `pieceTable` assignments take final priority, and removing a category move restores baseline membership.
+
+Valheim's `Categories` piece list is filtered by `Piece.UsageTagFlags`, which is separate from the legacy `PieceCategory` value used by build-tool category moves. During an explicit whole-category move, DataForge checks whether the destination name matches a vanilla usage tag. If an embedded PieceManager also assigned the moved pieces a custom usage tag with that same name, DataForge removes only that redundant custom bit and keeps the vanilla bit. This merges duplicate entries such as two `Furniture` filters without combining unrelated policies that merely share a display label. Removing the move restores the captured usage flags.
 
 Listed categories move first, while omitted categories keep their relative order afterward. Empty source categories created by a move are hidden and restored with the mapping. After moving every desired category out of a source tool, write `GB_Parchment_Tool: []` to leave that source section explicitly empty. The empty list alone does not move pieces. A plain dormant entry still does not create or preserve an empty build tab.
 
@@ -252,7 +254,11 @@ Reference files are meant for browsing and copy-paste edits:
 - entries are grouped by owner section when possible
 - item and recipe references use resource-map sorting
 - piece references use tier sorting
-- `pieceCategory.reference.yml` records the effective per-hammer category order and labels
+- `pieceCategory.reference.yml` records the detected pre-DataForge per-tool category order and labels, so runtime moves and ordering do not rewrite the source reference
+
+The default `BepInEx/config/DataForge/z_resourcemap.txt` places Deep North after Ashlands. It uses prefab names such as `Gold` (Bloodgold), `GoldOre` (Petrified Tissue), `Frostwood` (Timberwood), and `NornThread` (Nornathread). `WrithanRoots` and `TrophyWrithan` belong to Swamp, `Hook` to Mistlands, and `TrophyBlob_Lava` to Ashlands. Fader relics and embers are grouped with Deep North as progression-entry materials. `TrophyBlob_Frost` remains unclassified until its acquisition path is confirmed.
+
+Existing resource maps are preserved when updating the mod. To update a customized map, back it up, merge the new entries from the [default resource map](DataForgeResourceMap.cs) into the corresponding existing sections, and add `[DeepNorth]` immediately after the Ashlands section. Keep custom entries and their relative section order. Sections are ordered by position, and the first occurrence of a resource wins; repeating a section header creates another tier. Restart the game after merging, then regenerate the references. These entries only affect generated reference/full-scaffold ordering, not crafting costs, unlocks, or item stats.
 
 Regenerate one compact reference, or all references, after the relevant game data is ready:
 

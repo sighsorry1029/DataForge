@@ -14,6 +14,14 @@ namespace DataForge;
 
 internal static class LocalizationOverrideManager
 {
+    // Reading the backing instance must not create Localization during shutdown/headless initialization.
+    private static readonly System.Reflection.FieldInfo LocalizationInstanceField =
+        AccessTools.Field(typeof(Localization), "m_instance");
+    private static Localization LocalizationInstance() => (Localization)LocalizationInstanceField.GetValue(null)!;
+    private static readonly AccessTools.FieldRef<Localization, Dictionary<string, string>> Translations =
+        AccessTools.FieldRefAccess<Localization, Dictionary<string, string>>("m_translations");
+    private static readonly AccessTools.FieldRef<Localization, LRUCache<string>> TranslationCache =
+        AccessTools.FieldRefAccess<Localization, LRUCache<string>>("m_cache");
     private const string DomainName = "localization";
     private const string DefaultLanguageFileName = "English.yml";
     private const string KoreanLanguageFileName = "Korean.yml";
@@ -197,7 +205,7 @@ internal static class LocalizationOverrideManager
 
     internal static void ApplyCurrentLocalization()
     {
-        Localization? localization = Localization.m_instance;
+        Localization? localization = LocalizationInstance();
         if (localization == null)
         {
             return;
@@ -252,7 +260,7 @@ internal static class LocalizationOverrideManager
 
         if (changed || translations.Count > 0)
         {
-            localization.m_cache.EvictAll();
+            TranslationCache(localization).EvictAll();
         }
         apiApply.Complete(translations.Keys.Select(token => "$" + token));
     }
@@ -270,7 +278,7 @@ internal static class LocalizationOverrideManager
         {
             if (!AppliedTranslations.TryGetValue(translation.Key, out TranslationLease? lease) ||
                 !string.Equals(lease.LastAppliedValue, translation.Value, StringComparison.Ordinal) ||
-                !localization.m_translations.TryGetValue(translation.Key, out string? current) ||
+                !Translations(localization).TryGetValue(translation.Key, out string? current) ||
                 !string.Equals(current, translation.Value, StringComparison.Ordinal))
             {
                 return true;
@@ -305,8 +313,8 @@ internal static class LocalizationOverrideManager
     private static bool IsLiveLocalization(Localization localization)
     {
         return localization != null &&
-               Localization.m_instance != null &&
-               ReferenceEquals(localization, Localization.m_instance);
+               LocalizationInstance() != null &&
+               ReferenceEquals(localization, LocalizationInstance());
     }
 
     private static void ReadYamlValues(object sender, FileSystemEventArgs e)
@@ -724,7 +732,7 @@ internal static class LocalizationOverrideManager
 
     private static bool ApplyTranslation(Localization localization, string token, string text)
     {
-        bool currentExists = localization.m_translations.TryGetValue(token, out string? current);
+        bool currentExists = Translations(localization).TryGetValue(token, out string? current);
         if (!AppliedTranslations.TryGetValue(token, out TranslationLease? lease) ||
             !currentExists ||
             !string.Equals(current, lease.LastAppliedValue, StringComparison.Ordinal))
@@ -734,7 +742,7 @@ internal static class LocalizationOverrideManager
         }
 
         bool changed = !currentExists || !string.Equals(current, text, StringComparison.Ordinal);
-        localization.m_translations[token] = text;
+        Translations(localization)[token] = text;
         lease.LastAppliedValue = text;
         return changed;
     }
@@ -784,7 +792,7 @@ internal static class LocalizationOverrideManager
         }
         if (changed)
         {
-            localization.m_cache.EvictAll();
+            TranslationCache(localization).EvictAll();
         }
 
         ClearAppliedTranslationState();
@@ -794,7 +802,7 @@ internal static class LocalizationOverrideManager
     private static bool RestoreTranslationIfOwned(Localization localization, string token)
     {
         if (!AppliedTranslations.TryGetValue(token, out TranslationLease? lease) ||
-            !localization.m_translations.TryGetValue(token, out string? current) ||
+            !Translations(localization).TryGetValue(token, out string? current) ||
             !string.Equals(current, lease.LastAppliedValue, StringComparison.Ordinal))
         {
             return false;
@@ -802,11 +810,11 @@ internal static class LocalizationOverrideManager
 
         if (lease.OriginalExisted)
         {
-            localization.m_translations[token] = lease.OriginalValue ?? "";
+            Translations(localization)[token] = lease.OriginalValue ?? "";
         }
         else
         {
-            localization.m_translations.Remove(token);
+            Translations(localization).Remove(token);
         }
 
         return true;
@@ -1018,7 +1026,7 @@ internal static class LocalizationOverrideManager
 
     private static void NotifyLocalizationChanged()
     {
-        if (Localization.m_instance == null || Localization.OnLanguageChange == null)
+        if (LocalizationInstance() == null || Localization.OnLanguageChange == null)
         {
             return;
         }

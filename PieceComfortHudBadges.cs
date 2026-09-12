@@ -20,17 +20,71 @@ internal static class PieceComfortHudBadges
     private static bool AnyBadgeVisible;
     private static bool AnyGroupHighlightVisible;
     private static bool AnyStationExtensionHighlightVisible;
+    private static readonly AccessTools.FieldRef<BuildUi, List<BuildUiPieceButton>> BuildButtons =
+        AccessTools.FieldRefAccess<BuildUi, List<BuildUiPieceButton>>("m_pieceButtons");
+    private static readonly AccessTools.FieldRef<Hud, Piece> HoveredPiece =
+        AccessTools.FieldRefAccess<Hud, Piece>("m_hoveredPiece");
 
     internal static void RefreshVisibleHud()
     {
         Hud hud = Hud.m_instance;
         Player player = Player.m_localPlayer;
-        if (hud == null || player == null || !hud.m_pieceSelectionWindow.activeSelf)
+        if (hud == null || player == null || !Hud.IsPieceSelectionVisible())
         {
             return;
         }
 
         Refresh(hud, player);
+        RefreshBuildUi(hud.m_buildUi);
+    }
+
+    // The new menu pools buttons; refresh on setup/list/hover events, not by searching the hierarchy each frame.
+    internal static void RefreshBuildUi(BuildUi buildUi)
+    {
+        if (buildUi == null || !buildUi.isActiveAndEnabled || Hud.instance == null || Player.m_localPlayer == null) return;
+        foreach (BuildUiPieceButton button in BuildButtons(buildUi))
+        {
+            if (button != null && button.gameObject.activeSelf) RefreshBuildButton(button);
+        }
+    }
+
+    internal static void RefreshBuildButton(BuildUiPieceButton button)
+    {
+        Hud hud = Hud.instance;
+        Player player = Player.m_localPlayer;
+        if (button == null || hud == null || player == null) return;
+        GameObject root = button.gameObject;
+        Piece piece = button.Piece;
+        bool visible = piece != null && !VeiledRecipesSoftCompat.ShouldMaskPiece(player, piece);
+        if (visible && piece != null && DataForgePlugin.ShowPieceComfortInHammer && piece.m_comfort > 0)
+        {
+            TMP_Text badge = GetOrCreateBadge(hud, root);
+            if (badge != null)
+            {
+                string text = piece.m_comfort.ToString(CultureInfo.InvariantCulture);
+                if (badge.text != text) badge.text = text;
+                if (!badge.gameObject.activeSelf) badge.gameObject.SetActive(true);
+                badge.transform.SetAsLastSibling();
+            }
+        }
+        else HideBadge(root);
+
+        Piece hovered = HoveredPiece(hud);
+        bool hoverVisible = hovered != null && !VeiledRecipesSoftCompat.ShouldMaskPiece(player, hovered);
+        bool sameGroup = visible && hoverVisible && piece != null && hovered != null && DataForgePlugin.ShowPieceComfortInHammer &&
+            piece.m_comfort > 0 && hovered.m_comfort > 0 && hovered.m_comfortGroup != Piece.ComfortGroup.None &&
+            piece.m_comfortGroup == hovered.m_comfortGroup;
+        SetHighlight(GroupHighlightObjectName, GroupHighlightColor, sameGroup);
+        bool relatedStation = visible && hoverVisible && piece != null && hovered != null && DataForgePlugin.HighlightStationExtensionsInHammer &&
+            TryGetRelatedCraftingStation(hovered, out CraftingStation station) && IsRelatedToCraftingStation(piece, station);
+        SetHighlight(StationExtensionHighlightObjectName, StationExtensionHighlightColor, relatedStation);
+
+        void SetHighlight(string name, Color color, bool enabled)
+        {
+            if (!enabled) { HideHighlight(root, name); return; }
+            Image highlight = GetOrCreateHighlight(root, name, color);
+            if (highlight != null && !highlight.gameObject.activeSelf) highlight.gameObject.SetActive(true);
+        }
     }
 
     internal static void Refresh(Hud hud, Player player)
@@ -81,11 +135,11 @@ internal static class PieceComfortHudBadges
 
             if (piece == null || piece.m_comfort <= 0 || VeiledRecipesSoftCompat.ShouldMaskPiece(player, piece))
             {
-                HideBadge(iconData);
+                HideBadge(iconData?.m_go!);
                 continue;
             }
 
-            TMP_Text badge = GetOrCreateBadge(hud, iconData);
+            TMP_Text badge = GetOrCreateBadge(hud, iconData?.m_go!);
             if (badge == null)
             {
                 continue;
@@ -134,11 +188,11 @@ internal static class PieceComfortHudBadges
 
             if (!shouldHighlight)
             {
-                HideHighlight(iconData, GroupHighlightObjectName);
+                HideHighlight(iconData?.m_go!, GroupHighlightObjectName);
                 continue;
             }
 
-            Image highlight = GetOrCreateHighlight(iconData, GroupHighlightObjectName, GroupHighlightColor);
+            Image highlight = GetOrCreateHighlight(iconData?.m_go!, GroupHighlightObjectName, GroupHighlightColor);
             if (highlight == null)
             {
                 continue;
@@ -178,11 +232,11 @@ internal static class PieceComfortHudBadges
 
             if (!shouldHighlight)
             {
-                HideHighlight(iconData, StationExtensionHighlightObjectName);
+                HideHighlight(iconData?.m_go!, StationExtensionHighlightObjectName);
                 continue;
             }
 
-            Image highlight = GetOrCreateHighlight(iconData, StationExtensionHighlightObjectName, StationExtensionHighlightColor);
+            Image highlight = GetOrCreateHighlight(iconData?.m_go!, StationExtensionHighlightObjectName, StationExtensionHighlightColor);
             if (highlight == null)
             {
                 continue;
@@ -268,19 +322,19 @@ internal static class PieceComfortHudBadges
                string.Equals(left.m_name, right.m_name, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static TMP_Text GetOrCreateBadge(Hud hud, Hud.PieceIconData iconData)
+    private static TMP_Text GetOrCreateBadge(Hud hud, GameObject iconObject)
     {
-        if (iconData?.m_go == null)
+        if (iconObject == null)
         {
             return null!;
         }
 
-        Transform existing = iconData.m_go.transform.Find(BadgeObjectName);
+        Transform existing = iconObject.transform.Find(BadgeObjectName);
         if (existing != null && existing.TryGetComponent(out TMP_Text existingText))
         {
             if (existingText.font == null)
             {
-                TMP_Text? existingTemplate = FindTemplateText(hud, iconData);
+                TMP_Text? existingTemplate = FindTemplateText(hud, iconObject);
                 if (existingTemplate == null || existingTemplate.font == null)
                 {
                     UnityEngine.Object.Destroy(existing.gameObject);
@@ -293,7 +347,7 @@ internal static class PieceComfortHudBadges
             return existingText;
         }
 
-        TMP_Text? template = FindTemplateText(hud, iconData);
+        TMP_Text? template = FindTemplateText(hud, iconObject);
         if (template == null || template.font == null)
         {
             return null!;
@@ -301,7 +355,7 @@ internal static class PieceComfortHudBadges
 
         GameObject badgeObject = new(BadgeObjectName);
         badgeObject.SetActive(false);
-        badgeObject.transform.SetParent(iconData.m_go.transform, worldPositionStays: false);
+        badgeObject.transform.SetParent(iconObject.transform, worldPositionStays: false);
         RectTransform rect = badgeObject.AddComponent<RectTransform>();
         rect.anchorMin = Vector2.one;
         rect.anchorMax = Vector2.one;
@@ -323,7 +377,7 @@ internal static class PieceComfortHudBadges
 
         foreach (Hud.PieceIconData iconData in hud.m_pieceIcons)
         {
-            HideBadge(iconData);
+            HideBadge(iconData?.m_go!);
         }
 
         AnyBadgeVisible = false;
@@ -338,7 +392,7 @@ internal static class PieceComfortHudBadges
 
         foreach (Hud.PieceIconData iconData in hud.m_pieceIcons)
         {
-            HideHighlight(iconData, GroupHighlightObjectName);
+            HideHighlight(iconData?.m_go!, GroupHighlightObjectName);
         }
 
         AnyGroupHighlightVisible = false;
@@ -353,34 +407,34 @@ internal static class PieceComfortHudBadges
 
         foreach (Hud.PieceIconData iconData in hud.m_pieceIcons)
         {
-            HideHighlight(iconData, StationExtensionHighlightObjectName);
+            HideHighlight(iconData?.m_go!, StationExtensionHighlightObjectName);
         }
 
         AnyStationExtensionHighlightVisible = false;
     }
 
-    private static void HideBadge(Hud.PieceIconData iconData)
+    private static void HideBadge(GameObject iconObject)
     {
-        if (iconData?.m_go == null)
+        if (iconObject == null)
         {
             return;
         }
 
-        Transform existing = iconData.m_go.transform.Find(BadgeObjectName);
+        Transform existing = iconObject.transform.Find(BadgeObjectName);
         if (existing != null && existing.gameObject.activeSelf)
         {
             existing.gameObject.SetActive(false);
         }
     }
 
-    private static Image GetOrCreateHighlight(Hud.PieceIconData iconData, string objectName, Color color)
+    private static Image GetOrCreateHighlight(GameObject iconObject, string objectName, Color color)
     {
-        if (iconData?.m_go == null)
+        if (iconObject == null)
         {
             return null!;
         }
 
-        Transform existing = iconData.m_go.transform.Find(objectName);
+        Transform existing = iconObject.transform.Find(objectName);
         if (existing != null && existing.TryGetComponent(out Image existingImage))
         {
             existingImage.color = color;
@@ -390,7 +444,7 @@ internal static class PieceComfortHudBadges
 
         GameObject highlightObject = new(objectName);
         highlightObject.SetActive(false);
-        highlightObject.transform.SetParent(iconData.m_go.transform, worldPositionStays: false);
+        highlightObject.transform.SetParent(iconObject.transform, worldPositionStays: false);
 
         RectTransform rect = highlightObject.AddComponent<RectTransform>();
         rect.anchorMin = Vector2.zero;
@@ -402,7 +456,7 @@ internal static class PieceComfortHudBadges
         Image image = highlightObject.AddComponent<Image>();
         image.color = color;
         image.raycastTarget = false;
-        if (iconData.m_go.TryGetComponent(out Image background) && background.sprite != null)
+        if (iconObject.TryGetComponent(out Image background) && background.sprite != null)
         {
             image.sprite = background.sprite;
             image.type = background.type;
@@ -413,14 +467,14 @@ internal static class PieceComfortHudBadges
         return image;
     }
 
-    private static void HideHighlight(Hud.PieceIconData iconData, string objectName)
+    private static void HideHighlight(GameObject iconObject, string objectName)
     {
-        if (iconData?.m_go == null)
+        if (iconObject == null)
         {
             return;
         }
 
-        Transform existing = iconData.m_go.transform.Find(objectName);
+        Transform existing = iconObject.transform.Find(objectName);
         if (existing != null && existing.gameObject.activeSelf)
         {
             existing.gameObject.SetActive(false);
@@ -468,7 +522,7 @@ internal static class PieceComfortHudBadges
         shadow.useGraphicAlpha = true;
     }
 
-    private static TMP_Text FindTemplateText(Hud hud, Hud.PieceIconData iconData)
+    private static TMP_Text FindTemplateText(Hud hud, GameObject iconObject)
     {
         if (hud != null)
         {
@@ -489,8 +543,8 @@ internal static class PieceComfortHudBadges
             }
         }
 
-        return iconData?.m_go != null
-            ? FindFirstUsableText(iconData.m_go.transform)
+        return iconObject != null
+            ? FindFirstUsableText(iconObject.transform)
             : null!;
     }
 
@@ -599,4 +653,22 @@ internal static class DataForgeHudUpdatePieceListComfortBadgePatch
     {
         PieceComfortHudBadges.Refresh(__instance, player);
     }
+}
+
+[HarmonyPatch(typeof(BuildUiPieceButton), nameof(BuildUiPieceButton.Setup))]
+internal static class DataForgeBuildButtonComfortBadgePatch
+{
+    private static void Postfix(BuildUiPieceButton __instance) => PieceComfortHudBadges.RefreshBuildButton(__instance);
+}
+
+[HarmonyPatch(typeof(BuildUi), "UpdatePieceButtons")]
+internal static class DataForgeBuildListComfortBadgePatch
+{
+    private static void Postfix(BuildUi __instance) => PieceComfortHudBadges.RefreshBuildUi(__instance);
+}
+
+[HarmonyPatch(typeof(BuildUi), nameof(BuildUi.OnHoverPiece))]
+internal static class DataForgeBuildHoverComfortBadgePatch
+{
+    private static void Postfix(BuildUi __instance) => PieceComfortHudBadges.RefreshBuildUi(__instance);
 }
