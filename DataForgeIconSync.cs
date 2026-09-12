@@ -33,6 +33,7 @@ internal static class DataForgeIconSync
     private static readonly Dictionary<string, ServerIconAsset> ServerAssetsByHash =
         new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<ZRpc, PeerOutboundState> OutboundByPeer = new();
+    private static readonly List<KeyValuePair<ZRpc, PeerOutboundState>> OutboundPeerSnapshot = new();
     private static readonly Dictionary<string, DataForgeIconManifestEntry> ActiveRemoteEntriesByName =
         new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, DataForgeIconManifestEntry> PendingRemoteEntriesByHash =
@@ -498,45 +499,73 @@ internal static class DataForgeIconSync
         }
 
         DateTime now = DateTime.UtcNow;
-        foreach (string hash in MissingRemoteHashes.ToArray())
+        List<KeyValuePair<string, DataForgeIconManifestEntry>>? exhaustedRequests = null;
+        foreach (string hash in MissingRemoteHashes)
         {
             if (!RemoteRequestAttemptsByHash.TryGetValue(hash, out int attempts) ||
                 attempts < MaxRemoteRequestAttempts ||
                 IncomingByHash.ContainsKey(hash) ||
-                RequestedRemoteHashes.TryGetValue(hash, out DateTime lastRequestAt) &&
-                now - lastRequestAt < RequestRetryDelay ||
+                !HasRequestRetryDelayElapsed(hash, now) ||
                 !PendingRemoteEntriesByHash.TryGetValue(hash, out DataForgeIconManifestEntry? failedEntry))
             {
                 continue;
             }
 
-            RejectRemoteHash(
-                hash,
-                failedEntry,
-                $"the server did not complete the transfer after {attempts} requests");
-            if (PendingRemoteManifest == null)
+            (exhaustedRequests ??= new List<KeyValuePair<string, DataForgeIconManifestEntry>>())
+                .Add(new KeyValuePair<string, DataForgeIconManifestEntry>(hash, failedEntry));
+        }
+
+        if (exhaustedRequests != null)
+        {
+            foreach (KeyValuePair<string, DataForgeIconManifestEntry> exhausted in exhaustedRequests)
             {
-                return;
+                int attempts = RemoteRequestAttemptsByHash.TryGetValue(exhausted.Key, out int recordedAttempts)
+                    ? recordedAttempts
+                    : MaxRemoteRequestAttempts;
+                RejectRemoteHash(
+                    exhausted.Key,
+                    exhausted.Value,
+                    $"the server did not complete the transfer after {attempts} requests");
+                if (PendingRemoteManifest == null)
+                {
+                    return;
+                }
             }
         }
 
-        int recentlyRequested = RequestedRemoteHashes.Count(pair => now - pair.Value < RequestRetryDelay);
+        int recentlyRequested = 0;
+        foreach (DateTime requestedAt in RequestedRemoteHashes.Values)
+        {
+            if (now - requestedAt < RequestRetryDelay)
+            {
+                recentlyRequested++;
+            }
+        }
+
         int availableSlots = MaxRequestedHashes - recentlyRequested;
         if (availableSlots <= 0)
         {
             return;
         }
 
-        List<string> hashes = MissingRemoteHashes
-            .Where(hash => !IncomingByHash.ContainsKey(hash) &&
-                           (!RequestedRemoteHashes.TryGetValue(hash, out DateTime requestedAt) ||
-                            now - requestedAt >= RequestRetryDelay))
-            .OrderBy(hash => hash, StringComparer.Ordinal)
-            .Take(availableSlots)
-            .ToList();
-        if (hashes.Count == 0)
+        List<string>? hashes = null;
+        foreach (string hash in MissingRemoteHashes)
+        {
+            if (!IncomingByHash.ContainsKey(hash) && HasRequestRetryDelayElapsed(hash, now))
+            {
+                (hashes ??= new List<string>()).Add(hash);
+            }
+        }
+
+        if (hashes == null)
         {
             return;
+        }
+
+        hashes.Sort(StringComparer.Ordinal);
+        if (hashes.Count > availableSlots)
+        {
+            hashes.RemoveRange(availableSlots, hashes.Count - availableSlots);
         }
 
         ZPackage request = new();
@@ -561,6 +590,12 @@ internal static class DataForgeIconSync
         {
             DataForgePlugin.Log.LogDebug($"Could not send a synchronized icon request: {ex.Message}");
         }
+    }
+
+    private static bool HasRequestRetryDelayElapsed(string hash, DateTime now)
+    {
+        return !RequestedRemoteHashes.TryGetValue(hash, out DateTime requestedAt) ||
+               now - requestedAt >= RequestRetryDelay;
     }
 
     private static void OnIconRequestReceived(ZRpc rpc, ZPackage package)
@@ -647,62 +682,77 @@ internal static class DataForgeIconSync
 
     private static void ProcessOutboundTransfers(ZNet net)
     {
-        int chunksSent = 0;
-        foreach (KeyValuePair<ZRpc, PeerOutboundState> pair in OutboundByPeer.ToArray())
+        if (OutboundByPeer.Count == 0)
         {
-            ZRpc rpc = pair.Key;
-            PeerOutboundState state = pair.Value;
-            ZNetPeer? peer = net.GetPeer(rpc);
-            if (peer == null || !peer.IsReady() || !rpc.IsConnected())
-            {
-                OutboundByPeer.Remove(rpc);
-                continue;
-            }
+            return;
+        }
 
-            if (state.Transfers.Count == 0)
+        int chunksSent = 0;
+        OutboundPeerSnapshot.Clear();
+        OutboundPeerSnapshot.AddRange(OutboundByPeer);
+        try
+        {
+            for (int peerIndex = 0; peerIndex < OutboundPeerSnapshot.Count; peerIndex++)
             {
-                continue;
-            }
+                KeyValuePair<ZRpc, PeerOutboundState> pair = OutboundPeerSnapshot[peerIndex];
+                ZRpc rpc = pair.Key;
+                PeerOutboundState state = pair.Value;
+                ZNetPeer? peer = net.GetPeer(rpc);
+                if (peer == null || !peer.IsReady() || !rpc.IsConnected())
+                {
+                    OutboundByPeer.Remove(rpc);
+                    continue;
+                }
 
-            OutgoingTransfer transfer = state.Transfers.Peek();
-            DateTime now = DateTime.UtcNow;
-            transfer.MarkAsHead(now);
-            if (now - transfer.LastProgressAt > OutgoingTransferTimeout)
-            {
-                state.Transfers.Dequeue();
-                state.QueuedHashes.Remove(transfer.Asset.Entry.Hash);
-                DataForgePlugin.Log.LogWarning("A synchronized icon transfer timed out and was cancelled.");
-                continue;
-            }
+                if (state.Transfers.Count == 0)
+                {
+                    continue;
+                }
 
-            if (peer.m_socket.GetSendQueueSize() > MaxSendQueueBytes)
-            {
-                continue;
-            }
+                OutgoingTransfer transfer = state.Transfers.Peek();
+                DateTime now = DateTime.UtcNow;
+                transfer.MarkAsHead(now);
+                if (now - transfer.LastProgressAt > OutgoingTransferTimeout)
+                {
+                    state.Transfers.Dequeue();
+                    state.QueuedHashes.Remove(transfer.Asset.Entry.Hash);
+                    DataForgePlugin.Log.LogWarning("A synchronized icon transfer timed out and was cancelled.");
+                    continue;
+                }
 
-            try
-            {
-                SendNextChunk(rpc, transfer);
-            }
-            catch (Exception ex)
-            {
-                state.Transfers.Dequeue();
-                state.QueuedHashes.Remove(transfer.Asset.Entry.Hash);
-                DataForgePlugin.Log.LogDebug($"Could not send a synchronized icon chunk: {ex.Message}");
-                continue;
-            }
+                if (peer.m_socket.GetSendQueueSize() > MaxSendQueueBytes)
+                {
+                    continue;
+                }
 
-            chunksSent++;
-            if (transfer.IsComplete)
-            {
-                state.Transfers.Dequeue();
-                state.QueuedHashes.Remove(transfer.Asset.Entry.Hash);
-            }
+                try
+                {
+                    SendNextChunk(rpc, transfer);
+                }
+                catch (Exception ex)
+                {
+                    state.Transfers.Dequeue();
+                    state.QueuedHashes.Remove(transfer.Asset.Entry.Hash);
+                    DataForgePlugin.Log.LogDebug($"Could not send a synchronized icon chunk: {ex.Message}");
+                    continue;
+                }
 
-            if (chunksSent >= MaxChunksPerUpdate)
-            {
-                break;
+                chunksSent++;
+                if (transfer.IsComplete)
+                {
+                    state.Transfers.Dequeue();
+                    state.QueuedHashes.Remove(transfer.Asset.Entry.Hash);
+                }
+
+                if (chunksSent >= MaxChunksPerUpdate)
+                {
+                    break;
+                }
             }
+        }
+        finally
+        {
+            OutboundPeerSnapshot.Clear();
         }
     }
 
@@ -1005,16 +1055,32 @@ internal static class DataForgeIconSync
 
     private static void ExpireIncomingTransfers()
     {
+        if (IncomingByHash.Count == 0)
+        {
+            return;
+        }
+
         DateTime now = DateTime.UtcNow;
-        foreach (KeyValuePair<string, IncomingTransfer> pair in IncomingByHash.ToArray())
+        List<string>? expiredHashes = null;
+        foreach (KeyValuePair<string, IncomingTransfer> pair in IncomingByHash)
         {
             if (now - pair.Value.LastProgressAt <= IncomingTransferTimeout)
             {
                 continue;
             }
 
-            IncomingByHash.Remove(pair.Key);
-            RequestedRemoteHashes.Remove(pair.Key);
+            (expiredHashes ??= new List<string>()).Add(pair.Key);
+        }
+
+        if (expiredHashes == null)
+        {
+            return;
+        }
+
+        foreach (string hash in expiredHashes)
+        {
+            IncomingByHash.Remove(hash);
+            RequestedRemoteHashes.Remove(hash);
         }
     }
 
@@ -1192,6 +1258,7 @@ internal static class DataForgeIconSync
     private static void ResetNetworkState()
     {
         OutboundByPeer.Clear();
+        OutboundPeerSnapshot.Clear();
         PendingRemoteManifest = null;
         PendingRemoteEntriesByHash.Clear();
         MissingRemoteHashes.Clear();
