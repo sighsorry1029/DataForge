@@ -177,6 +177,13 @@ internal static class Program
     private static void CheckMergedAssembly(string path)
     {
         Assembly assembly = Assembly.LoadFrom(System.IO.Path.GetFullPath(path));
+        HashSet<string> assemblyReferences = assembly.GetReferencedAssemblies()
+            .Select(reference => reference.Name ?? "")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Assert(!assemblyReferences.Contains("ServerSync"), "ServerSync is merged into the final DLL");
+        Assert(!assemblyReferences.Contains("YamlDotNet"), "YamlDotNet is merged into the final DLL");
+        Assert(!assembly.GetType("ServerSync.ConfigSync", true)!.IsVisible, "Merged ServerSync types are internalized");
+        Assert(!assembly.GetType("YamlDotNet.Serialization.DeserializerBuilder", true)!.IsVisible, "Merged YamlDotNet types are internalized");
         Type api = assembly.GetType("DataForge.DataForgeApi", true)!;
         Type domain = assembly.GetType("DataForge.DataForgeDomain", true)!;
         Type change = assembly.GetType("DataForge.DataForgeChange", true)!;
