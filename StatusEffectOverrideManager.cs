@@ -1669,6 +1669,14 @@ internal static class StatusEffectOverrideManager
             ApplyFrost(frost, definition.Frost);
         }
 
+        if (statusEffect is SE_React react && definition.React != null)
+        {
+            Copy(definition.React.MinSpawnDamage, value => react.m_minSpawnDamage = value);
+            Copy(definition.React.ProjectileVelocity, value => react.m_projectileVelocity = value);
+            Copy(definition.React.TtlPerItemLevel, value => react.m_ttlPerItemLevel = value);
+            react.m_damagePerLevel = ApplyDamage(react.m_damagePerLevel, definition.React.DamagePerLevel);
+        }
+
         if (statusEffect is SE_Rested rested)
         {
             ApplyRested(rested, definition.Rested);
@@ -2322,6 +2330,27 @@ internal static class StatusEffectOverrideManager
         Copy(definition.FreezeTimeEnemy, value => frost.m_freezeTimeEnemy = Math.Max(0f, value));
         Copy(definition.FreezeTimePlayer, value => frost.m_freezeTimePlayer = Math.Max(0f, value));
         Copy(definition.MinSpeedFactor, value => frost.m_minSpeedFactor = value);
+        if (definition.SlowMultipliers != null)
+        {
+            if (TryBuildFrostSlowMultipliers(definition.SlowMultipliers, out List<ResistanceMultiplier> multipliers))
+                frost.m_frostSlowMultipliers = multipliers;
+            else
+                DataForgeLogContext.Warning("Invalid frost.slowMultipliers: use ordered single-entry damage-modifier/number mappings. The existing list was kept.");
+        }
+    }
+
+    private static bool TryBuildFrostSlowMultipliers(List<SlowMultiplierDefinition> definitions, out List<ResistanceMultiplier> result)
+    {
+        result = new List<ResistanceMultiplier>();
+        foreach (SlowMultiplierDefinition definition in definitions)
+        {
+            if (definition == null || definition.Count != 1) return false;
+            KeyValuePair<string, float> pair = definition.First();
+            if (!Enum.TryParse(pair.Key, true, out HitData.DamageModifier modifier) ||
+                !Enum.IsDefined(typeof(HitData.DamageModifier), modifier) || float.IsNaN(pair.Value) || float.IsInfinity(pair.Value)) return false;
+            result.Add(new ResistanceMultiplier { m_modifier = modifier, m_multiplier = pair.Value });
+        }
+        return true;
     }
 
     private static void ApplyRested(SE_Rested rested, RestedDefinition? definition)
@@ -2809,6 +2838,7 @@ internal static class StatusEffectOverrideManager
         public PoisonDefinition? Poison { get; set; }
         public ShieldStatusDefinition? Shield { get; set; }
         public FrostDefinition? Frost { get; set; }
+        public ReactDefinition? React { get; set; }
         public RestedDefinition? Rested { get; set; }
 
         internal void SetLogContext(string value)
@@ -2826,6 +2856,7 @@ internal static class StatusEffectOverrideManager
             Poison != null ||
             Shield != null ||
             Frost != null ||
+            React != null ||
             Rested != null;
 
         private bool HasBaseDefinition =>
@@ -2858,6 +2889,7 @@ internal static class StatusEffectOverrideManager
                 Poison = Poison,
                 Shield = Shield,
                 Frost = Frost,
+                React = React,
                 Rested = Rested
             };
         }
@@ -2920,6 +2952,7 @@ internal static class StatusEffectOverrideManager
                 Poison = definition.Poison,
                 Shield = definition.Shield,
                 Frost = definition.Frost,
+                React = definition.React,
                 Rested = definition.Rested
             };
         }
@@ -2940,6 +2973,7 @@ internal static class StatusEffectOverrideManager
         public PoisonDefinition? Poison { get; set; }
         public ShieldStatusDefinition? Shield { get; set; }
         public FrostDefinition? Frost { get; set; }
+        public ReactDefinition? React { get; set; }
         public RestedDefinition? Rested { get; set; }
 
         internal static StatusEffectReferenceEntry From(string name, StatusEffectDefinition definition)
@@ -2960,6 +2994,7 @@ internal static class StatusEffectOverrideManager
                 Poison = definition.Poison,
                 Shield = definition.Shield,
                 Frost = definition.Frost,
+                React = definition.React,
                 Rested = definition.Rested
             };
             return ReferenceValue.ClonePruned(entry) ?? new StatusEffectReferenceEntry { Effect = name };
@@ -2976,6 +3011,7 @@ internal static class StatusEffectOverrideManager
         public PoisonDefinition? Poison { get; set; }
         public ShieldStatusDefinition? Shield { get; set; }
         public FrostDefinition? Frost { get; set; }
+        public ReactDefinition? React { get; set; }
         public RestedDefinition? Rested { get; set; }
 
         internal static StatusEffectDefinition From(StatusEffect statusEffect)
@@ -2990,6 +3026,7 @@ internal static class StatusEffectOverrideManager
                 Poison = statusEffect is SE_Poison poison ? PoisonDefinition.From(poison) : null,
                 Shield = statusEffect is SE_Shield shield ? ShieldStatusDefinition.From(shield) : null,
                 Frost = statusEffect is SE_Frost frost ? FrostDefinition.From(frost) : null,
+                React = statusEffect is SE_React react ? ReactDefinition.From(react) : null,
                 Rested = statusEffect is SE_Rested rested ? RestedDefinition.From(rested) : null
             };
         }
@@ -3171,6 +3208,7 @@ internal static class StatusEffectOverrideManager
         public float? FreezeTimeEnemy { get; set; }
         public float? FreezeTimePlayer { get; set; }
         public float? MinSpeedFactor { get; set; }
+        public List<SlowMultiplierDefinition>? SlowMultipliers { get; set; }
 
         internal static FrostDefinition From(SE_Frost frost)
         {
@@ -3178,7 +3216,32 @@ internal static class StatusEffectOverrideManager
             {
                 FreezeTimeEnemy = frost.m_freezeTimeEnemy,
                 FreezeTimePlayer = frost.m_freezeTimePlayer,
-                MinSpeedFactor = frost.m_minSpeedFactor
+                MinSpeedFactor = frost.m_minSpeedFactor,
+                SlowMultipliers = frost.m_frostSlowMultipliers?
+                    .Select(value => new SlowMultiplierDefinition { [value.m_modifier.ToString()] = value.m_multiplier }).ToList()
+            };
+        }
+    }
+
+    internal sealed class SlowMultiplierDefinition : Dictionary<string, float>
+    {
+    }
+
+    internal sealed class ReactDefinition
+    {
+        public float? MinSpawnDamage { get; set; }
+        public float? ProjectileVelocity { get; set; }
+        public float? TtlPerItemLevel { get; set; }
+        public StatusDamageDefinition? DamagePerLevel { get; set; }
+
+        internal static ReactDefinition From(SE_React react)
+        {
+            return new ReactDefinition
+            {
+                MinSpawnDamage = react.m_minSpawnDamage,
+                ProjectileVelocity = react.m_projectileVelocity,
+                TtlPerItemLevel = react.m_ttlPerItemLevel,
+                DamagePerLevel = StatusDamageDefinition.From(react.m_damagePerLevel)
             };
         }
     }

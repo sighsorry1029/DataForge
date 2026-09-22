@@ -245,6 +245,28 @@ Example:
     poison: Weak
 ```
 
+`SE_React` effects such as `Staff_FrostOrbs` support a `react` block:
+
+```yaml
+- effect: Staff_FrostOrbs
+  react:
+    minSpawnDamage: 0
+    projectileVelocity: 20
+    ttlPerItemLevel: 60
+    damagePerLevel:
+      frost: 8
+```
+
+Positive `ttlPerItemLevel` replaces the effect's duration when the game sets its
+item level. Per-level damage is added to the linked Projectile's base damage for
+each item level above one. This does not edit that shared projectile prefab.
+`frost.slowMultipliers` accepts an ordered list such as `- Weak: 1.5` and
+`- Immune: 0`; the first matching entry wins. An empty list clears it, while
+omission preserves it. The game's early return for frost-resistant/immune
+characters remains in effect. Invalid lists leave the previous list intact.
+React and Frost changes apply to newly created effect instances; existing active
+effects retain their timers and type-specific state until reapplied.
+
 ## Files
 
 DataForge uses:

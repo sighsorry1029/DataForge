@@ -1,6 +1,7 @@
 using System;
 using System.Reflection;
 using System.Linq;
+using System.Collections;
 
 // Exercise the shipped serializer and plain managed data against original game types.
 // No Unity objects are created and no native/gameplay execution is simulated.
@@ -87,6 +88,31 @@ internal static class DomainChecks
         object changedDamage = effects.GetMethod("ApplyDamage", members)!.Invoke(null, new[] { damage, damagePatch })!;
         Assert((float)Field(changedDamage, "m_fire") == 0 && (float)Field(changedDamage, "m_frost") == 8, "Damage value-type update discarded");
         Assert((float)Field(changedDamage, "m_nonPlayer") == 3 && (float)Field(damage, "m_fire") == 25, "Damage edit changes omitted channels or the source value");
+        Type effectEntry = effects.GetNestedType("StatusEffectEntry", members)!;
+        object reactEntry = Read("effect: Staff_FrostOrbs\nreact:\n  minSpawnDamage: 0\n  projectileVelocity: 20\n  ttlPerItemLevel: 60\n  damagePerLevel:\n    frost: 8", effectEntry);
+        object effectDefinition = effectEntry.GetMethod("ToDefinition", members)!.Invoke(reactEntry, null)!;
+        object effectOutput = effectEntry.GetMethod("FromDefinition", members)!.Invoke(null, new[] { "Staff_FrostOrbs", effectDefinition, (object)true })!;
+        object react = Get(Read(Write(effectOutput), effectEntry), "React")!;
+        Assert((float)Get(react, "TtlPerItemLevel")! == 60 && (float)Get(Get(react, "DamagePerLevel")!, "Frost")! == 8 && (float)Get(react, "MinSpawnDamage")! == 0, "React definition/scaffold/sync round trip lost settings");
+        Type frostType = effects.GetNestedType("FrostDefinition", members)!;
+        object frost = Read("slowMultipliers:\n- Immune: 0\n- Weak: 1.5\n- Weak: 2", frostType);
+        object multipliers = Get(Read(Write(frost), frostType), "SlowMultipliers")!;
+        object?[] buildArguments = { multipliers, null };
+        MethodInfo buildFrost = effects.GetMethod("TryBuildFrostSlowMultipliers", members)!;
+        Assert((bool)buildFrost.Invoke(null, buildArguments)!, "Valid ordered Frost multipliers rejected");
+        IList built = (IList)buildArguments[1]!;
+        Assert(built.Count == 3 && (float)Field(built[0]!, "m_multiplier") == 0 && (float)Field(built[1]!, "m_multiplier") == 1.5f && (float)Field(built[2]!, "m_multiplier") == 2, "Frost zero/order/duplicate-first-match semantics changed");
+        buildArguments = new[] { multipliers, null };
+        buildFrost.Invoke(null, buildArguments);
+        Assert(!ReferenceEquals(built, buildArguments[1]), "Frost rebuild aliases another effect's list");
+        foreach (string invalid in new[] { "slowMultipliers:\n- Typo: 1", "slowMultipliers:\n- Weak: 1\n  Immune: 0" })
+        {
+            object bad = Get(Read(invalid, frostType), "SlowMultipliers")!;
+            Assert(!(bool)buildFrost.Invoke(null, new[] { bad, null })!, "Invalid Frost list accepted");
+        }
+        object empty = Get(Read("slowMultipliers: []", frostType), "SlowMultipliers")!;
+        buildArguments = new[] { empty, null };
+        Assert((bool)buildFrost.Invoke(null, buildArguments)! && ((IList)buildArguments[1]!).Count == 0, "Explicit empty Frost list does not clear");
         Console.WriteLine($"Domain checks passed: {checks} managed assertions (not Unity execution).");
     }
 }
