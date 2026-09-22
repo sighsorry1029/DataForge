@@ -78,6 +78,15 @@ internal static class DomainChecks
         Assert(Get(Get(itemRoundTrip, "Equipment")!, "IceSkates") is false && Get(Get(itemRoundTrip, "Equipment")!, "IceShoes") is true, "Explicit ice equipment flags lost");
         object omittedAttack = Get(Read("item: StaffThunderBlood\nprimaryAttack:\n  damageMultiplier: 2", itemEntry), "PrimaryAttack")!;
         Assert(Get(omittedAttack, "ProjectileVelocity") == null && Get(omittedAttack, "Projectiles") == null, "Omitted attack fields acquire defaults");
+        Type effects = mod.GetType("DataForge.StatusEffectOverrideManager", true)!;
+        Type damageType = game.GetType("HitData+DamageTypes", true)!;
+        object damage = Activator.CreateInstance(damageType)!;
+        damageType.GetField("m_fire")!.SetValue(damage, 25f);
+        damageType.GetField("m_nonPlayer")!.SetValue(damage, 3f);
+        object damagePatch = Read("fire: 0\nfrost: 8", effects.GetNestedType("StatusDamageDefinition", members)!);
+        object changedDamage = effects.GetMethod("ApplyDamage", members)!.Invoke(null, new[] { damage, damagePatch })!;
+        Assert((float)Field(changedDamage, "m_fire") == 0 && (float)Field(changedDamage, "m_frost") == 8, "Damage value-type update discarded");
+        Assert((float)Field(changedDamage, "m_nonPlayer") == 3 && (float)Field(damage, "m_fire") == 25, "Damage edit changes omitted channels or the source value");
         Console.WriteLine($"Domain checks passed: {checks} managed assertions (not Unity execution).");
     }
 }

@@ -1651,7 +1651,7 @@ internal static class StatusEffectOverrideManager
             ApplyStats(stats, definition.Stats);
             ApplyStaminaDrainModifier(stats, definition.StaminaDrainModifier);
             ApplyDamageTakenModifiers(stats.m_mods, definition.DamageTakenModifiers);
-            ApplyDamage(stats.m_percentigeDamageModifiers, definition.PercentageDamageModifiers);
+            stats.m_percentigeDamageModifiers = ApplyDamage(stats.m_percentigeDamageModifiers, definition.PercentageDamageModifiers);
         }
 
         if (statusEffect is SE_Poison poison)
@@ -1687,7 +1687,7 @@ internal static class StatusEffectOverrideManager
             ApplyLiveSafeStats(stats, definition.Stats);
             ApplyStaminaDrainModifier(stats, definition.StaminaDrainModifier);
             ApplyDamageTakenModifiers(stats.m_mods, definition.DamageTakenModifiers);
-            ApplyDamage(stats.m_percentigeDamageModifiers, definition.PercentageDamageModifiers);
+            stats.m_percentigeDamageModifiers = ApplyDamage(stats.m_percentigeDamageModifiers, definition.PercentageDamageModifiers);
         }
     }
 
@@ -2335,11 +2335,11 @@ internal static class StatusEffectOverrideManager
         Copy(definition.TtlPerComfortLevel, value => rested.m_TTLPerComfortLevel = Math.Max(0f, value));
     }
 
-    private static void ApplyDamage(HitData.DamageTypes target, StatusDamageDefinition? damage)
+    private static HitData.DamageTypes ApplyDamage(HitData.DamageTypes target, StatusDamageDefinition? damage)
     {
         if (damage == null)
         {
-            return;
+            return target;
         }
 
         Copy(damage.Blunt, value => target.m_blunt = value);
@@ -2352,6 +2352,7 @@ internal static class StatusEffectOverrideManager
         Copy(damage.Lightning, value => target.m_lightning = value);
         Copy(damage.Poison, value => target.m_poison = value);
         Copy(damage.Spirit, value => target.m_spirit = value);
+        return target;
     }
 
     private static void ApplyDamageTakenModifiers(List<HitData.DamageModPair> modifiers, DamageTakenModifierDefinition? definition)
