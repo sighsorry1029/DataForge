@@ -186,6 +186,12 @@ Example:
 - Wood: 4
 ```
 
+`cookingStation` additionally accepts `canOvercookItems`, `useFuelWhileEmpty`,
+`skill` (including `None`), and `recordCrafter`. These describe Foundry and ordinary
+cooking policies separately from fuel/conversions. Omitted fields keep existing
+values. Applying them does not clear fuel, rewrite occupied slots or replace
+already recorded crafters; crafter recording affects subsequent insertions.
+
 `pieceCategory.reference.yml` records the detected category order for every build tool before DataForge applies category moves or ordering. Copy only the sections you want to control into `pieceCategory.yml`:
 
 ```yaml

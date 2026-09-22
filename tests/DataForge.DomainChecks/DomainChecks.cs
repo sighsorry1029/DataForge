@@ -113,6 +113,14 @@ internal static class DomainChecks
         object empty = Get(Read("slowMultipliers: []", frostType), "SlowMultipliers")!;
         buildArguments = new[] { empty, null };
         Assert((bool)buildFrost.Invoke(null, buildArguments)! && ((IList)buildArguments[1]!).Count == 0, "Explicit empty Frost list does not clear");
+        Type pieceEntry = mod.GetType("DataForge.PieceOverrideManager+PieceEntry", true)!;
+        object foundry = Read("piece: piece_FrostFoundry\ncookingStation:\n  canOvercookItems: false\n  useFuelWhileEmpty: false\n  skill: None\n  recordCrafter: true", pieceEntry);
+        Type pruning = mod.GetType("DataForge.ReferenceValue", true)!;
+        object station = Get(foundry, "CookingStation")!;
+        object prunedStation = pruning.GetMethod("ClonePruned", members)!.MakeGenericMethod(station.GetType()).Invoke(null, new[] { station })!;
+        object stationCopy = Read(Write(prunedStation), station.GetType());
+        Assert(Get(stationCopy, "CanOvercookItems") is false && Get(stationCopy, "UseFuelWhileEmpty") is false && (string)Get(stationCopy, "Skill")! == "None" && Get(stationCopy, "RecordCrafter") is true, "Foundry policy is hidden by reference default pruning");
+        Assert(Get(Read("fuel: Wood, false, 10, 60", station.GetType()), "CanOvercookItems") == null, "Old cooking config gains an explicit policy");
         Console.WriteLine($"Domain checks passed: {checks} managed assertions (not Unity execution).");
     }
 }
