@@ -24,11 +24,41 @@ dotnet run --project tests/DataForge.DomainChecks -c Debug -- bin/Debug/DataForg
 
 `DomainChecks` runs the merged YAML converter and plain managed game data on .NET 8.
 It checks legacy resource tuples, metadata omission versus explicit false/zero,
-rebuild and reference-copy round trips, and invalid input rejection. It constructs
+rebuild and reference-copy round trips, and invalid input rejection. It also
+exercises damage value updates, ordered Frost lists, item/effect field round trips,
+Foundry reference pruning, source-free conversion YAML and read-only comment escaping.
+It constructs
 the codec without manager initialization: the installed Harmony needs the net48
 runner while the merged YAML library needs default-interface-method support.
 Prefab lookup, baseline capture from Unity objects, live reload and gameplay are
 not exercised by this process.
+
+## Deep North field support runtime checklist
+
+Use the same rebuilt DataForge DLL on client/host/dedicated roles. This is a manual
+checklist, not a record of successful gameplay tests.
+
+1. Regenerate item/effect references and full scaffolds. Inspect StaffOrbofAhri,
+   StaffThunderBlood, StaffSpiritCaller and Staff_FrostOrbs. Confirm outgoing,
+   return, active AOE_AREA, inactive AOE_ROD and chain links are labelled as prefab
+   data. Copy a commented entry to an override file and reload it without schema errors.
+2. Override only Frost Kiln health, then reload and remove the override. Confirm
+   `None: FrozenFuel` survives, existing fuel/queues remain, and Ice produces the
+   same number of Liquid Frost items. Repeat with ordinary ore smelters.
+3. Inspect upgrade-only staff recipes and Upgrader7Weapon metadata. Edit only
+   amount, then a legacy resource tuple; reload/remove overrides. Check ordinary
+   and upgrader material validation/consumption agree, including qualityBonus,
+   full inventory and failed upgrades. Save/reconnect and check item counts.
+4. Change primary and secondary launch fields and ice equipment flags; verify
+   omission/false/zero, live inventory refresh and restore. Existing projectiles
+   and linked shared-prefab damage must remain unchanged.
+5. Reapply Staff_FrostOrbs after changing react values and test the next effect's
+   level-scaled duration/damage. Already active effects must retain their timers.
+   Check Frost list order/duplicates, invalid-list retention and removal/restore.
+6. Exercise Foundry policies with empty and occupied slots, subsequent ingredient
+   insertion, crafter identity, overcooking and fuel usage. Check owner handoff,
+   simultaneous collection and reconnect without lost/duplicated output. No slot,
+   fuel, ownership or RPC implementation is changed by these fields.
 
 The pattern-rejection logging path requires the game's ThreadingHelper singleton. Exercise altered patterns/other transpilers in-game; the standalone runner deliberately does not initialize a fake BepInEx/Unity process. Static checks do not prove Harmony patch installation, per-frame performance, native Unity calls, UI appearance or network behavior.
 

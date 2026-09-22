@@ -318,6 +318,18 @@ Reference files are meant for browsing and copy-paste edits:
 - piece references use tier sorting
 - `pieceCategory.reference.yml` records the detected pre-DataForge per-tool category order and labels, so runtime moves and ordering do not rewrite the source reference
 
+Item references/full scaffolds include read-only attack-graph comments. They show
+linked Projectile/Aoe/SpawnAbility prefabs, component paths, inactive branches,
+follow-up links and HitData inheritance conditions. Effect references also show
+`SE_React`'s linked projectile. Values labelled `prefabDamage` are the serialized
+baseline: incoming HitData can replace them, so they are not total attack damage.
+`useAttackSettings: false` means the Aoe keeps its own damage. Spawned creatures
+own separate stats. These comments are safe to copy with an entry and are not
+editable settings. Cycles and traversal limits are labelled. DataForge collects
+them with the world baseline, never during combat or per frame; other mods and
+ammo can change the runtime path. Shared Projectile/Aoe editing remains outside
+the supported schema.
+
 The default `BepInEx/config/DataForge/z_resourcemap.txt` places Deep North after Ashlands. It uses prefab names such as `Gold` (Bloodgold), `GoldOre` (Petrified Tissue), `Frostwood` (Timberwood), and `NornThread` (Nornathread). `WrithanRoots` and `TrophyWrithan` belong to Swamp, `Hook` to Mistlands, and `TrophyBlob_Lava` to Ashlands. Fader relics and embers are grouped with Deep North as progression-entry materials. `TrophyBlob_Frost` remains unclassified until its acquisition path is confirmed.
 
 Existing resource maps are preserved when updating the mod. To update a customized map, back it up, merge the new entries from the [default resource map](DataForgeResourceMap.cs) into the corresponding existing sections, and add `[DeepNorth]` immediately after the Ashlands section. Keep custom entries and their relative section order. Sections are ordered by position, and the first occurrence of a resource wins; repeating a section header creates another tier. Restart the game after merging, then regenerate the references. These entries only affect generated reference/full-scaffold ordering, not crafting costs, unlocks, or item stats.

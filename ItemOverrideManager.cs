@@ -3235,6 +3235,7 @@ internal static class ItemOverrideManager
                     .Select(pair => new
                     {
                         Entry = CreateOutputEntryMap(pair.Key, pair.Value.Definition),
+                        Comments = pair.Value.Definition.ReferenceComments,
                         OwnerKey = pair.Key,
                         SortKey = DataForgeResourceMap.BuildItemSortKey(
                             pair.Key,
@@ -3250,7 +3251,8 @@ internal static class ItemOverrideManager
                            entry => entry.SortKey,
                            entry => DataForgeOwnerResolver.GetPrefabOwnerName(entry.OwnerKey),
                            entry => entry.Entry,
-                           FullSerializer);
+                           FullSerializer,
+                           entry => entry.Comments);
             },
             out error);
     }
@@ -3304,6 +3306,7 @@ internal static class ItemOverrideManager
             .Select(pair => new
             {
                 Entry = ItemReferenceEntry.From(pair.Key, pair.Value.Definition),
+                Comments = pair.Value.Definition.ReferenceComments,
                 SortKey = DataForgeResourceMap.BuildItemSortKey(
                     pair.Key,
                     DataForgeResourceMap.GetItemTierSortValue(pair.Key),
@@ -3316,7 +3319,8 @@ internal static class ItemOverrideManager
             entry => entry.SortKey,
             entry => DataForgeOwnerResolver.GetPrefabOwnerName(entry.Entry.Item),
             entry => entry.Entry,
-            SparseSerializer);
+            SparseSerializer,
+            entry => entry.Comments);
     }
 
     private static bool CanBuildGeneratedArtifacts()
@@ -4282,6 +4286,7 @@ internal static class ItemOverrideManager
 
     internal sealed class ItemDefinition
     {
+        internal List<string> ReferenceComments { get; set; } = new();
         public BasicsDefinition? Basics { get; set; }
         public string? Durability { get; set; }
         public EquipmentDefinition? Equipment { get; set; }
@@ -4298,6 +4303,7 @@ internal static class ItemOverrideManager
             return new ItemDefinition
             {
                 Basics = BasicsDefinition.From(itemDrop),
+                ReferenceComments = AttackReference.Capture(shared),
                 Durability = DurabilityDefinition.From(shared).ToString(),
                 Equipment = EquipmentDefinition.From(shared),
                 DamageTakenModifiers = DamageTakenModifierDefinition.From(shared.m_damageModifiers),

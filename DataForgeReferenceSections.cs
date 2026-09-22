@@ -28,7 +28,8 @@ internal static class DataForgeReferenceSections
         Func<TSource, string> getSortKey,
         Func<TSource, string> getOwnerName,
         Func<TSource, TOutput> getOutput,
-        ISerializer serializer)
+        ISerializer serializer,
+        Func<TSource, IEnumerable<string>>? getComments = null)
     {
         DataForgeAssetOwnerCatalog.PrepareForReferenceGeneration();
         List<IGrouping<string, GroupedEntry<TSource>>> sections = entries
@@ -62,6 +63,7 @@ internal static class DataForgeReferenceSections
             AppendSectionHeaderComment(builder, section.Key);
             foreach (GroupedEntry<TSource> entry in section)
             {
+                if (getComments != null) AppendEntryComments(builder, getComments(entry.Entry));
                 string serializedEntry = CollapseScalarBlockListsToInlineLists(
                     serializer.Serialize(new[] { getOutput(entry.Entry) }).TrimEnd('\r', '\n'));
                 builder.AppendLine(serializedEntry);
@@ -78,6 +80,16 @@ internal static class DataForgeReferenceSections
         builder.Append("# ===== ");
         builder.Append(string.IsNullOrWhiteSpace(ownerName) ? UnknownOwnerName : ownerName.Trim());
         builder.AppendLine(" =====");
+    }
+
+    private static void AppendEntryComments(StringBuilder builder, IEnumerable<string> comments)
+    {
+        foreach (string comment in comments)
+        {
+            foreach (string line in comment.Replace("\r\n", "\n").Replace('\r', '\n')
+                         .Replace('\u0085', '\n').Replace('\u2028', '\n').Replace('\u2029', '\n').Split('\n'))
+                builder.Append("# ").AppendLine(line);
+        }
     }
 
     private static int GetOwnerSortBucket(string ownerName)
