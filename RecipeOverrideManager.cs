@@ -1190,10 +1190,10 @@ internal static class RecipeOverrideManager
 
         string key = ToRecipeKey(entry.Recipe);
         string recipeName = ToRecipeName(entry.Recipe);
-        if (entry.Resources == null && entry.UpgradeResources == null)
+        if (entry.Resources == null)
         {
             DataForgeLogContext.Warning(
-                $"Could not add recipe '{recipeName}': new recipes must declare resources or upgradeResources. Use an empty list only for an intentional free recipe.");
+                $"Could not add recipe '{recipeName}': new recipes must declare resources. Use 'resources: []' only for intentional free crafting.");
             return null;
         }
 
@@ -1458,8 +1458,8 @@ internal static class RecipeOverrideManager
         }
 
         Piece.Requirement[]? resources = null;
-        if ((definition.Resources != null || definition.UpgradeResources != null) &&
-            !TryBuildRequirementGroups(definition.Resources, definition.UpgradeResources, recipe.m_resources, out resources))
+        if (definition.Resources != null &&
+            !TryBuildRequirements(definition.Resources, recipe.m_resources, out resources))
         {
             return false;
         }
@@ -1493,40 +1493,11 @@ internal static class RecipeOverrideManager
         return true;
     }
 
-    private static bool TryBuildRequirementGroups(
-        List<RequirementDefinition>? regularDefinitions,
-        List<RequirementDefinition>? upgradeDefinitions,
+    private static bool TryBuildRequirements(
+        List<RequirementDefinition> definitions,
         Piece.Requirement[] existing,
         out Piece.Requirement[] requirements)
     {
-        Piece.Requirement[] current = existing ?? Array.Empty<Piece.Requirement>();
-        Piece.Requirement[] regularExisting = current
-            .Where(requirement => requirement != null && !requirement.m_upgraderResource).ToArray();
-        Piece.Requirement[] upgradeExisting = current
-            .Where(requirement => requirement != null && requirement.m_upgraderResource).ToArray();
-        if (!TryBuildRequirements(regularDefinitions, regularExisting, upgraderResource: false, out List<Piece.Requirement> regular) ||
-            !TryBuildRequirements(upgradeDefinitions, upgradeExisting, upgraderResource: true, out List<Piece.Requirement> upgrade))
-        {
-            requirements = Array.Empty<Piece.Requirement>();
-            return false;
-        }
-
-        requirements = regular.Concat(upgrade).ToArray();
-        return true;
-    }
-
-    private static bool TryBuildRequirements(
-        List<RequirementDefinition>? definitions,
-        Piece.Requirement[] existing,
-        bool upgraderResource,
-        out List<Piece.Requirement> requirements)
-    {
-        if (definitions == null)
-        {
-            requirements = existing.ToList();
-            return true;
-        }
-
         List<Piece.Requirement> resolved = new();
         List<Piece.Requirement> remaining = (existing ?? Array.Empty<Piece.Requirement>())
             .Where(requirement => requirement != null).ToList();
@@ -1535,7 +1506,7 @@ internal static class RecipeOverrideManager
             if (string.IsNullOrWhiteSpace(definition.Item))
             {
                 DataForgeLogContext.Warning("Could not apply recipe: a resource entry has no item.");
-                requirements = new List<Piece.Requirement>();
+                requirements = Array.Empty<Piece.Requirement>();
                 return false;
             }
 
@@ -1544,15 +1515,20 @@ internal static class RecipeOverrideManager
             {
                 DataForgeLogContext.Warning(
                     $"Could not apply recipe resources because item '{definition.Item}' is unavailable. The existing resource list was kept.");
-                requirements = new List<Piece.Requirement>();
+                requirements = Array.Empty<Piece.Requirement>();
                 return false;
             }
 
             // Match repeated resources in order, retaining hidden game metadata.
-            int previousIndex = remaining.FindIndex(requirement => requirement.m_resItem == item);
+            int previousIndex = remaining.FindIndex(requirement =>
+                requirement.m_resItem == item && requirement.m_upgraderResource == definition.UpgradeResource);
+            if (previousIndex < 0)
+            {
+                previousIndex = remaining.FindIndex(requirement => requirement.m_resItem == item);
+            }
             Piece.Requirement? previous = previousIndex >= 0 ? remaining[previousIndex] : null;
             if (previousIndex >= 0) remaining.RemoveAt(previousIndex);
-            Piece.Requirement requirement = definition.Build(item, previous, upgraderResource);
+            Piece.Requirement requirement = definition.Build(item, previous);
             if (definition.ExactQuality is >= 2)
             {
                 ExactQualityRequirements.Add(requirement, new ExactQualityRequirement(definition.ExactQuality.Value));
@@ -1561,7 +1537,7 @@ internal static class RecipeOverrideManager
             resolved.Add(requirement);
         }
 
-        requirements = resolved;
+        requirements = resolved.ToArray();
         return true;
     }
 
@@ -2089,7 +2065,7 @@ internal static class RecipeOverrideManager
                         OwnerKey = pair.Baseline.Item ?? ToRecipeItemKey(pair.PublicKey),
                         SortKey = DataForgeResourceMap.BuildItemSortKey(
                             pair.Baseline.Item ?? ToRecipeItemKey(pair.PublicKey),
-                            DataForgeResourceMap.GetResourceTierSortValue(GetResourceItemNames(pair.Baseline)),
+                            DataForgeResourceMap.GetResourceTierSortValue(pair.Baseline.Resources?.Select(resource => resource.Item) ?? Array.Empty<string?>()),
                             pair.PublicKey)
                     })
                     .OrderBy(pair => pair.SortKey, StringComparer.OrdinalIgnoreCase)
@@ -2157,7 +2133,7 @@ internal static class RecipeOverrideManager
                 OwnerKey = slot.Baseline.Item ?? ToRecipeItemKey(slot.PublicKey),
                 SortKey = DataForgeResourceMap.BuildItemSortKey(
                     slot.Baseline.Item ?? ToRecipeItemKey(slot.PublicKey),
-                    DataForgeResourceMap.GetResourceTierSortValue(GetResourceItemNames(slot.Baseline)),
+                    DataForgeResourceMap.GetResourceTierSortValue(slot.Baseline.Resources?.Select(resource => resource.Item) ?? Array.Empty<string?>()),
                     slot.PublicKey)
             })
             .ToList();
@@ -2175,13 +2151,6 @@ internal static class RecipeOverrideManager
         return ObjectDbReady &&
                ZNetScene.instance != null &&
                ObjectDB.instance != null;
-    }
-
-    private static IEnumerable<string?> GetResourceItemNames(RecipeDefinition definition)
-    {
-        return (definition.Resources ?? new List<RequirementDefinition>())
-            .Concat(definition.UpgradeResources ?? new List<RequirementDefinition>())
-            .Select(resource => resource.Item);
     }
 
     private static string GetItemName(ItemDrop? item)
@@ -2433,7 +2402,6 @@ internal static class RecipeOverrideManager
         public int? ListSortWeight { get; set; }
         public bool? NoCraftOnlyUpgrade { get; set; }
         public List<RequirementDefinition>? Resources { get; set; }
-        public List<RequirementDefinition>? UpgradeResources { get; set; }
         public List<QualityBonusDefinition>? QualityBonus { get; set; }
 
         internal void SetLogContext(string value)
@@ -2448,7 +2416,6 @@ internal static class RecipeOverrideManager
             ListSortWeight.HasValue ||
             NoCraftOnlyUpgrade.HasValue ||
             Resources != null ||
-            UpgradeResources != null ||
             QualityBonus != null;
 
         internal static RecipeEntry From(string publicKey, RecipeDefinition definition)
@@ -2463,7 +2430,6 @@ internal static class RecipeOverrideManager
                 ListSortWeight = definition.ListSortWeight,
                 NoCraftOnlyUpgrade = definition.NoCraftOnlyUpgrade,
                 Resources = definition.Resources,
-                UpgradeResources = definition.UpgradeResources,
                 QualityBonus = definition.QualityBonus
             };
         }
@@ -2476,8 +2442,7 @@ internal static class RecipeOverrideManager
         public string? RequireOnlyOneIngredient { get; set; }
         public int? ListSortWeight { get; set; }
         public bool? NoCraftOnlyUpgrade { get; set; }
-        public List<ResourceReferenceDefinition>? Resources { get; set; }
-        public List<ResourceReferenceDefinition>? UpgradeResources { get; set; }
+        public List<RequirementDefinition>? Resources { get; set; }
 
         internal static RecipeReferenceEntry From(string publicKey, RecipeDefinition definition)
         {
@@ -2490,33 +2455,9 @@ internal static class RecipeOverrideManager
                 ListSortWeight = definition.ListSortWeight,
                 NoCraftOnlyUpgrade = definition.NoCraftOnlyUpgrade,
                 Resources = definition.Resources?
-                    .Select(resource => ResourceReferenceDefinition.From(resource, includeAmountPerLevel))
-                    .ToList(),
-                UpgradeResources = definition.UpgradeResources?
-                    .Select(resource => ResourceReferenceDefinition.From(resource, includeAmountPerLevel))
+                    .Select(resource => RequirementDefinition.ForReference(resource, includeAmountPerLevel))
                     .ToList()
             })!;
-        }
-    }
-
-    internal sealed class ResourceReferenceDefinition : Dictionary<string, string>
-    {
-        internal static ResourceReferenceDefinition From(RequirementDefinition definition, bool includeAmountPerLevel)
-        {
-            ResourceReferenceDefinition resource = new();
-            string item = definition.Item ?? "";
-            RequirementDefinition output = new()
-            {
-                Item = item,
-                Amount = definition.Amount,
-                AmountPerLevel = ((includeAmountPerLevel && definition.AmountPerLevel.GetValueOrDefault() != 0) ||
-                                  definition.ExactQuality.HasValue)
-                    ? definition.AmountPerLevel
-                    : null,
-                ExactQuality = definition.ExactQuality
-            };
-            resource[item] = RequirementDefinitionYamlConverter.FormatShorthandRequirementValue(output);
-            return resource;
         }
     }
 
@@ -2542,7 +2483,6 @@ internal static class RecipeOverrideManager
         public int? ListSortWeight { get; set; }
         public bool? NoCraftOnlyUpgrade { get; set; }
         public List<RequirementDefinition>? Resources { get; set; }
-        public List<RequirementDefinition>? UpgradeResources { get; set; }
         public List<QualityBonusDefinition>? QualityBonus { get; set; }
 
         internal static RecipeDefinition From(RecipeEntry entry)
@@ -2555,7 +2495,6 @@ internal static class RecipeOverrideManager
                 ListSortWeight = entry.ListSortWeight,
                 NoCraftOnlyUpgrade = entry.NoCraftOnlyUpgrade,
                 Resources = entry.Resources,
-                UpgradeResources = entry.UpgradeResources,
                 QualityBonus = entry.QualityBonus
             };
         }
@@ -2575,11 +2514,7 @@ internal static class RecipeOverrideManager
                 ListSortWeight = recipe.m_listSortWeight,
                 NoCraftOnlyUpgrade = recipe.m_noCraftOnlyUpgrade,
                 Resources = recipe.m_resources?
-                    .Where(requirement => requirement != null && !requirement.m_upgraderResource)
-                    .Select(requirement => RequirementDefinition.From(requirement, maxQuality))
-                    .ToList() ?? new List<RequirementDefinition>(),
-                UpgradeResources = recipe.m_resources?
-                    .Where(requirement => requirement != null && requirement.m_upgraderResource)
+                    .Where(requirement => requirement != null)
                     .Select(requirement => RequirementDefinition.From(requirement, maxQuality))
                     .ToList() ?? new List<RequirementDefinition>(),
                 QualityBonus = null
@@ -2595,15 +2530,16 @@ internal static class RecipeOverrideManager
         public int? ExactQuality { get; set; }
         internal bool? Recover { get; set; }
         internal int? ExtraAmountOnlyOneIngredient { get; set; }
+        internal bool UpgradeResource { get; set; }
 
-        internal Piece.Requirement Build(ItemDrop item, Piece.Requirement? previous, bool upgraderResource)
+        internal Piece.Requirement Build(ItemDrop item, Piece.Requirement? previous)
         {
             return new Piece.Requirement
             {
                 m_resItem = item,
                 m_amount = Math.Max(0, Amount ?? 0),
                 m_amountPerLevel = Math.Max(0, AmountPerLevel ?? 0),
-                m_upgraderResource = upgraderResource,
+                m_upgraderResource = UpgradeResource,
                 m_recover = Recover ?? previous?.m_recover ?? true,
                 m_extraAmountOnlyOneIngredient = ExtraAmountOnlyOneIngredient ?? previous?.m_extraAmountOnlyOneIngredient ?? 0
             };
@@ -2618,7 +2554,24 @@ internal static class RecipeOverrideManager
                 AmountPerLevel = requirement.m_amountPerLevel,
                 ExactQuality = DetectExactQuality(requirement, maxQuality),
                 Recover = requirement.m_recover,
-                ExtraAmountOnlyOneIngredient = requirement.m_extraAmountOnlyOneIngredient
+                ExtraAmountOnlyOneIngredient = requirement.m_extraAmountOnlyOneIngredient,
+                UpgradeResource = requirement.m_upgraderResource
+            };
+        }
+
+        internal static RequirementDefinition ForReference(RequirementDefinition definition, bool includeAmountPerLevel)
+        {
+            return new RequirementDefinition
+            {
+                Item = definition.Item,
+                Amount = definition.Amount,
+                AmountPerLevel = !definition.UpgradeResource &&
+                                 ((includeAmountPerLevel && definition.AmountPerLevel.GetValueOrDefault() != 0) ||
+                                  definition.ExactQuality.HasValue)
+                    ? definition.AmountPerLevel
+                    : null,
+                ExactQuality = definition.UpgradeResource ? null : definition.ExactQuality,
+                UpgradeResource = definition.UpgradeResource
             };
         }
     }
@@ -2707,22 +2660,46 @@ internal static class RecipeOverrideManager
 
                 if (pairs.Count == 1)
                 {
+                    if (pairs[0].Key.Equals("upgrade", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string item = pairs[0].Value.Trim();
+                        if (item.Length == 0 || item.Contains(","))
+                        {
+                            throw new YamlException(shorthandStart, shorthandEnd, "Recipe upgrade resource must name one item prefab and always uses amount 1.");
+                        }
+
+                        return new RequirementDefinition
+                        {
+                            Item = item,
+                            Amount = 1,
+                            UpgradeResource = true
+                        };
+                    }
+
                     return ParseShorthandRequirement(pairs[0].Key, pairs[0].Value, shorthandStart, shorthandEnd);
                 }
 
-                throw new YamlException("Recipe resources must use one tuple mapping, for example '- Iron: 20, 10' or '- SurtlingCore: 0, 5, 2'.");
+                throw new YamlException("Recipe resources must use one mapping, for example '- Iron: 20, 10', '- SurtlingCore: 0, 5, 2', or '- upgrade: Upgrader7Weapon'.");
             }
 
             Scalar scalar = parser.Consume<Scalar>();
-            throw new YamlException(scalar.Start, scalar.End, "Recipe resources must use mapping shorthand, for example '- Iron: 20, 10' or '- SurtlingCore: 0, 5, 2'.");
+            throw new YamlException(scalar.Start, scalar.End, "Recipe resources must use mapping shorthand, for example '- Iron: 20, 10' or '- upgrade: Upgrader7Weapon'.");
         }
 
         public void WriteYaml(IEmitter emitter, object? value, Type type, ObjectSerializer serializer)
         {
             RequirementDefinition requirement = (RequirementDefinition)value!;
             emitter.Emit(new MappingStart());
-            emitter.Emit(new Scalar(requirement.Item ?? ""));
-            emitter.Emit(new Scalar(FormatShorthandRequirementValue(requirement)));
+            if (requirement.UpgradeResource)
+            {
+                emitter.Emit(new Scalar("upgrade"));
+                emitter.Emit(new Scalar(requirement.Item ?? ""));
+            }
+            else
+            {
+                emitter.Emit(new Scalar(requirement.Item ?? ""));
+                emitter.Emit(new Scalar(FormatShorthandRequirementValue(requirement)));
+            }
             emitter.Emit(new MappingEnd());
         }
 

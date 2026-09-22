@@ -127,29 +127,22 @@ Resource tuples use `craft amount, upgrade amount, exact quality`. With two valu
 
 `noCraftOnlyUpgrade: true` marks an upgrade-only recipe. The game selects a
 different subset of requirements while the current crafting station is an
-Upgrader. DataForge represents that distinction as a separate block:
+Upgrader. Put its fixed one-item requirement in the same list with the reserved
+`upgrade` key:
 
 ```yaml
   resources:
   - Gold: 10, 5
   - NornThread: 5, 2
-  upgradeResources:
-  - Upgrader7Weapon: 1
+  - upgrade: Upgrader7Weapon
 ```
 
-Both blocks use the same `craft amount, upgrade amount, exact quality` tuples.
-They are independent: omitting a block preserves that subset, while an empty list
-removes that subset. Thus `resources: []` keeps existing Upgrader-only requirements;
-use both empty lists to remove every requirement:
-
-```yaml
-  resources: []
-  upgradeResources: []
-```
-
-Reference files place `Upgrader7Weapon` and other requirements according to the
-game's `m_upgraderResource` flag. Hidden recovery and one-ingredient metadata is
-preserved internally when tuples are reapplied; it is not an editable YAML field.
+`upgrade: ItemPrefab` always means one item, with no per-level or exact-quality
+form. It accepts custom idol prefabs as well as `Upgrader0Weapon` through
+`Upgrader7Armor`. Reference and full files emit this form from the game's
+`m_upgraderResource` flag. Omitting `resources` preserves the complete requirement
+list; `resources: []` removes it. Hidden recovery and one-ingredient metadata is
+preserved internally when entries are reapplied; it is not editable YAML.
 
 The synced `Upgrade Material Scaling` config can globally keep vanilla costs (`10 / 20 / 30`), flatten them (`10 / 10 / 10`), or use reduced scaling (`10 / 15 / 20`). Exact-quality requirements keep their explicitly configured amount.
 

@@ -38,8 +38,8 @@ internal static class DomainChecks
         object Read(string yaml, Type? type = null) => deserializer.GetType().GetMethod("Deserialize", new[] { typeof(string), typeof(Type) })!.Invoke(deserializer, new object[] { yaml, type ?? requirement })!;
         string Write(object data) => (string)serializer.GetType().GetMethod("Serialize", new[] { typeof(object) })!.Invoke(serializer, new[] { data })!;
         object? Get(object data, string name) => data.GetType().GetProperty(name, members)!.GetValue(data);
-        object Build(object definition, object? previous = null, bool upgraderResource = false) =>
-            requirement.GetMethod("Build", members)!.Invoke(definition, new[] { null, previous, (object)upgraderResource })!;
+        object Build(object definition, object? previous = null) =>
+            requirement.GetMethod("Build", members)!.Invoke(definition, new[] { null, previous })!;
         object Field(object data, string name) => data.GetType().GetField(name)!.GetValue(data)!;
         bool Rejected(string yaml, Type type)
         {
@@ -53,33 +53,39 @@ internal static class DomainChecks
         Assert(requirement.GetProperty("UpgraderResource", members) == null, "Resource classification remains exposed as tuple metadata");
         Assert(Write(regular).Trim() == "Iron: 20, 10", "Resource tuple output changed");
         Assert((int)Get(Read("SurtlingCore: 0, 5, 2"), "ExactQuality")! == 2, "Exact-quality tuple changed");
-        object special = Read("Upgrader7Weapon: 1");
-        object original = Build(special, upgraderResource: true);
+        object special = Read("upgrade: Upgrader7Weapon");
+        Assert((bool)Get(special, "UpgradeResource")! && (int)Get(special, "Amount")! == 1 &&
+               Get(special, "AmountPerLevel") == null && Get(special, "ExactQuality") == null,
+            "Reserved upgrade entry acquired editable amount metadata");
+        Assert(Write(Read("upgrade: CustomIdol")).Trim() == "upgrade: CustomIdol", "Custom upgrade prefab is not preserved");
+        Assert(!(bool)Field(Build(Read("Upgrader7Weapon: 1")), "m_upgraderResource"), "Prefab name silently selects upgrade semantics");
+        object original = Build(special);
         original.GetType().GetField("m_recover")!.SetValue(original, false);
         original.GetType().GetField("m_extraAmountOnlyOneIngredient")!.SetValue(original, 3);
         Assert((bool)Field(original, "m_upgraderResource") && !(bool)Field(original, "m_recover") && (int)Field(original, "m_extraAmountOnlyOneIngredient") == 3, "Upgrade requirement setup failed");
-        object inherited = Build(Read("Upgrader7Weapon: 2"), original, upgraderResource: true);
-        Assert((bool)Field(inherited, "m_upgraderResource") && !(bool)Field(inherited, "m_recover") && (int)Field(inherited, "m_extraAmountOnlyOneIngredient") == 3, "Tuple edit drops hidden game metadata");
-        Assert((int)inherited.GetType().GetMethod("GetAmount")!.Invoke(inherited, new object[] { 2 })! == 2, "Upgrader's base amount is lost on rebuilding");
-        object baseline = Read("Upgrader7Weapon: 1");
+        object inherited = Build(Read("upgrade: Upgrader7Weapon"), original);
+        Assert((bool)Field(inherited, "m_upgraderResource") && !(bool)Field(inherited, "m_recover") && (int)Field(inherited, "m_extraAmountOnlyOneIngredient") == 3, "Upgrade entry drops hidden game metadata");
+        Assert((int)inherited.GetType().GetMethod("GetAmount")!.Invoke(inherited, new object[] { 2 })! == 1, "Upgrade entry is not fixed at one item");
+        object baseline = Read("upgrade: Upgrader7Weapon");
         requirement.GetProperty("Recover", members)!.SetValue(baseline, false);
         requirement.GetProperty("ExtraAmountOnlyOneIngredient", members)!.SetValue(baseline, 3);
-        object restored = Build(baseline, upgraderResource: true);
+        object restored = Build(baseline);
         Assert((bool)Field(restored, "m_upgraderResource") && !(bool)Field(restored, "m_recover") && (int)Field(restored, "m_extraAmountOnlyOneIngredient") == 3, "Baseline restore loses hidden game metadata");
-        Type referenceType = manager.GetNestedType("ResourceReferenceDefinition", members)!;
-        object reference = referenceType.GetMethod("From", members)!.Invoke(null, new[] { baseline, (object)true })!;
-        Assert(Write(reference).Trim() == "Upgrader7Weapon: 1", "Upgrade resource reference is not compact tuple syntax");
+        object reference = requirement.GetMethod("ForReference", members)!.Invoke(null, new[] { baseline, (object)true })!;
+        Assert(Write(reference).Trim() == "upgrade: Upgrader7Weapon", "Upgrade resource reference is not reserved shorthand");
         object plain = Build(regular);
         Assert(!(bool)Field(plain, "m_upgraderResource") && (bool)Field(plain, "m_recover") && (int)Field(plain, "m_extraAmountOnlyOneIngredient") == 0, "New resource defaults changed");
         Type entryType = manager.GetNestedType("RecipeEntry", members)!;
-        object entry = Read("recipe: StaffThunderBlood;2\nnoCraftOnlyUpgrade: false\nresources:\n- Gold: 10, 5\nupgradeResources:\n- Upgrader7Weapon: 1", entryType);
+        object entry = Read("recipe: StaffThunderBlood;2\nnoCraftOnlyUpgrade: false\nresources:\n- Gold: 10, 5\n- upgrade: Upgrader7Weapon", entryType);
         Assert(Get(Read(Write(entry), entryType), "NoCraftOnlyUpgrade") is false, "Explicit noCraftOnlyUpgrade false lost in sync round trip");
         object entryRoundTrip = Read(Write(entry), entryType);
-        IList regularResources = (IList)Get(entryRoundTrip, "Resources")!;
-        IList upgradeResources = (IList)Get(entryRoundTrip, "UpgradeResources")!;
-        Assert(regularResources.Count == 1 && upgradeResources.Count == 1, "Regular and upgrade resource blocks were merged");
-        Assert((bool)Field(Build(upgradeResources[0]!, upgraderResource: true), "m_upgraderResource"), "upgradeResources does not set the game classification");
-        foreach (string invalid in new[] { "Iron: 1, 2, 3, 4", "item: Iron\namount: 1", "Iron: 0, 5, 1", "Iron: one" })
+        IList resources = (IList)Get(entryRoundTrip, "Resources")!;
+        Assert(resources.Count == 2, "Regular and upgrade entries did not share one resource list");
+        Assert((bool)Field(Build(resources[1]!), "m_upgraderResource"), "Reserved upgrade entry does not set the game classification");
+        Assert(entryType.GetProperty("UpgradeResources", members) == null &&
+               Rejected("recipe: StaffThunderBlood\nupgradeResources:\n- Upgrader7Weapon: 1", entryType),
+            "Removed upgradeResources block remains accepted");
+        foreach (string invalid in new[] { "Iron: 1, 2, 3, 4", "item: Iron\namount: 1", "Iron: 0, 5, 1", "Iron: one", "Upgrader7Weapon", "upgrade: ''", "upgrade: Upgrader7Weapon, 2" })
         {
             bool rejected = false;
             try { Read(invalid); }
