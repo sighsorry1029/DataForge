@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.5
+
+- Added `equipment.iceSkates` and `equipment.iceShoes`, plus focused `SE_React` overrides for `minSpawnDamage` and per-level damage.
+- Added recipe `noCraftOnlyUpgrade` and compact `upgrade: ItemPrefab` requirements so Forge of Potential idols remain restricted to Upgrader stations while hidden game metadata is preserved.
+- Added source-free smelter conversions such as `None: FrozenFuel` and refreshed the derived no-source state without resetting fuel, queues, or RPC registration.
+- Fixed status-effect damage-struct overrides that were previously discarded, including percentage modifiers and reactive per-level damage.
+- Added read-only generated-reference comments for linked attack, projectile, AOE, chain, and return prefabs without exposing those prefab fields as editable overrides.
+
 ## 1.3.4
 
 - Reduced recurring allocations while synchronized icons wait, retry, expire, or retain per-peer rate-limit state, while preserving request order, transfer limits, and disconnect cleanup.
