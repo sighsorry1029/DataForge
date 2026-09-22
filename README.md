@@ -122,6 +122,25 @@ Example:
 
 Resource tuples use `craft amount, upgrade amount, exact quality`. With two values, upgrade cost follows vanilla `(quality - 1)` scaling. A third value makes that upgrade amount apply only when upgrading to the specified quality, so `SurtlingCore: 0, 5, 2` requires five Surtling Cores only for quality 2.
 
+`noCraftOnlyUpgrade: true` marks an upgrade-only recipe. For resource metadata,
+use a mapping instead of a tuple:
+
+```yaml
+  resources:
+  - item: Upgrader7Weapon
+    amount: 1
+    upgraderResource: true
+```
+
+Mappings also accept `amountPerLevel`, `exactQuality`, `recover`, and
+`extraAmountOnlyOneIngredient`. `upgraderResource` selects materials for an
+upgrader station; ordinary stations consume the other materials. Omitted metadata
+is retained from the existing resource with the same prefab (repeated entries
+match in order); new resources default to `false`, `true`, and `0` respectively.
+Explicit `false`/`0` can clear those values. Reference files include special
+metadata so copying them preserves the distinction. An empty `resources` list
+still removes all requirements.
+
 The synced `Upgrade Material Scaling` config can globally keep vanilla costs (`10 / 20 / 30`), flatten them (`10 / 10 / 10`), or use reduced scaling (`10 / 15 / 20`). Exact-quality requirements keep their explicitly configured amount.
 
 ### Pieces

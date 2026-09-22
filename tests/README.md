@@ -16,10 +16,19 @@ $core = 'C:\Program Files (x86)\Steam\steamapps\common\Valheim\BepInEx\core'
 dotnet run --project tests/DataForge.GameCompatibilityChecks -- check bin/Debug/DataForge.dll $managed $core
 dotnet build tests/DataForge.TranspilerChecks -c Debug
 & tests/DataForge.TranspilerChecks/bin/Debug/net48/DataForge.TranspilerChecks.exe bin/Debug/DataForge.dll $managed $core
+dotnet run --project tests/DataForge.DomainChecks -c Debug -- bin/Debug/DataForge.dll $managed $core
 ```
 
 - `GameCompatibilityChecks` uses Mono.Cecil 0.11.6 under .NET 8. It resolves direct game method/field instructions, checks literal/static mismatches, and checks explicit class/method Harmony target signatures and argument/field/result injection. It reports dynamic optional-mod targets separately. It also contains the reproducible, source-hash-pinned ServerSync adaptation described in `Libs/ServerSync.README.md`.
 - `TranspilerChecks` uses .NET Framework 4.8 and the installed Harmony/Cecil pair. It reads original game IL symbolically and executes DataForge's two transpilers, checks the four craft calls, unchanged upgrader/refund calls, one capacity replacement, label preservation and replacement stack signatures including `cheated`/`pickedUp`/`dropIfFullInv`. It initializes the new cached reflection accessors against original game declarations. It does not execute emitted game code or fake Unity instances. The installed Harmony/MonoMod does not support this test under .NET 8; keep the separate net48 runner.
+
+`DomainChecks` runs the merged YAML converter and plain managed game data on .NET 8.
+It checks legacy resource tuples, metadata omission versus explicit false/zero,
+rebuild and reference-copy round trips, and invalid input rejection. It constructs
+the codec without manager initialization: the installed Harmony needs the net48
+runner while the merged YAML library needs default-interface-method support.
+Prefab lookup, baseline capture from Unity objects, live reload and gameplay are
+not exercised by this process.
 
 The pattern-rejection logging path requires the game's ThreadingHelper singleton. Exercise altered patterns/other transpilers in-game; the standalone runner deliberately does not initialize a fake BepInEx/Unity process. Static checks do not prove Harmony patch installation, per-frame performance, native Unity calls, UI appearance or network behavior.
 
