@@ -110,11 +110,17 @@ internal static class DomainChecks
         Assert((float)Field(changedDamage, "m_fire") == 0 && (float)Field(changedDamage, "m_frost") == 8, "Damage value-type update discarded");
         Assert((float)Field(changedDamage, "m_nonPlayer") == 3 && (float)Field(damage, "m_fire") == 25, "Damage edit changes omitted channels or the source value");
         Type effectEntry = effects.GetNestedType("StatusEffectEntry", members)!;
-        object reactEntry = Read("effect: Staff_FrostOrbs\nreact:\n  minSpawnDamage: 0\n  projectileVelocity: 20\n  ttlPerItemLevel: 60\n  damagePerLevel:\n    frost: 8", effectEntry);
+        object reactEntry = Read("effect: Staff_FrostOrbs\nreact:\n  minSpawnDamage: 0\n  damagePerLevel:\n    frost: 8", effectEntry);
         object effectDefinition = effectEntry.GetMethod("ToDefinition", members)!.Invoke(reactEntry, null)!;
         object effectOutput = effectEntry.GetMethod("FromDefinition", members)!.Invoke(null, new[] { "Staff_FrostOrbs", effectDefinition, (object)true })!;
         object react = Get(Read(Write(effectOutput), effectEntry), "React")!;
-        Assert((float)Get(react, "TtlPerItemLevel")! == 60 && (float)Get(Get(react, "DamagePerLevel")!, "Frost")! == 8 && (float)Get(react, "MinSpawnDamage")! == 0, "React definition/scaffold/sync round trip lost settings");
+        Assert((float)Get(Get(react, "DamagePerLevel")!, "Frost")! == 8 && (float)Get(react, "MinSpawnDamage")! == 0, "React definition/scaffold/sync round trip lost settings");
+        Type reactType = effects.GetNestedType("ReactDefinition", members)!;
+        Assert(reactType.GetProperty("ProjectileVelocity", members) == null && reactType.GetProperty("TtlPerItemLevel", members) == null,
+            "Removed React fields remain in the schema");
+        Assert(Rejected("effect: Staff_FrostOrbs\nreact:\n  projectileVelocity: 20", effectEntry) &&
+               Rejected("effect: Staff_FrostOrbs\nreact:\n  ttlPerItemLevel: 60", effectEntry),
+            "Removed React YAML remains accepted");
         Type frostType = effects.GetNestedType("FrostDefinition", members)!;
         Assert(frostType.GetProperty("SlowMultipliers", members) == null, "Removed Frost field remains in schema");
         Assert(Rejected("slowMultipliers:\n- Weak: 1.5", frostType), "Removed Frost YAML remains accepted");

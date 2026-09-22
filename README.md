@@ -245,15 +245,12 @@ Example:
 - effect: Staff_FrostOrbs
   react:
     minSpawnDamage: 0
-    projectileVelocity: 20
-    ttlPerItemLevel: 60
     damagePerLevel:
       frost: 8
 ```
 
-Positive `ttlPerItemLevel` replaces the effect's duration when the game sets its
-item level. Per-level damage is added to the linked Projectile's base damage for
-each item level above one. This does not edit that shared projectile prefab.
+Per-level damage is added to the linked Projectile's base damage for each item
+level above one. This does not edit that shared projectile prefab.
 React changes apply to newly created effect instances; existing active effects
 retain their timers and type-specific state until reapplied.
 

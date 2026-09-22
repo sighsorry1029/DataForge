@@ -53,8 +53,8 @@ checklist, not a record of successful gameplay tests.
 4. Change ice equipment flags; verify omission/false, live inventory refresh and
    restore. Existing projectiles and linked shared-prefab damage must remain unchanged.
 5. Reapply Staff_FrostOrbs after changing react values and test the next effect's
-   level-scaled duration/damage. Already active effects must retain their timers.
-   Check removal/restore without restarting active timers.
+   minimum spawn threshold and level-scaled damage. Already active effects must
+   retain their state. Check removal and baseline restoration.
 
 The pattern-rejection logging path requires the game's ThreadingHelper singleton. Exercise altered patterns/other transpilers in-game; the standalone runner deliberately does not initialize a fake BepInEx/Unity process. Static checks do not prove Harmony patch installation, per-frame performance, native Unity calls, UI appearance or network behavior.
 

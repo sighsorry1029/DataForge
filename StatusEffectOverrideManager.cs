@@ -1672,8 +1672,6 @@ internal static class StatusEffectOverrideManager
         if (statusEffect is SE_React react && definition.React != null)
         {
             Copy(definition.React.MinSpawnDamage, value => react.m_minSpawnDamage = value);
-            Copy(definition.React.ProjectileVelocity, value => react.m_projectileVelocity = value);
-            Copy(definition.React.TtlPerItemLevel, value => react.m_ttlPerItemLevel = value);
             react.m_damagePerLevel = ApplyDamage(react.m_damagePerLevel, definition.React.DamagePerLevel);
         }
 
@@ -3211,8 +3209,6 @@ internal static class StatusEffectOverrideManager
     internal sealed class ReactDefinition
     {
         public float? MinSpawnDamage { get; set; }
-        public float? ProjectileVelocity { get; set; }
-        public float? TtlPerItemLevel { get; set; }
         public StatusDamageDefinition? DamagePerLevel { get; set; }
 
         internal static ReactDefinition From(SE_React react)
@@ -3220,8 +3216,6 @@ internal static class StatusEffectOverrideManager
             return new ReactDefinition
             {
                 MinSpawnDamage = react.m_minSpawnDamage,
-                ProjectileVelocity = react.m_projectileVelocity,
-                TtlPerItemLevel = react.m_ttlPerItemLevel,
                 DamagePerLevel = StatusDamageDefinition.From(react.m_damagePerLevel)
             };
         }
