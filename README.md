@@ -47,6 +47,12 @@ queries. Existing status-effect ownership events are preserved. See
 
 ## Supported Domains
 
+Smelters with no separate input, including the Frost Kiln, use `None` as the input
+in `smelter.conversions` (for example `- None: FrozenFuel`). This consumes the
+configured fuel. An empty conversions list still removes all conversions;
+omitting it preserves the current definition. Existing fuel and production queues
+are not reset when applying these settings.
+
 ### Items
 
 DataForge can edit common item fields, including:

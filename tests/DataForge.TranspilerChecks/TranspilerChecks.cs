@@ -90,7 +90,7 @@ internal static class TranspilerChecks
         SameStack((MethodInfo)cookCalls[0].instruction.operand, (MethodInfo)cooked[cookCalls[0].index].operand);
         Assert(cooked.Count == cooking.Count, "Cooking patch changes instruction count");
         Assert(((MethodInfo)cooked[cookCalls[0].index].operand).GetParameters().Last().Name == "cheated", "Cooking cheated argument lost");
-        foreach (string name in new[] { "PieceComfortHudBadges", "LocalizationOverrideManager" })
+        foreach (string name in new[] { "PieceComfortHudBadges", "LocalizationOverrideManager", "PieceOverrideManager" })
         {
             System.Runtime.CompilerServices.RuntimeHelpers.RunClassConstructor(mod.GetType("DataForge." + name, true)!.TypeHandle);
             checks++;

@@ -30,6 +30,8 @@ internal static class PieceOverrideManager
     private const int DefaultPieceSortOrder = 100;
     private const string HomesteadPluginGuid = "sighsorry.Homestead";
     private const string HomesteadCategoryName = "Homestead";
+    private static readonly AccessTools.FieldRef<Smelter, bool> SmelterNoSourceConversion =
+        AccessTools.FieldRefAccess<Smelter, bool>("m_noSourceConversion");
     private static readonly HashSet<string> IgnoredCategoryNames = new(StringComparer.Ordinal)
     {
         "Feasts",
@@ -2513,6 +2515,8 @@ internal static class PieceOverrideManager
             TryBuildSmelterConversions(smelter, definition.Conversions, out List<Smelter.ItemConversion> conversions))
         {
             smelter.m_conversion = conversions;
+            // Awake normally derives this flag. Live changes must not repeat its RPC registration.
+            SmelterNoSourceConversion(smelter) = conversions.Any(conversion => conversion.m_from == null);
         }
     }
 
@@ -2534,9 +2538,10 @@ internal static class PieceOverrideManager
                     return false;
                 }
 
-                ItemDrop? from = ResolveItemDrop(pair.Key);
+                bool noSource = IsNone(pair.Key);
+                ItemDrop? from = noSource ? null : ResolveItemDrop(pair.Key);
                 ItemDrop? to = ResolveItemDrop(output);
-                if (from == null || to == null)
+                if ((!noSource && from == null) || to == null)
                 {
                     DataForgeLogContext.Warning($"{prefabName} has unknown smelter conversion '{pair.Key}: {pair.Value}'.");
                     return false;
@@ -6785,7 +6790,7 @@ internal static class PieceOverrideManager
 
             foreach (Smelter.ItemConversion conversion in conversions)
             {
-                if (conversion?.m_from == null || conversion.m_to == null)
+                if (conversion == null || conversion.m_to == null)
                 {
                     continue;
                 }
