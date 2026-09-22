@@ -2330,16 +2330,6 @@ internal static class PieceOverrideManager
 
     private static void ApplyCookingStationDefinition(CookingStation cookingStation, CookingStationDefinition definition)
     {
-        Copy(definition.CanOvercookItems, value => cookingStation.m_canOvercookItems = value);
-        Copy(definition.UseFuelWhileEmpty, value => cookingStation.m_useFueldWhileEmpty = value);
-        Copy(definition.RecordCrafter, value => cookingStation.m_recordCrafter = value);
-        if (!string.IsNullOrWhiteSpace(definition.Skill))
-        {
-            if (Enum.TryParse(definition.Skill, true, out Skills.SkillType skill))
-                cookingStation.m_skill = skill;
-            else
-                DataForgeLogContext.Warning($"Unknown cookingStation skill '{definition.Skill}'. The existing skill was kept.");
-        }
         bool applyFuel = !string.IsNullOrWhiteSpace(definition.Fuel);
         bool fuelValid = true;
         ItemDrop? fuelItem = cookingStation.m_fuelItem;
@@ -6727,10 +6717,6 @@ internal static class PieceOverrideManager
     internal sealed class CookingStationDefinition
     {
         public string? Fuel { get; set; }
-        public bool? CanOvercookItems { get; set; }
-        public bool? UseFuelWhileEmpty { get; set; }
-        public string? Skill { get; set; }
-        public bool? RecordCrafter { get; set; }
         public List<CookingStationConversionDefinition>? Conversions { get; set; }
 
         internal static CookingStationDefinition? From(CookingStation? cookingStation)
@@ -6740,10 +6726,6 @@ internal static class PieceOverrideManager
                 : new CookingStationDefinition
                 {
                     Fuel = FormatTuple(GetItemName(cookingStation.m_fuelItem), cookingStation.m_requireFire, cookingStation.m_maxFuel, cookingStation.m_secPerFuel),
-                    CanOvercookItems = cookingStation.m_canOvercookItems,
-                    UseFuelWhileEmpty = cookingStation.m_useFueldWhileEmpty,
-                    Skill = cookingStation.m_skill.ToString(),
-                    RecordCrafter = cookingStation.m_recordCrafter,
                     Conversions = CookingStationConversionDefinition.From(cookingStation.m_conversion)
                 };
         }

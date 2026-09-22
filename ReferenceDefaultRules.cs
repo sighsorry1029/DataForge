@@ -17,11 +17,6 @@ internal static class ReferenceDefaultRules
         }
 
         string trimmed = value.Trim();
-        // CookingStation's Skill defaults to Cooking; None is a meaningful override.
-        if (propertyName.Equals("Skill", StringComparison.OrdinalIgnoreCase))
-        {
-            return trimmed.Equals("Cooking", StringComparison.OrdinalIgnoreCase);
-        }
         if (IsDefaultSkillValuePair(trimmed, propertyName))
         {
             return true;
@@ -75,8 +70,6 @@ internal static class ReferenceDefaultRules
         return propertyName.Equals("Override", StringComparison.OrdinalIgnoreCase) ||
                propertyName.Equals("Teleportable", StringComparison.OrdinalIgnoreCase) ||
                propertyName.Equals("Floating", StringComparison.OrdinalIgnoreCase) ||
-               propertyName.Equals("CanOvercookItems", StringComparison.OrdinalIgnoreCase) ||
-               propertyName.Equals("UseFuelWhileEmpty", StringComparison.OrdinalIgnoreCase) ||
                propertyName.Equals("CanBeRemoved", StringComparison.OrdinalIgnoreCase);
     }
 

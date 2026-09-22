@@ -94,14 +94,8 @@ Clone example:
     slash: 72, 0
 ```
 
-Item `primaryAttack` and `secondaryAttack` also support `projectileVelocity`,
-`projectileVelocityMin`, `projectileAccuracy`, `projectileAccuracyMin`, `projectiles`,
-`projectileBursts`, `burstInterval`, and `blockReloadTime`. These configure the
-item's Attack; they do not change linked Projectile/Aoe prefab damage. Accuracy
-values are angular spread, and the `Min` values participate in draw interpolation.
-Ammo can contribute its own velocity/spread. `equipment.iceSkates` and
-`equipment.iceShoes` control the corresponding equipped movement flags.
-Omitting a field preserves its current value; explicit zero/false is supported.
+`equipment.iceSkates` and `equipment.iceShoes` control the corresponding equipped
+movement flags. Omission preserves the current value; explicit `false` is supported.
 
 ### Recipes
 
@@ -131,24 +125,31 @@ Example:
 
 Resource tuples use `craft amount, upgrade amount, exact quality`. With two values, upgrade cost follows vanilla `(quality - 1)` scaling. A third value makes that upgrade amount apply only when upgrading to the specified quality, so `SurtlingCore: 0, 5, 2` requires five Surtling Cores only for quality 2.
 
-`noCraftOnlyUpgrade: true` marks an upgrade-only recipe. For resource metadata,
-use a mapping instead of a tuple:
+`noCraftOnlyUpgrade: true` marks an upgrade-only recipe. The game selects a
+different subset of requirements while the current crafting station is an
+Upgrader. DataForge represents that distinction as a separate block:
 
 ```yaml
   resources:
-  - item: Upgrader7Weapon
-    amount: 1
-    upgraderResource: true
+  - Gold: 10, 5
+  - NornThread: 5, 2
+  upgradeResources:
+  - Upgrader7Weapon: 1
 ```
 
-Mappings also accept `amountPerLevel`, `exactQuality`, `recover`, and
-`extraAmountOnlyOneIngredient`. `upgraderResource` selects materials for an
-upgrader station; ordinary stations consume the other materials. Omitted metadata
-is retained from the existing resource with the same prefab (repeated entries
-match in order); new resources default to `false`, `true`, and `0` respectively.
-Explicit `false`/`0` can clear those values. Reference files include special
-metadata so copying them preserves the distinction. An empty `resources` list
-still removes all requirements.
+Both blocks use the same `craft amount, upgrade amount, exact quality` tuples.
+They are independent: omitting a block preserves that subset, while an empty list
+removes that subset. Thus `resources: []` keeps existing Upgrader-only requirements;
+use both empty lists to remove every requirement:
+
+```yaml
+  resources: []
+  upgradeResources: []
+```
+
+Reference files place `Upgrader7Weapon` and other requirements according to the
+game's `m_upgraderResource` flag. Hidden recovery and one-ingredient metadata is
+preserved internally when tuples are reapplied; it is not an editable YAML field.
 
 The synced `Upgrade Material Scaling` config can globally keep vanilla costs (`10 / 20 / 30`), flatten them (`10 / 10 / 10`), or use reduced scaling (`10 / 15 / 20`). Exact-quality requirements keep their explicitly configured amount.
 
@@ -185,12 +186,6 @@ Example:
   resources:
 - Wood: 4
 ```
-
-`cookingStation` additionally accepts `canOvercookItems`, `useFuelWhileEmpty`,
-`skill` (including `None`), and `recordCrafter`. These describe Foundry and ordinary
-cooking policies separately from fuel/conversions. Omitted fields keep existing
-values. Applying them does not clear fuel, rewrite occupied slots or replace
-already recorded crafters; crafter recording affects subsequent insertions.
 
 `pieceCategory.reference.yml` records the detected category order for every build tool before DataForge applies category moves or ordering. Copy only the sections you want to control into `pieceCategory.yml`:
 
@@ -266,12 +261,8 @@ Example:
 Positive `ttlPerItemLevel` replaces the effect's duration when the game sets its
 item level. Per-level damage is added to the linked Projectile's base damage for
 each item level above one. This does not edit that shared projectile prefab.
-`frost.slowMultipliers` accepts an ordered list such as `- Weak: 1.5` and
-`- Immune: 0`; the first matching entry wins. An empty list clears it, while
-omission preserves it. The game's early return for frost-resistant/immune
-characters remains in effect. Invalid lists leave the previous list intact.
-React and Frost changes apply to newly created effect instances; existing active
-effects retain their timers and type-specific state until reapplied.
+React changes apply to newly created effect instances; existing active effects
+retain their timers and type-specific state until reapplied.
 
 ## Files
 

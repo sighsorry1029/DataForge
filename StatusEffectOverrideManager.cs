@@ -2330,27 +2330,6 @@ internal static class StatusEffectOverrideManager
         Copy(definition.FreezeTimeEnemy, value => frost.m_freezeTimeEnemy = Math.Max(0f, value));
         Copy(definition.FreezeTimePlayer, value => frost.m_freezeTimePlayer = Math.Max(0f, value));
         Copy(definition.MinSpeedFactor, value => frost.m_minSpeedFactor = value);
-        if (definition.SlowMultipliers != null)
-        {
-            if (TryBuildFrostSlowMultipliers(definition.SlowMultipliers, out List<ResistanceMultiplier> multipliers))
-                frost.m_frostSlowMultipliers = multipliers;
-            else
-                DataForgeLogContext.Warning("Invalid frost.slowMultipliers: use ordered single-entry damage-modifier/number mappings. The existing list was kept.");
-        }
-    }
-
-    private static bool TryBuildFrostSlowMultipliers(List<SlowMultiplierDefinition> definitions, out List<ResistanceMultiplier> result)
-    {
-        result = new List<ResistanceMultiplier>();
-        foreach (SlowMultiplierDefinition definition in definitions)
-        {
-            if (definition == null || definition.Count != 1) return false;
-            KeyValuePair<string, float> pair = definition.First();
-            if (!Enum.TryParse(pair.Key, true, out HitData.DamageModifier modifier) ||
-                !Enum.IsDefined(typeof(HitData.DamageModifier), modifier) || float.IsNaN(pair.Value) || float.IsInfinity(pair.Value)) return false;
-            result.Add(new ResistanceMultiplier { m_modifier = modifier, m_multiplier = pair.Value });
-        }
-        return true;
     }
 
     private static void ApplyRested(SE_Rested rested, RestedDefinition? definition)
@@ -3217,7 +3196,6 @@ internal static class StatusEffectOverrideManager
         public float? FreezeTimeEnemy { get; set; }
         public float? FreezeTimePlayer { get; set; }
         public float? MinSpeedFactor { get; set; }
-        public List<SlowMultiplierDefinition>? SlowMultipliers { get; set; }
 
         internal static FrostDefinition From(SE_Frost frost)
         {
@@ -3225,15 +3203,9 @@ internal static class StatusEffectOverrideManager
             {
                 FreezeTimeEnemy = frost.m_freezeTimeEnemy,
                 FreezeTimePlayer = frost.m_freezeTimePlayer,
-                MinSpeedFactor = frost.m_minSpeedFactor,
-                SlowMultipliers = frost.m_frostSlowMultipliers?
-                    .Select(value => new SlowMultiplierDefinition { [value.m_modifier.ToString()] = value.m_multiplier }).ToList()
+                MinSpeedFactor = frost.m_minSpeedFactor
             };
         }
-    }
-
-    internal sealed class SlowMultiplierDefinition : Dictionary<string, float>
-    {
     }
 
     internal sealed class ReactDefinition
