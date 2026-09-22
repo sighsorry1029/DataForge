@@ -94,6 +94,15 @@ Clone example:
     slash: 72, 0
 ```
 
+Item `primaryAttack` and `secondaryAttack` also support `projectileVelocity`,
+`projectileVelocityMin`, `projectileAccuracy`, `projectileAccuracyMin`, `projectiles`,
+`projectileBursts`, `burstInterval`, and `blockReloadTime`. These configure the
+item's Attack; they do not change linked Projectile/Aoe prefab damage. Accuracy
+values are angular spread, and the `Min` values participate in draw interpolation.
+Ammo can contribute its own velocity/spread. `equipment.iceSkates` and
+`equipment.iceShoes` control the corresponding equipped movement flags.
+Omitting a field preserves its current value; explicit zero/false is supported.
+
 ### Recipes
 
 Recipes use the result prefab as the main key. If the same result has multiple recipes, reference files use suffixes such as `SwordIron;1` and `SwordIron;2`.

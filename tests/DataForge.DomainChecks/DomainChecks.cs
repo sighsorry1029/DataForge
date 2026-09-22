@@ -70,6 +70,14 @@ internal static class DomainChecks
             catch (TargetInvocationException exception) when (exception.InnerException?.GetType().FullName?.StartsWith("YamlDotNet.", StringComparison.Ordinal) == true) { rejected = true; }
             Assert(rejected, "Invalid resource silently accepted: " + invalid);
         }
+        Type itemEntry = mod.GetType("DataForge.ItemOverrideManager+ItemEntry", true)!;
+        object item = Read("item: StaffThunderBlood\nprimaryAttack:\n  projectileVelocity: 0\n  projectileVelocityMin: -2\n  projectileAccuracy: 0\n  projectileAccuracyMin: 1\n  projectiles: 3\n  projectileBursts: 2\n  burstInterval: 0.25\n  blockReloadTime: 1.1\nequipment:\n  iceSkates: false\n  iceShoes: true", itemEntry);
+        object itemRoundTrip = Read(Write(item), itemEntry);
+        object attack = Get(itemRoundTrip, "PrimaryAttack")!;
+        Assert((float)Get(attack, "ProjectileVelocity")! == 0 && (float)Get(attack, "ProjectileVelocityMin")! == -2 && (int)Get(attack, "ProjectileBursts")! == 2, "Attack settings lost or normalized during sync");
+        Assert(Get(Get(itemRoundTrip, "Equipment")!, "IceSkates") is false && Get(Get(itemRoundTrip, "Equipment")!, "IceShoes") is true, "Explicit ice equipment flags lost");
+        object omittedAttack = Get(Read("item: StaffThunderBlood\nprimaryAttack:\n  damageMultiplier: 2", itemEntry), "PrimaryAttack")!;
+        Assert(Get(omittedAttack, "ProjectileVelocity") == null && Get(omittedAttack, "Projectiles") == null, "Omitted attack fields acquire defaults");
         Console.WriteLine($"Domain checks passed: {checks} managed assertions (not Unity execution).");
     }
 }

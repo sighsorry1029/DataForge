@@ -2502,6 +2502,8 @@ internal static class ItemOverrideManager
         Copy(equipment.RunStaminaModifier, value => shared.m_runStaminaModifier = value);
         Copy(equipment.SneakStaminaModifier, value => shared.m_sneakStaminaModifier = value);
         Copy(equipment.SwimStaminaModifier, value => shared.m_swimStaminaModifier = value);
+        Copy(equipment.IceSkates, value => shared.m_iceSkates = value);
+        Copy(equipment.IceShoes, value => shared.m_iceShoes = value);
         CopyFloatPair(equipment.Armor, value => shared.m_armor = value, value => shared.m_armorPerLevel = value);
         Copy(equipment.MaxAdrenaline, value => shared.m_maxAdrenaline = Math.Max(0f, value));
     }
@@ -2823,6 +2825,14 @@ internal static class ItemOverrideManager
         Copy(definition.ForceMultiplier, value => attack.m_forceMultiplier = Math.Max(0f, value));
         Copy(definition.StaggerMultiplier, value => attack.m_staggerMultiplier = Math.Max(0f, value));
         Copy(definition.RaiseSkillAmount, value => attack.m_raiseSkillAmount = Math.Max(0f, value));
+        Copy(definition.ProjectileVelocity, value => attack.m_projectileVel = value);
+        Copy(definition.ProjectileVelocityMin, value => attack.m_projectileVelMin = value);
+        Copy(definition.ProjectileAccuracy, value => attack.m_projectileAccuracy = value);
+        Copy(definition.ProjectileAccuracyMin, value => attack.m_projectileAccuracyMin = value);
+        Copy(definition.Projectiles, value => attack.m_projectiles = value);
+        Copy(definition.ProjectileBursts, value => attack.m_projectileBursts = value);
+        Copy(definition.BurstInterval, value => attack.m_burstInterval = value);
+        Copy(definition.BlockReloadTime, value => attack.m_blockReloadTime = value);
     }
 
     private static void ApplyPrimaryAttack(Attack attack, PrimaryAttackDefinition? definition)
@@ -3420,7 +3430,9 @@ internal static class ItemOverrideManager
             ["jumpStaminaModifier"] = equipment.JumpStaminaModifier,
             ["runStaminaModifier"] = equipment.RunStaminaModifier,
             ["sneakStaminaModifier"] = equipment.SneakStaminaModifier,
-            ["swimStaminaModifier"] = equipment.SwimStaminaModifier
+            ["swimStaminaModifier"] = equipment.SwimStaminaModifier,
+            ["iceSkates"] = equipment.IceSkates,
+            ["iceShoes"] = equipment.IceShoes
         };
 
         if (output.EmitEquipmentArmor)
@@ -3520,7 +3532,15 @@ internal static class ItemOverrideManager
             ["damageMultiplier"] = attack.DamageMultiplier,
             ["forceMultiplier"] = attack.ForceMultiplier,
             ["staggerMultiplier"] = attack.StaggerMultiplier,
-            ["raiseSkillAmount"] = attack.RaiseSkillAmount
+            ["raiseSkillAmount"] = attack.RaiseSkillAmount,
+            ["projectileVelocity"] = attack.ProjectileVelocity,
+            ["projectileVelocityMin"] = attack.ProjectileVelocityMin,
+            ["projectileAccuracy"] = attack.ProjectileAccuracy,
+            ["projectileAccuracyMin"] = attack.ProjectileAccuracyMin,
+            ["projectiles"] = attack.Projectiles,
+            ["projectileBursts"] = attack.ProjectileBursts,
+            ["burstInterval"] = attack.BurstInterval,
+            ["blockReloadTime"] = attack.BlockReloadTime
         };
 
         if (ShouldExposeAttackDraw(attack.Draw))
@@ -4163,6 +4183,8 @@ internal static class ItemOverrideManager
                 RunStaminaModifier = equipment.RunStaminaModifier,
                 SneakStaminaModifier = equipment.SneakStaminaModifier,
                 SwimStaminaModifier = equipment.SwimStaminaModifier,
+                IceSkates = equipment.IceSkates,
+                IceShoes = equipment.IceShoes,
                 Armor = output.EmitEquipmentArmor ? equipment.Armor : null,
                 MaxAdrenaline = equipment.MaxAdrenaline
             };
@@ -4191,6 +4213,14 @@ internal static class ItemOverrideManager
                 SpawnOnHit = attack.SpawnOnHit,
                 Draw = ShouldExposeAttackDraw(attack.Draw) ? attack.Draw : null,
                 Reload = ShouldExposeAttackReload(attack.Reload) ? attack.Reload : null,
+                ProjectileVelocity = attack.ProjectileVelocity,
+                ProjectileVelocityMin = attack.ProjectileVelocityMin,
+                ProjectileAccuracy = attack.ProjectileAccuracy,
+                ProjectileAccuracyMin = attack.ProjectileAccuracyMin,
+                Projectiles = attack.Projectiles,
+                ProjectileBursts = attack.ProjectileBursts,
+                BurstInterval = attack.BurstInterval,
+                BlockReloadTime = attack.BlockReloadTime,
                 DamageMultiplier = NullIfReferenceDefault(attack.DamageMultiplier, 1f),
                 ForceMultiplier = NullIfReferenceDefault(attack.ForceMultiplier, 1f),
                 StaggerMultiplier = NullIfReferenceDefault(attack.StaggerMultiplier, 1f),
@@ -4215,6 +4245,14 @@ internal static class ItemOverrideManager
                 SpawnOnHit = attack.SpawnOnHit,
                 Draw = ShouldExposeAttackDraw(attack.Draw) ? attack.Draw : null,
                 Reload = ShouldExposeAttackReload(attack.Reload) ? attack.Reload : null,
+                ProjectileVelocity = attack.ProjectileVelocity,
+                ProjectileVelocityMin = attack.ProjectileVelocityMin,
+                ProjectileAccuracy = attack.ProjectileAccuracy,
+                ProjectileAccuracyMin = attack.ProjectileAccuracyMin,
+                Projectiles = attack.Projectiles,
+                ProjectileBursts = attack.ProjectileBursts,
+                BurstInterval = attack.BurstInterval,
+                BlockReloadTime = attack.BlockReloadTime,
                 DamageMultiplier = NullIfReferenceDefault(attack.DamageMultiplier, 1f),
                 ForceMultiplier = NullIfReferenceDefault(attack.ForceMultiplier, 1f),
                 StaggerMultiplier = NullIfReferenceDefault(attack.StaggerMultiplier, 1f),
@@ -4375,6 +4413,8 @@ internal static class ItemOverrideManager
         public float? RunStaminaModifier { get; set; }
         public float? SneakStaminaModifier { get; set; }
         public float? SwimStaminaModifier { get; set; }
+        public bool? IceSkates { get; set; }
+        public bool? IceShoes { get; set; }
         public string? Armor { get; set; }
         public float? MaxAdrenaline { get; set; }
 
@@ -4395,6 +4435,8 @@ internal static class ItemOverrideManager
                 RunStaminaModifier = shared.m_runStaminaModifier,
                 SneakStaminaModifier = shared.m_sneakStaminaModifier,
                 SwimStaminaModifier = shared.m_swimStaminaModifier,
+                IceSkates = shared.m_iceSkates,
+                IceShoes = shared.m_iceShoes,
                 Armor = FormatFloatPair(shared.m_armor, shared.m_armorPerLevel),
                 MaxAdrenaline = shared.m_maxAdrenaline
             };
@@ -4607,6 +4649,14 @@ internal static class ItemOverrideManager
         public float? ForceMultiplier { get; set; }
         public float? StaggerMultiplier { get; set; }
         public float? RaiseSkillAmount { get; set; }
+        public float? ProjectileVelocity { get; set; }
+        public float? ProjectileVelocityMin { get; set; }
+        public float? ProjectileAccuracy { get; set; }
+        public float? ProjectileAccuracyMin { get; set; }
+        public int? Projectiles { get; set; }
+        public int? ProjectileBursts { get; set; }
+        public float? BurstInterval { get; set; }
+        public float? BlockReloadTime { get; set; }
 
         internal static AttackDefinition? From(Attack attack)
         {
@@ -4624,6 +4674,14 @@ internal static class ItemOverrideManager
                 SpawnOnHit = FormatSpawnOnHit(attack),
                 Draw = FormatAttackDraw(attack),
                 Reload = FormatAttackReload(attack),
+                ProjectileVelocity = attack.m_projectileVel,
+                ProjectileVelocityMin = attack.m_projectileVelMin,
+                ProjectileAccuracy = attack.m_projectileAccuracy,
+                ProjectileAccuracyMin = attack.m_projectileAccuracyMin,
+                Projectiles = attack.m_projectiles,
+                ProjectileBursts = attack.m_projectileBursts,
+                BurstInterval = attack.m_burstInterval,
+                BlockReloadTime = attack.m_blockReloadTime,
                 DamageMultiplier = attack.m_damageMultiplier,
                 ForceMultiplier = attack.m_forceMultiplier,
                 StaggerMultiplier = attack.m_staggerMultiplier,
@@ -4652,6 +4710,14 @@ internal static class ItemOverrideManager
                 SpawnOnHit = FormatSpawnOnHit(attack),
                 Draw = FormatAttackDraw(attack),
                 Reload = FormatAttackReload(attack),
+                ProjectileVelocity = attack.m_projectileVel,
+                ProjectileVelocityMin = attack.m_projectileVelMin,
+                ProjectileAccuracy = attack.m_projectileAccuracy,
+                ProjectileAccuracyMin = attack.m_projectileAccuracyMin,
+                Projectiles = attack.m_projectiles,
+                ProjectileBursts = attack.m_projectileBursts,
+                BurstInterval = attack.m_burstInterval,
+                BlockReloadTime = attack.m_blockReloadTime,
                 DamageMultiplier = attack.m_damageMultiplier,
                 ForceMultiplier = attack.m_forceMultiplier,
                 StaggerMultiplier = attack.m_staggerMultiplier,
