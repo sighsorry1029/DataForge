@@ -2129,7 +2129,7 @@ internal static class RecipeOverrideManager
             .Where(slot => slot.Current != null && slot.BaselineEnabled)
             .Select(slot => new
             {
-                Entry = RecipeReferenceEntry.From(slot.PublicKey, slot.Baseline),
+                Entry = RecipeReferenceEntry.From(slot.PublicKey, slot.Baseline, IsResultItemUpgradeable(slot.Baseline.Item)),
                 OwnerKey = slot.Baseline.Item ?? ToRecipeItemKey(slot.PublicKey),
                 SortKey = DataForgeResourceMap.BuildItemSortKey(
                     slot.Baseline.Item ?? ToRecipeItemKey(slot.PublicKey),
@@ -2444,20 +2444,24 @@ internal static class RecipeOverrideManager
         public bool? NoCraftOnlyUpgrade { get; set; }
         public List<RequirementDefinition>? Resources { get; set; }
 
-        internal static RecipeReferenceEntry From(string publicKey, RecipeDefinition definition)
+        internal static RecipeReferenceEntry From(string publicKey, RecipeDefinition definition, bool includeAmountPerLevel)
         {
-            bool includeAmountPerLevel = IsResultItemUpgradeable(definition.Item);
-            return ReferenceValue.ClonePruned(new RecipeReferenceEntry
+            RecipeReferenceEntry entry = ReferenceValue.ClonePruned(new RecipeReferenceEntry
             {
                 Recipe = FormatRecipeHeader(publicKey, definition.Amount, includeDefaultAmount: false),
                 CraftingStation = FormatStation(definition.CraftingStation, definition.MinStationLevel),
                 RequireOnlyOneIngredient = definition.RequireOnlyOneIngredient,
                 ListSortWeight = definition.ListSortWeight,
-                NoCraftOnlyUpgrade = definition.NoCraftOnlyUpgrade,
-                Resources = definition.Resources?
+                NoCraftOnlyUpgrade = definition.NoCraftOnlyUpgrade
+            })!;
+            // Resource tuples have their own omission rules. Generic pruning would
+            // discard amount 1 and the internal Upgrader classification.
+            entry.Resources = definition.Resources is { Count: > 0 }
+                ? definition.Resources
                     .Select(resource => RequirementDefinition.ForReference(resource, includeAmountPerLevel))
                     .ToList()
-            })!;
+                : null;
+            return entry;
         }
     }
 

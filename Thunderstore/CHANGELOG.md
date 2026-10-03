@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.7
+
+- Fixed compact recipe references losing Upgrader-only material classification. These requirements now retain `upgrade: ItemPrefab` instead of appearing as ordinary materials with amount 0.
+- Fixed ordinary recipe materials with amount 1 being written as 0. Resource order, upgrade amounts, and exact-quality conditions are preserved.
+- Added checks that generate complete recipe reference entries, serialize them, and parse them back into editable recipes, including empty lists and baseline preservation.
+- After updating, regenerate recipe references with `dataforge:refer recipe`. Existing overrides are not rewritten; compare any entries copied from older references with the regenerated file.
+
 ## 1.3.6
 
 - Fixed `startEffects` and `stopEffects` overrides losing existing prefab attachment, tracking, colour variant, and scale settings, including Burning effects remaining at their initial position. Repeated prefab entries retain their individual settings in order; new prefabs keep their default behaviour.

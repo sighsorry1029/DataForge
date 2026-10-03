@@ -24,7 +24,10 @@ dotnet run --project tests/DataForge.DomainChecks -c Debug -- bin/Debug/DataForg
 
 `DomainChecks` runs the merged YAML converter and plain managed game data on .NET 8.
 It checks compact regular tuples and reserved Upgrader entries, hidden metadata preservation,
-reference-copy round trips, and invalid input rejection. It also exercises damage
+whole-recipe reference projection/serialization/copy-back (including zero/one amounts,
+Upgrader classification, exact quality, upgradeability and empty lists), and invalid
+input rejection. The runtime caller supplies the recipe's upgradeability so the
+actual reference builder can run without a simulated ObjectDB. It also exercises damage
 value updates, item/effect field round trips, removed-schema checks, source-free
 conversion YAML and read-only comment escaping. Effect-list checks cover original
 game metadata copying without shared mutable entries, omission, and explicit clearing.
@@ -33,6 +36,21 @@ the codec without manager initialization: the installed Harmony needs the net48
 runner while the merged YAML library needs default-interface-method support.
 Prefab lookup, baseline capture from Unity objects, live reload and gameplay are
 not exercised by this process.
+
+## Recipe reference runtime checklist
+
+1. Restart with the rebuilt DLL and run `dataforge:refer recipe` after the world
+   loads. In `recipes.reference.yml`, confirm SwordNiedhoggBlood retains
+   `upgrade: Upgrader6Weapon` and ordinary resources with amount 1 stay at 1.
+   Repeat on the dedicated server with the same loaded content.
+2. In a disposable world, copy the regenerated entry into `recipes.yml` and enable
+   the override. Check ordinary crafting and Upgrader requirements/consumption,
+   then reload/remove the override and confirm the baseline is restored.
+
+Reference regeneration does not rewrite `recipes.yml` or `recipes_*.yml`. Any
+incorrect zeros or ordinary idol entries copied from an older reference need
+manual comparison with the regenerated reference; intentional zeros remain valid.
+These game/server steps are not covered by the managed checks.
 
 ## Effect-list metadata runtime checklist
 

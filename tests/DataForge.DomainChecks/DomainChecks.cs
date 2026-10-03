@@ -82,6 +82,62 @@ internal static class DomainChecks
         IList resources = (IList)Get(entryRoundTrip, "Resources")!;
         Assert(resources.Count == 2, "Regular and upgrade entries did not share one resource list");
         Assert((bool)Field(Build(resources[1]!), "m_upgraderResource"), "Reserved upgrade entry does not set the game classification");
+        // Exercise the whole compact reference projection, including default pruning,
+        // before copying its YAML back into an editable entry. Upgradeability is
+        // supplied by the runtime caller; no ObjectDB or Unity prefab is fabricated.
+        Type recipeDefinitionType = manager.GetNestedType("RecipeDefinition", members)!;
+        Type recipeReferenceType = manager.GetNestedType("RecipeReferenceEntry", members)!;
+        object RecipeReference(object definition, bool upgradeable) => recipeReferenceType.GetMethod("From", members)!
+            .Invoke(null, new[] { "SwordNiedhoggBlood", definition, (object)upgradeable })!;
+        object recipeBaseline = Read("amount: 1\ncraftingStation: blackforge\nminStationLevel: 4\nlistSortWeight: 100\nnoCraftOnlyUpgrade: false\nresources:\n" +
+            "- SwordNiedhogg: 0\n- FlametalNew: 6, 6\n- GemstoneRed: 0, 1\n- upgrade: Upgrader6Weapon\n" +
+            "- Wood: 1\n- SurtlingCore: 1, 0, 2\n- Wood: 1, 10\n- Upgrader6Weapon: 0", recipeDefinitionType);
+        string baselineYaml = Write(recipeBaseline);
+        object recipeReference = RecipeReference(recipeBaseline, true);
+        string referenceYaml = Write(recipeReference);
+        Assert(referenceYaml.Contains("upgrade: Upgrader6Weapon") && !referenceYaml.Contains("upgradeResource:"),
+            "Compact recipe reference lost reserved Upgrader shorthand");
+        Assert(referenceYaml.Contains("Wood: 1") && referenceYaml.Contains("SwordNiedhogg: 0") &&
+               referenceYaml.Contains("SurtlingCore: 1, 0, 2"), "Compact recipe reference lost a required tuple value");
+        object copiedRecipe = Read(referenceYaml, entryType);
+        Assert((string)Get(copiedRecipe, "Recipe")! == "SwordNiedhoggBlood" &&
+               (string)Get(copiedRecipe, "CraftingStation")! == "blackforge, 4" &&
+               Get(copiedRecipe, "ListSortWeight") == null && Get(copiedRecipe, "NoCraftOnlyUpgrade") == null,
+            "Compact recipe header/default omission changed");
+        IList baselineResources = (IList)Get(recipeBaseline, "Resources")!;
+        IList copiedResources = (IList)Get(copiedRecipe, "Resources")!;
+        Assert(copiedResources.Count == baselineResources.Count, "Reference copy lost repeated or same-prefab resources");
+        for (int index = 0; index < baselineResources.Count; index++)
+        {
+            object source = baselineResources[index]!;
+            object copied = copiedResources[index]!;
+            Assert(Equals(Get(source, "Item"), Get(copied, "Item")) && Equals(Get(source, "Amount"), Get(copied, "Amount")) &&
+                   Equals(Get(source, "AmountPerLevel") ?? 0, Get(copied, "AmountPerLevel") ?? 0) &&
+                   Equals(Get(source, "ExactQuality"), Get(copied, "ExactQuality")) &&
+                   Equals(Get(source, "UpgradeResource"), Get(copied, "UpgradeResource")),
+                "Reference copy changed resource semantics/order at index " + index);
+            object built = Build(copied);
+            Assert(Equals(Field(built, "m_amount"), Get(source, "Amount")) &&
+                   Equals(Field(built, "m_upgraderResource"), Get(source, "UpgradeResource")),
+                "Copied reference changed game amount/classification at index " + index);
+        }
+        Assert(Write(recipeBaseline) == baselineYaml, "Reference generation changed the recipe baseline");
+        IList projectedResources = (IList)Get(recipeReference, "Resources")!;
+        requirement.GetProperty("Amount", members)!.SetValue(projectedResources[4], 9);
+        Assert((int)Get(baselineResources[4]!, "Amount")! == 1, "Reference resource shares mutable state with the baseline");
+        object nonUpgradeable = Read(Write(RecipeReference(recipeBaseline, false)), entryType);
+        IList nonUpgradeableResources = (IList)Get(nonUpgradeable, "Resources")!;
+        Assert(Get(nonUpgradeableResources[1]!, "AmountPerLevel") == null && Get(nonUpgradeableResources[6]!, "AmountPerLevel") == null,
+            "Non-upgradeable recipe exports irrelevant upgrade amounts");
+        Assert((int)Get(nonUpgradeableResources[5]!, "AmountPerLevel")! == 0 && (int)Get(nonUpgradeableResources[5]!, "ExactQuality")! == 2 &&
+               (bool)Get(nonUpgradeableResources[3]!, "UpgradeResource")!, "Non-upgradeable recipe lost exact-quality or Upgrader semantics");
+        foreach (string emptyResources in new[] { "", "resources: []", "resources: null" })
+        {
+            object emptyDefinition = Read("amount: 1\n" + emptyResources, recipeDefinitionType);
+            string emptyReference = Write(RecipeReference(emptyDefinition, true));
+            Assert(!emptyReference.Contains("resources:") && Get(Read(emptyReference, entryType), "Resources") == null,
+                "Empty reference resources are no longer omitted");
+        }
         Assert(entryType.GetProperty("UpgradeResources", members) == null &&
                Rejected("recipe: StaffThunderBlood\nupgradeResources:\n- Upgrader7Weapon: 1", entryType),
             "Removed upgradeResources block remains accepted");
