@@ -1808,8 +1808,10 @@ internal static class StatusEffectOverrideManager
         ApplyLiveSafeBase(statusEffect, definition);
         if (applyEffectLists)
         {
-            ApplyEffectList(statusEffect.name, definition.StartEffects, value => statusEffect.m_startEffects = value, "startEffects");
-            ApplyEffectList(statusEffect.name, definition.StopEffects, value => statusEffect.m_stopEffects = value, "stopEffects");
+            ApplyEffectList(statusEffect.name, definition.StartEffects, statusEffect.m_startEffects,
+                value => statusEffect.m_startEffects = value, "startEffects");
+            ApplyEffectList(statusEffect.name, definition.StopEffects, statusEffect.m_stopEffects,
+                value => statusEffect.m_stopEffects = value, "stopEffects");
         }
 
         CopyBaseTime(definition.Time, statusEffect);
@@ -1956,21 +1958,22 @@ internal static class StatusEffectOverrideManager
              string.Equals(item.name, itemName, StringComparison.OrdinalIgnoreCase)));
     }
 
-    private static void ApplyEffectList(string statusEffectName, string? value, Action<EffectList> assign, string fieldName)
+    private static void ApplyEffectList(string statusEffectName, string? value, EffectList? current,
+        Action<EffectList> assign, string fieldName)
     {
         if (value == null)
         {
             return;
         }
 
-        EffectList? effectList = ParseEffectList(statusEffectName, value, fieldName);
+        EffectList? effectList = ParseEffectList(statusEffectName, value, fieldName, current);
         if (effectList != null)
         {
             assign(effectList);
         }
     }
 
-    private static EffectList? ParseEffectList(string statusEffectName, string value, string fieldName)
+    private static EffectList? ParseEffectList(string statusEffectName, string value, string fieldName, EffectList? current)
     {
         string rawValue = value.Trim();
         if (rawValue.Length == 0 || rawValue.Equals("None", StringComparison.OrdinalIgnoreCase))
@@ -1978,6 +1981,11 @@ internal static class StatusEffectOverrideManager
             return EmptyEffectList();
         }
 
+        // The compact YAML contains only enabled prefab names. Keep each matching
+        // occurrence's attachment, variant and scale metadata in its own slot.
+        List<EffectList.EffectData> remaining = current?.m_effectPrefabs?
+            .Where(effect => effect != null && effect.m_enabled && effect.m_prefab != null)
+            .ToList() ?? new List<EffectList.EffectData>();
         List<EffectList.EffectData> effects = new();
         foreach (string token in rawValue.Split(new[] { ',' }, StringSplitOptions.None))
         {
@@ -1989,6 +1997,16 @@ internal static class StatusEffectOverrideManager
 
             if (prefabName.Equals("None", StringComparison.OrdinalIgnoreCase))
             {
+                continue;
+            }
+
+            int existingIndex = remaining.FindIndex(effect =>
+                string.Equals(Utils.GetPrefabName(effect.m_prefab.name), prefabName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(effect.m_prefab.name, prefabName, StringComparison.OrdinalIgnoreCase));
+            if (existingIndex >= 0)
+            {
+                effects.Add(CloneEffectData(remaining[existingIndex]));
+                remaining.RemoveAt(existingIndex);
                 continue;
             }
 

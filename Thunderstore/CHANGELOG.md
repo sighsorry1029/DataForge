@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.6
+
+- Fixed `startEffects` and `stopEffects` overrides losing existing prefab attachment, tracking, colour variant, and scale settings, including Burning effects remaining at their initial position. Repeated prefab entries retain their individual settings in order; new prefabs keep their default behaviour.
+- Rewrote the README with a quick-start workflow, copy-ready recipe, item, piece, and effect examples, and a guide to existing per-item acquisition multipliers. Corrected recipe output, resource tuple, and Rested duration examples.
+- Added managed checks for effect-list metadata copying, independent copies, omitted fields, and explicit clearing, plus an in-game verification checklist.
+- Updated the packaged BepInEx dependency to `denikson-BepInExPack_Valheim-5.4.2351`.
+
 ## 1.3.5
 
 - Added `equipment.iceSkates` and `equipment.iceShoes`, plus focused `SE_React` overrides for `minSpawnDamage` and per-level damage.

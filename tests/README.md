@@ -26,12 +26,31 @@ dotnet run --project tests/DataForge.DomainChecks -c Debug -- bin/Debug/DataForg
 It checks compact regular tuples and reserved Upgrader entries, hidden metadata preservation,
 reference-copy round trips, and invalid input rejection. It also exercises damage
 value updates, item/effect field round trips, removed-schema checks, source-free
-conversion YAML and read-only comment escaping.
+conversion YAML and read-only comment escaping. Effect-list checks cover original
+game metadata copying without shared mutable entries, omission, and explicit clearing.
 It constructs
 the codec without manager initialization: the installed Harmony needs the net48
 runner while the merged YAML library needs default-interface-method support.
 Prefab lookup, baseline capture from Unity objects, live reload and gameplay are
 not exercised by this process.
+
+## Effect-list metadata runtime checklist
+
+1. Restart with the rebuilt DLL. Apply Burning with the original three
+   `startEffects` names copied from `effects.full.yml`. Let any existing Burning
+   expire and trigger it again. Check movement tracking, size, variant-selected
+   fire colour and cleanup when the effect ends. Repeat with Wet, Freezing and Poison.
+2. Reorder or select a subset of the original list, and use a test effect with
+   repeated prefab names carrying different variants or child transforms. Each
+   enabled occurrence must keep its own metadata; disabled occurrences must not
+   displace enabled ones. Check both start and stop lists independently.
+3. Repeat with `cloneFrom`, reload/remove overrides, and reconnect. Omission must
+   preserve the current list; `None` and `''` must clear it. An unknown prefab
+   anywhere in the list must leave that entire slot unchanged. A newly added
+   prefab must retain the previous default behaviour, without forced attachment.
+
+This checklist requires Unity/game execution. The desktop checks do not validate
+prefab-name matching, native object lifetime, visual results or multiplayer behaviour.
 
 ## Deep North field support runtime checklist
 
@@ -66,7 +85,7 @@ The pattern-rejection logging path requires the game's ThreadingHelper singleton
 4. Test client/host and dedicated server, Steam and crossplay: initial/reconnect sync, non-admin changes to locked settings, icon source authority, large/fragmented payloads, duplicate/late messages and disconnect cleanup. Check item/piece/status/recipe clone restoration and API notifications through a second world.
 5. Repeat with the optional mods actually in use (MagicPlugin, VNEI, VeiledRecipes, Jotunn/PieceManager). Other mods' old-game binaries are not fixed by DataForge's bundled ServerSync patch. Check Harmony ordering and no duplication after repeated menu/world lifecycles.
 
-The packaging manifest requires BepInExPack Valheim 5.4.2350 as specified by the project workflow; changing that manifest does not replace an installed BepInEx runtime.
+The packaging manifest requires BepInExPack Valheim 5.4.2351 as specified by the global workflow; changing that manifest does not replace an installed BepInEx runtime.
 
 ## Source ownership policy checks (2026-09-10)
 

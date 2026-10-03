@@ -101,6 +101,40 @@ internal static class DomainChecks
             Assert(attackType.GetProperty(removed, members) == null, "Removed attack field remains in schema: " + removed);
         Assert(Rejected("item: StaffThunderBlood\nprimaryAttack:\n  projectileVelocity: 20", itemEntry), "Removed attack YAML remains accepted");
         Type effects = mod.GetType("DataForge.StatusEffectOverrideManager", true)!;
+        Type effectListType = game.GetType("EffectList", true)!;
+        Type effectDataType = game.GetType("EffectList+EffectData", true)!;
+        object originalEffectData = Activator.CreateInstance(effectDataType)!;
+        foreach (FieldInfo field in effectDataType.GetFields(BindingFlags.Public | BindingFlags.Instance))
+        {
+            if (field.FieldType == typeof(bool)) field.SetValue(originalEffectData, true);
+            else if (field.FieldType == typeof(int)) field.SetValue(originalEffectData, 2);
+            else if (field.FieldType == typeof(string)) field.SetValue(originalEffectData, "Spine");
+        }
+        // Disabled entries are not exported to compact YAML, but baseline/clone
+        // copies must still retain their metadata. No native prefab is fabricated.
+        effectDataType.GetField("m_enabled")!.SetValue(originalEffectData, false);
+        object originalEffectList = Activator.CreateInstance(effectListType)!;
+        Array originalEffectArray = Array.CreateInstance(effectDataType, 1);
+        originalEffectArray.SetValue(originalEffectData, 0);
+        effectListType.GetField("m_effectPrefabs")!.SetValue(originalEffectList, originalEffectArray);
+        object copiedEffectList = effects.GetMethod("CloneEffectList", members)!.Invoke(null, new[] { originalEffectList })!;
+        Array copiedEffectArray = (Array)Field(copiedEffectList, "m_effectPrefabs");
+        object copiedEffectData = copiedEffectArray.GetValue(0)!;
+        Assert(!ReferenceEquals(originalEffectList, copiedEffectList) && !ReferenceEquals(originalEffectArray, copiedEffectArray) &&
+               !ReferenceEquals(originalEffectData, copiedEffectData), "Effect list copy shares mutable metadata with its source");
+        foreach (FieldInfo field in effectDataType.GetFields(BindingFlags.Public | BindingFlags.Instance))
+            Assert(Equals(field.GetValue(originalEffectData), field.GetValue(copiedEffectData)), "Effect metadata copy lost " + field.Name);
+        effectDataType.GetField("m_attach")!.SetValue(copiedEffectData, false);
+        Assert((bool)Field(originalEffectData, "m_attach"), "Changing copied attachment alters the baseline");
+        foreach (string clear in new[] { "", "  ", "None", " none " })
+        {
+            object cleared = effects.GetMethod("ParseEffectList", members)!.Invoke(null, new object[] { "Burning", clear, "startEffects", originalEffectList })!;
+            Assert(((Array)Field(cleared, "m_effectPrefabs")).Length == 0 && originalEffectArray.Length == 1 &&
+                   (bool)Field(originalEffectData, "m_attach"), "Clearing an effect list changes the baseline or retains effects");
+        }
+        // A null assignment delegate makes any accidental assignment fail.
+        effects.GetMethod("ApplyEffectList", members)!.Invoke(null, new object?[] { "Burning", null, originalEffectList, null, "startEffects" });
+        Assert(ReferenceEquals(Field(originalEffectList, "m_effectPrefabs"), originalEffectArray), "Omitted effect list changed");
         Type damageType = game.GetType("HitData+DamageTypes", true)!;
         object damage = Activator.CreateInstance(damageType)!;
         damageType.GetField("m_fire")!.SetValue(damage, 25f);

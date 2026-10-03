@@ -1,70 +1,181 @@
 # DataForge
 
-Easy way to configure recipes, items, pieces and effects by organized reference system. Item cloning with visual tweaks and localization. <br> 
-Weight, stack, amount multiplier for items. Shows comfort group and value in hammer tab.
+Edit Valheim recipes, items, build pieces, and status effects with YAML files.
+Find an entry in the generated references, copy it, and change only what you need.
+DataForge reads vanilla content and content registered by your installed mods.
 
-![](https://i.ibb.co/5xFswvGZ/comfort.gif) <br>
-Small qol of marking the comfort number and comfort group within hammer tab.
+![Comfort values and groups in the hammer menu](https://i.ibb.co/5xFswvGZ/comfort.gif) <br>
+Small qol of showing comfort values and related comfort-group hints in the hammer menu.
 
-## Included Quality-Of-Life Tweaks
+## Global settings
 
-DataForge also includes a few optional helpers for modpack operation:
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `Stackable Stack Multiplier` | `1` | Multiply stack sizes by 1–10. An item's explicit `maxStackSize` takes priority. |
+| `Item Weight Multiplier` | `1` | Multiply item weights by 0–2. An item's explicit `weight` takes priority. |
+| `Upgrade Material Scaling` | `Vanilla` | For a base cost of 10, qualities 2/3/4 cost 10/20/30. `Flat` gives 10/10/10; `Reduced` gives 10/15/20. Exact-quality costs stay as written. |
+| `Show Comfort In Hammer` | `On` | Show comfort values and related comfort-group hints in the hammer menu. Client setting. |
+| `Highlight Station Extensions In Hammer` | `On` | Highlight related stations and extensions on hover. Client setting. |
+| `Ignore Station Extension Spacing` | `On` | Allow extensions to be placed close together. Other placement rules still apply. |
+| `maxStoredFuel` | `100` | Allow extra fireplace fuel without changing the displayed vanilla maximum. Set `0` to disable. |
 
-- show comfort values in the hammer build UI
-- highlight same comfort-group pieces while hovering a comfort piece
-- ignore station extension spacing checks
-- allow fireplaces to store extra fuel without changing the displayed vanilla max fuel
+## Start here
 
-## Workflow
+1. Install DataForge and **BepInExPack Valheim 5.4.2351**. For multiplayer, install the same DataForge version on the server and every client.
+2. Start a world, or start your dedicated server and let its game data load.
+3. Open `BepInEx/config/DataForge/` in that installation. If you use a mod manager, open the active profile's config folder.
+4. Find the entry you want in a reference file. Copy it into the matching edit file below.
+5. Keep the entry name, set `override: true`, and keep only the fields you want to change. Save the file. DataForge reloads supported changes automatically after a short delay.
 
-It is built around a simple workflow:
+**In multiplayer, edit the host or dedicated server's files.** Connected clients use the server's settings, not their own local YAML.
 
-1. Let DataForge generate readable reference files from the loaded modpack.
-2. Copy only the entries you want to change into an override file.
-3. Edit the compact fields you care about.
-4. Use full scaffold files only when you need every supported field.
+| I want to change… | Read this generated file | Edit this file | Guide |
+| --- | --- | --- | --- |
+| Ingredients, output, or crafting station | `recipes.reference.yml` | `recipes.yml` | [Recipes](#recipes) |
+| Weight, damage, armor, food, or item visuals | `items.reference.yml` | `items.yml` | [Items](#items) |
+| Build costs, health, comfort, or production | `pieces.reference.yml` | `pieces.yml` | [Pieces](#pieces) |
+| Buffs, debuffs, or effect visuals | `effects.reference.yml` | `effects.yml` | [Effects](#effects) |
+| Build-tool categories | `pieceCategory.reference.yml` | `pieceCategory.yml` | [Categories](#categories) |
 
-The goal is to make large modpacks easier to tune without turning every item, recipe, or piece into a wall of config.
+For a first edit, put this in `items.yml` to make Wood lighter and stack to 100:
 
-## Why Use It
+```yaml
+- item: Wood
+  override: true
+  weight: 1
+  maxStackSize: 100
+```
 
-- Reference files are generated from the actual loaded game data, including vanilla and modded content.
-- Reference output omits common default values, so the files stay useful for browsing.
-- Override files are compact and hand-editable.
-- Full scaffold generation is available on demand for deep edits.
-- YAML payloads are server-synced, so server rules can drive client behavior.
-- Owner sections and resource-map sorting make large references easier to scan.
-- Cloning, material/icon tweaks, localization, and live-safe refreshes are handled in one place.
-- Several modpack stability helpers are included for common Valheim mod conflicts.
+### A few YAML rules
 
-## Mod integration API
+- Use spaces, not tabs. Each entry starts with `- item:`, `- recipe:`, `- piece:`, or `- effect:`.
+- Dots in tables mean nested keys: `visual.icon` means `icon` inside a `visual` block, not a literal field name.
+- Use the internal names from the references, such as `SwordIron`, not the translated in-game name.
+- Omit fields you do not want to override. `override: false` disables that entry.
+- A list such as `resources` or `conversions` replaces the whole list. Include every entry you want to keep. `[]` clears a list where supported.
+- Comma-separated values have different meanings for different fields. Follow the examples below; do not assume that leaving out a number always preserves it.
+- Use `None` only for fields that support it. A blank value is not a general reset command.
 
-DataForge 1.3.0 adds a public read-only API for applied item, recipe, piece,
-status-effect and localization changes. It provides coalesced local notifications,
-readiness/session revisions, configured-target queries and actual clone-source
-queries. Existing status-effect ownership events are preserved. See
-[API.md](API.md) for contracts, examples, authority rules and verification.
+You can split your edits into files such as `items_balance.yml`, `recipes_food.yml`, or `effects_magic.yml`. Keep these files directly inside `DataForge/`, not in subfolders. Files load in alphabetical order; keeping each target in one file makes edits easier to track.
 
-## Supported Domains
+### Find a field that is missing from a reference
 
-Smelters with no separate input, including the Frost Kiln, use `None` as the input
-in `smelter.conversions` (for example `- None: FrozenFuel`). This consumes the
-configured fuel. An empty conversions list still removes all conversions;
-omitting it preserves the current definition. Existing fuel and production queues
-are not reset when applying these settings.
+References hide many default values. Generate a **full file** to see the supported fields and their baseline values. Enter these commands in the game's console. If needed, enable it with the `-console` launch option.
 
-### Items
+```text
+dataforge:full item
+dataforge:full recipe
+dataforge:full piece
+dataforge:full effect
+dataforge:full all
+```
 
-DataForge can edit common item fields, including:
+For example, `dataforge:full item` writes `items.full.yml`. Copy the fields you need into `items.yml`; **reference and full files are generated guides, not active edit files**. They can be overwritten when regenerated.
 
-- name, description, weight, value, stack size, teleportability, floating behavior
-- durability, food values, armor, equip modifiers, damage, block values, attacks
-- status effects attached to equip, consume, attack, perfect block, or full adrenaline
-- item cloning from an existing prefab
-- visual overrides such as material, scale, custom icon, and auto icon rendering
-- item acquisition multipliers for drops, pickup, crafting, cooking, and smelting
+To refresh references after loading or changing your modpack:
 
-Example:
+```text
+dataforge:refer all
+```
+
+You can also use `item`, `recipe`, `piece`, `effect`, `pieceCategory`, or `material` instead of `all`. Run commands after game data is ready. A remote player must be in the server's `adminlist.txt`; commands write files on the server, and detailed results appear in its console.
+
+## Recipes
+
+Edit `recipes.yml`. Copy the exact recipe key from `recipes.reference.yml`. If an item has several recipes, their keys may end in `;1`, `;2`, and so on.
+
+### Change ingredients and station level
+
+```yaml
+- recipe: SwordIron
+  override: true
+  craftingStation: forge, 2
+  resources:
+    - Iron: 20, 10
+    - Wood: 5, 0
+    - SurtlingCore: 0, 5, 2
+```
+
+| Field | Meaning |
+| --- | --- |
+| `craftingStation: forge, 2` | Require a level-2 forge for the base recipe. |
+| `Iron: 20, 10` | Use 20 to craft. Base upgrade cost is 10. With vanilla scaling, qualities 2, 3, and 4 cost 10, 20, and 30. |
+| `Wood: 5, 0` | Use 5 to craft and none to upgrade. |
+| `SurtlingCore: 0, 5, 2` | Use none to craft and exactly 5 when upgrading to quality 2. |
+
+Resource values are **craft amount, upgrade amount, optional exact target quality**. `craftingStation: None` removes the station requirement. Omitting `resources` keeps the current ingredients; `resources: []` removes all ingredient requirements.
+
+### Change output or remove a recipe
+
+The output count goes after the recipe key, not in an `amount` field:
+
+```yaml
+- recipe: Sausages, 4
+  override: true
+```
+
+To disable a recipe:
+
+```yaml
+- recipe: SwordIron
+  override: true
+  remove: true
+```
+
+To add a recipe for an existing item or a DataForge item clone, use its prefab name and supply `resources`. Use a unique suffix, such as `Sausages;custom`, to add another recipe for an item that already has one. A recipe does not create the item itself; see [Clone an item](#clone-an-item).
+
+### Upgrader materials
+
+For a recipe that uses an Upgrader station, put its special one-item requirement in the same `resources` list:
+
+```yaml
+- recipe: StaffThunderBlood
+  override: true
+  noCraftOnlyUpgrade: true
+  resources:
+    - Gold: 10, 5
+    - NornThread: 5, 2
+    - OrbThunderBlood: 1, 1
+    - upgrade: Upgrader7Weapon
+```
+
+This example needs the mod that registers `StaffThunderBlood` and its materials. Copy its actual recipe key from your reference.
+
+`upgrade: ItemPrefab` means **one item checked and consumed only by an Upgrader station**. It also accepts custom idol prefabs. Do not add amounts or quality values after it. There is no separate `upgradeResources` block. `noCraftOnlyUpgrade` marks the recipe as upgrade-only; it does not turn an ordinary crafting station into an Upgrader.
+
+Two optional recipe fields control ingredient choice and output bonuses:
+
+| Setting | Meaning |
+| --- | --- |
+| `requireOnlyOneIngredient: true, 1` | Require only one listed ingredient. The second value controls the game's output bonus from that ingredient's quality. |
+| `qualityBonus: [{Fish1: 1}]` | Add output based on the consumed Fish1's quality. Quality 3 adds `ceil((3 - 1) × 1) = 2` items. |
+
+These bonuses are separate. If you enable both, both apply.
+
+## Items
+
+Edit `items.yml`. Item settings change the item itself; recipe settings change how it is made.
+
+### Get more of one item
+
+Add a multiplier after the item name in `items.yml`:
+
+```yaml
+- item: Wood, 2
+  override: true
+
+- item: Copper, 3
+  override: true
+```
+
+This doubles newly generated Wood and triples newly generated Copper, including Copper produced by a smelter. Each item has its own multiplier; `1` keeps the normal amount.
+
+- Applies to supported loot, creature drops, gathering, crafting, cooking, and smelting paths. Mods with their own item-spawning code may bypass these paths.
+- Multiplies crafting output without increasing ingredient costs. A recipe that produces 4 items produces 8 with a `2` multiplier. Item upgrades are unaffected.
+- Changes new output, not stack limits or existing inventory stacks. Dropping and picking up the same stack does not multiply it again.
+- Fractions are supported: `1.5` gives an average of 50% more. Fractional results are rounded randomly; a normal one-item output becomes either one or two.
+
+### Change a weapon
 
 ```yaml
 - item: SwordIron
@@ -72,135 +183,95 @@ Example:
   weight: 0.8
   durability: 250, 50
   damage:
-    slash: 55, 0
+    slash: 55, 5
   primaryAttack:
-    cost: 12
+    cost: 12, 0, 0, 0
 ```
 
-Clone example:
+| Field | Values, in order |
+| --- | --- |
+| `durability` | Base durability, added durability per quality level. Further options are shown in the full file. |
+| `damage.slash` | Base damage, added damage per quality level. Other channels include `blunt`, `pierce`, `fire`, `frost`, `lightning`, `poison`, and `spirit`. |
+| `primaryAttack.cost` | Stamina, eitr, health, health percentage (`40` means 40%). |
+| `equipment.armor` | Base armor, added armor per quality level. |
+| `food` | Health, stamina, eitr, regeneration, duration in seconds. |
+
+For example, `slash: 55, 5` gives 55 base slash damage at quality 1 and 70 at quality 4, before skills and attack multipliers.
+
+Other common fields include `name`, `description`, `value`, `maxStackSize`, `maxQuality`, `teleportable`, and `floating`. Use `true` or `false` for switches. `equipment.iceSkates` and `equipment.iceShoes` control the corresponding equipped movement flags.
+
+### Change food
 
 ```yaml
-- item: SwordIronHeavy
+- item: CookedMeat
+  override: true
+  food: 50, 25, 0, 2, 1200
+```
+
+This sets 50 health, 25 stamina, no eitr, 2 regeneration, and a 1,200-second duration.
+
+### Clone an item
+
+Give the clone a unique prefab name in `items.yml`:
+
+```yaml
+- item: DF_HeavyIronSword
   override: true
   cloneFrom: SwordIron
   name: Heavy iron sword
-  weight: 1.4
-  visual:
-    icon: auto
-    iconRotation: 23, 51, 25.8
-    scale: 0.85
-    material: blackmetal
+  description: A heavier iron sword with a stronger edge.
+  weight: 3
   damage:
-    slash: 72, 0
+    slash: 72, 5
+  visual:
+    scale: 1.1
+    icon: auto
 ```
 
-`equipment.iceSkates` and `equipment.iceShoes` control the corresponding equipped
-movement flags. Omission preserves the current value; explicit `false` is supported.
-
-### Recipes
-
-Recipes use the result prefab as the main key. If the same result has multiple recipes, reference files use suffixes such as `SwordIron;1` and `SwordIron;2`.
-
-DataForge supports:
-
-- compact crafting station syntax
-- compact resource syntax
-- recipe amount
-- recipe removal
-- one-of ingredient recipes
-- exact-quality upgrade materials used by ItemManager-style recipes
-- quality-based output bonus fields
-
-Example:
+Then give it a recipe in `recipes.yml`:
 
 ```yaml
-- recipe: SwordIron
+- recipe: DF_HeavyIronSword
   override: true
   craftingStation: forge, 2
   resources:
-  - Iron: 20, 10
-  - SurtlingCore: 0, 5, 2
-  - Wood: 5
+    - Iron: 25, 10
+    - Wood: 5, 0
 ```
 
-Resource tuples use `craft amount, upgrade amount, exact quality`. With two values, upgrade cost follows vanilla `(quality - 1)` scaling. A third value makes that upgrade amount apply only when upgrading to the specified quality, so `SurtlingCore: 0, 5, 2` requires five Surtling Cores only for quality 2.
+Cloning copies the source item; it does not automatically copy its recipe. Keep clone names stable once players have made or saved those items.
 
-`noCraftOnlyUpgrade: true` marks an upgrade-only recipe. The game selects a
-different subset of requirements while the current crafting station is an
-Upgrader. Put its fixed one-item requirement in the same list with the reserved
-`upgrade` key:
+## Pieces
 
-```yaml
-  resources:
-  - Gold: 10, 5
-  - NornThread: 5, 2
-  - upgrade: Upgrader7Weapon
-```
+Edit `pieces.yml` for buildable objects such as walls, furniture, chests, and production stations.
 
-`upgrade: ItemPrefab` always means one item, with no per-level or exact-quality
-form. It accepts custom idol prefabs as well as `Upgrader0Weapon` through
-`Upgrader7Armor`. Reference and full files emit this form from the game's
-`m_upgraderResource` flag. Omitting `resources` preserves the complete requirement
-list; `resources: []` removes it. Hidden recovery and one-ingredient metadata is
-preserved internally when entries are reapplied; it is not editable YAML.
-
-The synced `Upgrade Material Scaling` config can globally keep vanilla costs (`10 / 20 / 30`), flatten them (`10 / 10 / 10`), or use reduced scaling (`10 / 15 / 20`). Exact-quality requirements keep their explicitly configured amount.
-
-### Pieces
-
-Piece overrides focus on the fields that are most useful for modpack tuning:
-
-- build table and category placement
-- sort order inside a build tab
-- required crafting station
-- build resources
-- health
-- comfort amount and comfort group
-- exact, case-sensitive reuse of existing hammer categories; unknown names in `pieces.yml` create a new category
-- per-hammer category ordering and localized display labels through `pieceCategory.yml`
-- visual material overrides, plus prefab scale overrides for newly placed pieces
-- selected component configuration for containers, crafting stations, extensions, smelters, cooking stations, fermenters, sap collectors, and beehives
-- `stationExtension` can add a `StationExtension` component to a piece that does not already have one. `stationExtension: None` can disable an existing extension, and native/original extension components are restored from baseline instead of being deleted.
-- `craftingStation` can edit an existing station component or add one to a piece that does not already have one. If the field is removed later, DataForge removes only the station component it added.
-
-Example:
+### Change a build cost and health
 
 ```yaml
 - piece: wood_wall
   override: true
-  pieceTable: Hammer
-  category: Building
-  sortOrder: 80
   needStation: None
   health: 250
-  visual:
-    scale: 2
-    material: amber
   resources:
-- Wood: 4
+    - Wood: 4, true
 ```
 
-`pieceCategory.reference.yml` records the detected category order for every build tool before DataForge applies category moves or ordering. Copy only the sections you want to control into `pieceCategory.yml`:
+Piece resource values are **amount, recover on removal**. They are different from recipe upgrade costs. `Wood: 4, false` costs four Wood without returning that resource on removal.
 
-```yaml
-Hammer:
-- Misc
-- Furniture, $hud_furniture
-- Furniture: GB_Parchment_Tool
-- Stone Building: GB_Parchment_Tool
-- ValheimCuisine, $df_piececategory_valheimcuisine
-GB_Parchment_Tool: []
-```
+| Field | Use |
+| --- | --- |
+| `needStation` | Station required to build the piece. Use a station prefab name or `None`. |
+| `pieceTable` | Build tool that contains the piece, such as `Hammer`. |
+| `category` | Exact category name. An unknown name creates a category. |
+| `sortOrder` | Position within its build category. |
+| `comfort` | Comfort value, comfort group. Copy the group name from the full file. |
+| `container` | Inventory width, height; for example `10, 4`. Requires an existing container. |
+| `remove: true` | Hide the piece from build lists; does not delete placed pieces. |
+| `visual.scale` | Prefab scale for newly placed pieces. |
 
-Category names are exact and case-sensitive. The optional second value is a literal tab label or a `$` localization token. A scalar entry controls order and label. A mapping such as `Furniture: GB_Parchment_Tool` moves every matching source-table piece into the destination table named by the surrounding section; adding `, $hud_furniture` before the colon applies the label at the same time. A plain category entry and multiple mappings may share a destination category, allowing several source tools to merge into one tab. Conflicting labels for that destination are rejected. An exact category already present at the destination is merged, while a missing category is added. A source tool/category pair can move to only one destination. Individual `pieces.yml` `pieceTable` assignments take final priority, and removing a category move restores baseline membership.
+**`needStation` and `craftingStation` do different jobs.** `needStation: forge` requires a forge to build this piece. The `craftingStation` block edits or adds a crafting-station component on the piece itself. In `recipes.yml`, `craftingStation: forge, 2` is the recipe's station requirement.
 
-Valheim's `Categories` piece list is filtered by `Piece.UsageTagFlags`, which is separate from the legacy `PieceCategory` value used by build-tool category moves. During an explicit whole-category move, DataForge checks whether the destination name matches a vanilla usage tag. If an embedded PieceManager also assigned the moved pieces a custom usage tag with that same name, DataForge removes only that redundant custom bit and keeps the vanilla bit. This merges duplicate entries such as two `Furniture` filters without combining unrelated policies that merely share a display label. Removing the move restores the captured usage flags.
-
-Listed categories move first, while omitted categories keep their relative order afterward. Empty source categories created by a move are hidden and restored with the mapping. After moving every desired category out of a source tool, write `GB_Parchment_Tool: []` to leave that source section explicitly empty. The empty list alone does not move pieces. A plain dormant entry still does not create or preserve an empty build tab.
-
-When Homestead is installed, its `Homestead` category is owner-managed: DataForge omits it from `pieceCategory.reference.yml`, ignores it in `pieceCategory.yml`, and leaves it fixed at the end. `pieces.yml` also cannot assign pieces to that category.
-
-Component example:
+### Change a production station
 
 ```yaml
 - piece: smelter
@@ -209,216 +280,155 @@ Component example:
     input: Coal, 20, 10
     output: 2, 30
     conversions:
-    - CopperOre: Copper
-    - TinOre: Tin
+      - CopperOre: Copper
+      - TinOre: Tin
 ```
 
-### Status Effects
+`input` is **fuel prefab, maximum fuel, maximum queued input**. `output` is **fuel per product, seconds per product**. This example replaces the conversion list with only Copper and Tin. Copy all conversions you want to keep.
 
-Status effects can be edited or cloned with compact fields for duration, cooldown, icons, messages, maximum-stat bonuses, skill modifiers, damage modifiers, and effect prefabs.
+Fuel-only conversions, such as the Frost Kiln's Liquid Frost production, use `None` as the input:
 
-`stats.maxStats: health, stamina, eitr` adds maximum stats while the effect is active. Bonuses from different effects stack and remain stable through Valheim's food-stat recalculation. For MagicPlugin effects, an explicit `maxStats` replaces that effect's native maximum-Eitr bonus; omitting it preserves MagicPlugin behavior.
+```yaml
+- piece: piece_FrostKiln
+  override: true
+  smelter:
+    conversions:
+      - None: FrozenFuel
+```
 
-MagicPlugin effects with a native Eitr-regeneration bonus use the existing `stats.regenMultiplier` field. DataForge converts MagicPlugin's percentage internally, so `regenMultiplier: 1, 1, 1.2` means `+20%` Eitr regeneration in both reference output and overrides.
+These conversions consume the station's configured fuel. Applying smelter settings does not reset its existing fuel or production queue.
 
-DataForge adds localized tooltip lines for `maxStats`, `attackDamage`, and `raiseSkill`, using tokens from `localization/English.yml`.
+The full file also covers `cookingStation`, `fermenter`, `sapCollector`, `beehive`, `stationExtension`, and `craftingStation`. Most component settings require that component to exist. `stationExtension` and `craftingStation` can also add their component. `stationExtension: None` disables an extension. A container cannot shrink along an axis while it holds items or is in use.
 
-Example:
+### Categories
+
+Edit `pieceCategory.yml` to order categories or move whole categories between build tools. Start with the exact tool and category names in `pieceCategory.reference.yml`:
+
+```yaml
+Hammer:
+  - Misc
+  - Furniture
+  - Furniture: GB_Parchment_Tool
+  - Stone Building: GB_Parchment_Tool
+GB_Parchment_Tool: []
+```
+
+This example requires `GB_Parchment_Tool`. It moves that tool's `Furniture` and `Stone Building` categories into the Hammer. An existing destination category with the same exact name is merged, so Furniture does not need a second tab.
+
+- Names are **case-sensitive**. Copy them from the reference, not just the visible menu label.
+- Listed categories come first. Unlisted categories keep their relative order afterward.
+- Add a label with `Furniture, My furniture` or `Furniture, $hud_furniture`. Labels can also go before the colon in a move entry.
+- `GB_Parchment_Tool: []` does not move anything by itself. The move entries do the work.
+- A `pieceTable` assignment in `pieces.yml` takes priority over a whole-category move.
+- Removing a move restores the original membership. The reference continues to describe the original tools and categories.
+
+The visible `Categories` filters, including Flooring, Walls, and Roofing, are not all editable build-tool categories. Use the names listed in `pieceCategory.reference.yml`. DataForge handles matching duplicate filters during explicit category moves; a similar display label alone does not make two categories equivalent. `Feasts`, `Food`, and `Meads` are ignored by category configuration. Homestead's own category remains managed by Homestead.
+
+## Effects
+
+Edit `effects.yml`. Use `displayName` for an effect's visible name; items and pieces use `name`.
+
+### Change Rested
 
 ```yaml
 - effect: Rested
   override: true
-  time: 600, 0
+  rested:
+    baseTtl: 600
+    ttlPerComfortLevel: 60
   stats:
     maxStats: 25, 0, 50
     regenMultiplier: 1, 1.5, 1
-    raiseSkill: Swords, 1.0
     attackDamage: Swords, 1.25
   damageTakenModifiers:
     fire: Resistant
     poison: Weak
 ```
 
-`SE_React` effects such as `Staff_FrostOrbs` support a `react` block:
+| Field | Meaning |
+| --- | --- |
+| `rested.baseTtl` | Rested duration at comfort 1, in seconds. |
+| `rested.ttlPerComfortLevel` | Extra seconds for each comfort level above 1. |
+| `stats.maxStats` | Added maximum health, stamina, eitr. Different effects can stack these bonuses. |
+| `stats.regenMultiplier` | Health, stamina, eitr regeneration multipliers. `1` is normal regeneration; `1.5` is 150%. |
+| `stats.attackDamage` | Skill type, damage multiplier. |
+| `damageTakenModifiers` | Resistance by damage type. Use game values such as `Normal`, `Resistant`, or `Weak`. |
+
+Ordinary effect duration uses `time: duration, cooldown`, in seconds. Cooldown is used by abilities such as Forsaken powers; it is not a universal delay before any effect can be reapplied. Rested calculates its duration from comfort, so use the `rested` block above instead of `time`.
+
+For MagicPlugin effects, an explicit `maxStats` replaces their native maximum-eitr bonus. Their eitr-regeneration bonus uses the third `regenMultiplier` value: `1.2` means +20%.
+
+### Keep or replace effect visuals
+
+```yaml
+- effect: Burning
+  override: true
+  startEffects: vfx_Burning, vfx_Burning_blue, vfx_Burning_green
+  time: 5, 0
+```
+
+`startEffects` and `stopEffects` are comma-separated prefab lists. Existing matching entries keep their original attachment, tracking, colour variant, and scale settings. Repeated names match in their original order. New prefabs use default settings; DataForge does not automatically attach every new effect to the player.
+
+Omit the field to keep its list. Use `None` or `''` to clear it. An unknown prefab leaves that list unchanged and writes a warning to the log. To see changed visuals, let the active effect end and trigger it again.
+
+You can clone an effect with a new `effect` name and `cloneFrom: ExistingEffect`. The clone keeps the source effect's type. To use it on an item, set an appropriate field under that item's `effects` block, such as `equipStatusEffect` or `consumeStatusEffect`. Creating a clone alone does not apply it to a character.
+
+Type-specific blocks such as `rested`, `poison`, or `shield` only work on the matching effect type. Adding a block does not change the effect's type.
+
+### Reactive effects
+
+For `SE_React` effects such as `Staff_FrostOrbs`:
 
 ```yaml
 - effect: Staff_FrostOrbs
+  override: true
   react:
     minSpawnDamage: 0
     damagePerLevel:
       frost: 8
 ```
 
-Per-level damage is added to the linked Projectile's base damage for each item
-level above one. This does not edit that shared projectile prefab.
-React changes apply to newly created effect instances; existing active effects
-retain their timers and type-specific state until reapplied.
+`damagePerLevel` adds damage for each item level above one. It does not edit the shared projectile prefab. Reactive settings apply to newly created effect instances.
 
-## Files
+## Names, icons, and materials
 
-DataForge uses:
-
-```text
-BepInEx/config/DataForge/
-```
-
-Main files:
-
-```text
-items.yml
-items_*.yml
-items.reference.yml
-recipes.yml
-recipes_*.yml
-recipes.reference.yml
-effects.yml
-effects_*.yml
-effects.reference.yml
-pieces.yml
-pieces_*.yml
-pieces.reference.yml
-pieceCategory.yml
-pieceCategory.reference.yml
-z_materials.reference.txt
-z_resourcemap.txt
-localization/*.yml
-icon/*.png
-```
-
-Files like `items_extra.yml`, `recipes_balance.yml`, `effects_magic.yml`, and `pieces_building.yml` are valid override files. This lets you split large configs by theme without changing the schema.
-
-## Reference And Scaffold
-
-Reference files are generated automatically when game data is ready and the client/server is the source of truth.
-
-Reference files are meant for browsing and copy-paste edits:
-
-- common defaults are omitted
-- entries are grouped by owner section when possible
-- item and recipe references use resource-map sorting
-- piece references use tier sorting
-- `pieceCategory.reference.yml` records the detected pre-DataForge per-tool category order and labels, so runtime moves and ordering do not rewrite the source reference
-
-Item references/full scaffolds include read-only attack-graph comments. They show
-linked Projectile/Aoe/SpawnAbility prefabs, component paths, inactive branches,
-follow-up links and HitData inheritance conditions. Effect references also show
-`SE_React`'s linked projectile. Values labelled `prefabDamage` are the serialized
-baseline: incoming HitData can replace them, so they are not total attack damage.
-`useAttackSettings: false` means the Aoe keeps its own damage. Spawned creatures
-own separate stats. These comments are safe to copy with an entry and are not
-editable settings. Cycles and traversal limits are labelled. DataForge collects
-them with the world baseline, never during combat or per frame; other mods and
-ammo can change the runtime path. Shared Projectile/Aoe editing remains outside
-the supported schema.
-
-The default `BepInEx/config/DataForge/z_resourcemap.txt` places Deep North after Ashlands. It uses prefab names such as `Gold` (Bloodgold), `GoldOre` (Petrified Tissue), `Frostwood` (Timberwood), and `NornThread` (Nornathread). `WrithanRoots` and `TrophyWrithan` belong to Swamp, `Hook` to Mistlands, and `TrophyBlob_Lava` to Ashlands. Fader relics and embers are grouped with Deep North as progression-entry materials. `TrophyBlob_Frost` remains unclassified until its acquisition path is confirmed.
-
-Existing resource maps are preserved when updating the mod. To update a customized map, back it up, merge the new entries from the [default resource map](DataForgeResourceMap.cs) into the corresponding existing sections, and add `[DeepNorth]` immediately after the Ashlands section. Keep custom entries and their relative section order. Sections are ordered by position, and the first occurrence of a resource wins; repeating a section header creates another tier. Restart the game after merging, then regenerate the references. These entries only affect generated reference/full-scaffold ordering, not crafting costs, unlocks, or item stats.
-
-Regenerate one compact reference, or all references, after the relevant game data is ready:
-
-```text
-dataforge:refer item
-dataforge:refer recipe
-dataforge:refer effect
-dataforge:refer piece
-dataforge:refer pieceCategory
-dataforge:refer material
-dataforge:refer all
-```
-
-The command recalculates the selected reference without deleting cache files, and leaves an unchanged file untouched.
-
-Full scaffold files are generated only by command:
-
-```text
-dataforge:full item
-dataforge:full recipe
-dataforge:full effect
-dataforge:full piece
-dataforge:full all
-```
-
-Full scaffold files expose the supported field surface more completely and are useful when a reference entry hides a default value you want to override.
-
-Both commands execute on the server/source-of-truth host. A client listed in the dedicated server's `adminlist.txt` can enter them remotely; Valheim validates the administrator and runs the command on the server, so the server's DataForge files are updated. Detailed results are printed to the server console rather than returned to the client.
-
-## Localization
-
-Server-synced localization files live in:
-
-```text
-BepInEx/config/DataForge/localization/
-```
-
-Example:
+You can write names and descriptions directly, or use `$` translation tokens. Put translations in `DataForge/localization/English.yml` and the matching language files:
 
 ```yaml
-$df_item_meadhealthtest: "Test item"
-$df_item_meadhealthtest_description: "A test item cloned from major healing mead."
+$df_heavy_sword: "Heavy iron sword"
+$df_heavy_sword_description: "A heavier iron sword with a stronger edge."
 ```
 
-Use the token in an override field:
+Then use `name: $df_heavy_sword` and `description: $df_heavy_sword_description` in the item entry. Use `displayName` and `tooltip` for effects. Localization is server-synced.
 
-```yaml
-- item: MeadHealthtest
-  override: true
-  cloneFrom: MeadHealthMajor
-  name: $df_item_meadhealthtest
-  description: $df_item_meadhealthtest_description
-```
+| Goal | Setting |
+| --- | --- |
+| Use a PNG for an item or piece | Put `MyIcon.png` in `DataForge/icon/`, then set `visual.icon: MyIcon`. |
+| Render an item or piece icon | Set `visual.icon: auto`. Adjust `visual.iconRotation` with `x, y, z` angles if needed. |
+| Use a PNG for an effect | Set `icon: MyIcon`. |
+| Reuse an item icon for an effect | Set `icon: item:SwordIron`. |
+| Reuse a material | Copy a name from `z_materials.reference.txt` into `visual.material`. |
 
-You can also write direct text instead of a `$` token.
+Use 256×256 PNGs when possible. Store explicit PNGs on the server in multiplayer; clients download referenced icons automatically. Automatic item and piece icons are rendered by clients. **Effects do not support automatic icon rendering:** `icon: auto` looks for `auto.png`.
 
-DataForge creates English tooltip tokens for effect fields such as `attackDamage` and `raiseSkill`. You can edit them in `English.yml`:
+## If a change does not work
 
-```yaml
-$df_se_tooltip_attack_damage: "{0} attack damage: <color=orange>x{1}%</color>"
-$df_se_tooltip_raise_skill: "{0} skill XP: <color=orange>{1}</color>"
-```
+| Symptom | Check |
+| --- | --- |
+| Nothing changes | Edit the host/server's active profile, use the correct plural filename, and check `override` plus the domain's enable switch. |
+| A file stops reloading | Check indentation and field names in `BepInEx/LogOutput.log`. A YAML parse failure keeps the last successfully loaded configuration. |
+| An item or effect is missing from references | Confirm the other mod actually registers it in that process. Some mods skip server prefab loading; enable their server-loading option if provided. DataForge cannot generate entries from an unloaded prefab just because its DLL is installed. |
+| A field is missing | Generate the domain's full file. Some defaults are hidden in compact references, and some components or game fields are not supported. |
+| A visual or effect looks unchanged | Existing instances may keep their state. Reapply the effect or place a new piece as appropriate. Restart the game after replacing a DLL. |
+| A weapon's damage differs from the item values | Projectiles, area effects, ammunition, and spawned creatures may own additional behaviour. Read the generated attack comments; they are diagnostics, not editable YAML. |
+| An icon is missing | Check the name, server PNG, and log. Icon sync has size and count limits; use small PNGs. |
 
-## Icons And Materials
+References describe available baseline data, not every active override or every runtime damage calculation. Projectile/Aoe comments marked `prefabDamage` are not total attack damage. Shared projectile and area-effect prefabs are not directly editable through those comments.
 
-Explicit item, piece, and status-effect icons are loaded on the source-of-truth server from:
+`z_resourcemap.txt` controls reference and full-file sorting only. It does not change costs, unlocks, or stats. The default map includes Deep North after Ashlands. Existing customized maps are preserved on update; back up yours before merging entries from the [default map](DataForgeResourceMap.cs). Section order defines tiers, and the first occurrence of a resource wins.
 
-```text
-BepInEx/config/DataForge/icon/
-```
+## For mod authors
 
-Use 256x256 PNG files when possible. The server publishes a content-hash manifest for PNG files referenced by active YAML. Clients request only hashes missing from their persistent cache and apply changed or removed icons live; clients do not need their own copy of the server PNG files.
-
-Downloaded files are stored by SHA-256 under `BepInEx/config/DataForge/cache/server-icons/`. Item and piece `icon: auto` values remain client-rendered, and status-effect `icon: item:ItemPrefabName` continues to reuse the resolved item icon instead of transferring another file. Status-effect `icon: auto` is still a literal request for `auto.png` and is synchronized like any other explicit PNG.
-
-To keep login and texture memory bounded, each manifest accepts at most 128 referenced icons, 512 KiB per PNG, 2 MiB of unique PNG data, 1024x1024 per image, and 16,777,216 unique decoded pixels in total. Replaced Sprite resources remain valid until world cleanup, while newly decoded synchronized hashes are capped at twice the manifest icon-count and pixel budgets per world; further new hashes stay cached and use the last-known-good or baseline icon until the next clean world transition. Missing or rejected server files do not block unrelated configuration.
-
-`z_materials.reference.txt` is generated as a material lookup list for visual overrides.
-
-`visual.scale` changes the item model's attach/drop mesh scale without shrinking `icon: auto` snapshots, so small world models can still keep readable inventory icons.
-
-Status effects can reuse an item icon with `icon: item:ItemPrefabName`, including DataForge-generated `icon: auto` item icons.
-
-## Development Checks
-
-From the repository root, use PowerShell with the .NET Framework 4.8 targeting pack, a .NET SDK supporting `net8.0`, and the .NET 8 runtime. Set the installed Valheim, BepInEx, and publicized assembly paths in `environment.props` before building.
-
-Run the product build and both check programs in order. Each failure stops the sequence, and the API checks inspect the DLL produced by this build:
-
-```powershell
-dotnet build DataForge.sln -c Debug -p:DeployToGame=true
-if ($LASTEXITCODE -ne 0) { throw "DataForge build failed." }
-
-dotnet run --project tests/DataForge.LogicChecks/DataForge.LogicChecks.csproj -c Debug --no-build
-if ($LASTEXITCODE -ne 0) { throw "DataForge logic checks failed." }
-
-dotnet run --project tests/DataForge.ApiChecks/DataForge.ApiChecks.csproj -c Debug --no-build -- bin/Debug/DataForge.dll
-if ($LASTEXITCODE -ne 0) { throw "DataForge API or merged DLL checks failed." }
-```
-
-Both check projects are included in the solution, but building the solution does not run them. Omitting the DLL argument from ApiChecks runs only its source-linked checks. The Debug build above copies only the final merged DataForge DLL to the configured game plugin folder. Use `-p:DeployToGame=false` to skip the copy. Debug validation does not create release packages.
-
-For an explicitly requested release, build with `dotnet build DataForge.sln -c Release`, run both check programs with `-c Release --no-build` and pass `bin/Release/DataForge.dll` to ApiChecks, then package with `dotnet build DataForge.csproj -c Release -t:PackageRelease`. Packaging validates and writes ZIPs to `Thunderstore` and `Nexus`. A registered Mod Release Manager watch folder can automatically publish the Thunderstore ZIP to its configured sites; confirm that project's folder, team, sites, and install location before packaging.
-
-These checks cover pure logic and the public API, including reflection against the merged DLL. Harmony behavior, Unity resource cleanup, UI updates, and multiplayer inventory/RPC behavior still require in-game verification on a host, a remote client, and a dedicated server.
-
-## Github
-https://github.com/sighsorry1029/DataForge
+- [Integration API](API.md): read-only change notifications and queries for other mods.
+- [Build and verification guide](tests/README.md): developer checks and in-game test checklists.
+- [Source code](https://github.com/sighsorry1029/DataForge)
