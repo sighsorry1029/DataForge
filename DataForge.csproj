@@ -148,7 +148,7 @@
         <Compile Include="RecipeOverrideManager.cs"/>
         <Compile Include="ArcheryTargetGuard.cs"/>
         <Compile Include="PieceComfortHudBadges.cs"/>
-        <Compile Include="FireplaceFuelOverflow.cs"/>
+        <Compile Include="FireplaceFuelCapacity.cs"/>
         <Compile Include="StationExtensionSpacingBypass.cs"/>
         <Compile Include="PieceTableCategoryGuard.cs"/>
         <Compile Include="DataForgeVneiTypes.cs"/>

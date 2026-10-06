@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.8
+
+- Replaced `maxStoredFuel` with `Fireplace Fuel Multiplier`, defaulting to 10. Actual and displayed capacity now scale from each refillable fireplace's original capacity; 1 restores it. Old settings are not migrated.
+- Applied multiplier changes to loaded fireplaces without compounding the multiplier or changing starting fuel and burn speed. Lowering the multiplier preserves stored excess fuel until it is consumed.
+- Added a safety guard for AzuCraftyBoxes 1.8.27 Shift+E fill-all calculations, preventing negative inventory or container quantities when stored fuel exceeds a reduced capacity. Its container selection and permission rules remain unchanged.
+- Preserved refundable excess fuel when capacity is lowered and respected blocked drops or cancelled destruction. Documented DataForge's fuel refund separately from vanilla building-material returns.
+- Added fireplace calculation and managed Harmony checks, an optional original-Azu-DLL IL check, and a manual gameplay checklist.
+
 ## 1.3.7
 
 - Fixed compact recipe references losing Upgrader-only material classification. These requirements now retain `upgrade: ItemPrefab` instead of appearing as ordinary materials with amount 0.

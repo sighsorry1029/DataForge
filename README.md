@@ -17,7 +17,23 @@ Small qol of showing comfort values and related comfort-group hints in the hamme
 | `Show Comfort In Hammer` | `On` | Show comfort values and related comfort-group hints in the hammer menu. Client setting. |
 | `Highlight Station Extensions In Hammer` | `On` | Highlight related stations and extensions on hover. Client setting. |
 | `Ignore Station Extension Spacing` | `On` | Allow extensions to be placed close together. Other placement rules still apply. |
-| `maxStoredFuel` | `100` | Allow extra fireplace fuel without changing the displayed vanilla maximum. Set `0` to disable. |
+| `Fireplace Fuel Multiplier` | `10` | Multiply every finite, refillable fireplace's original fuel capacity, including the displayed maximum. `1` restores the original capacity. Existing fuel and burn speed stay unchanged. |
+
+`Fireplace Fuel Multiplier` accepts whole numbers from 1 to 9999. At the default
+`10`, a wood torch holds 40 fuel and a hearth holds 200. Changes always use each
+fireplace's original capacity, so multipliers do not compound. Lowering the setting
+does not delete stored fuel: it must burn below the new limit before you can add more.
+This setting does not change smelters or cooking stations. AzuCraftyBoxes uses the
+same capacity for nearby-container refuelling; DataForge also guards its reviewed
+1.8.27 fill-all calculations against negative amounts when excess fuel remains.
+The former `maxStoredFuel` and `Fireplace Fuel Capacity` settings are not read or
+migrated. Set the new multiplier explicitly if you want a value other than 10.
+
+Vanilla fireplaces return building materials on dismantling, but not their stored
+fuel. With a multiplier above 1, DataForge also returns whole fuel units remaining
+after subtracting the fireplace's starting fuel. For example, 50 fuel remaining
+with 3 starting fuel returns 47. This also applies at multiplier 1 while stored
+fuel still exceeds the restored capacity. Destruction with blocked drops returns none.
 
 ## Start here
 

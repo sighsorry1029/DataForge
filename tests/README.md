@@ -16,11 +16,53 @@ $core = 'C:\Program Files (x86)\Steam\steamapps\common\Valheim\BepInEx\core'
 dotnet run --project tests/DataForge.GameCompatibilityChecks -- check bin/Debug/DataForge.dll $managed $core
 dotnet build tests/DataForge.TranspilerChecks -c Debug
 & tests/DataForge.TranspilerChecks/bin/Debug/net48/DataForge.TranspilerChecks.exe bin/Debug/DataForge.dll $managed $core
+# Optional: also verify the original IL of the supplied AzuCraftyBoxes DLL.
+# Append its path as the fourth argument to the same executable.
 dotnet run --project tests/DataForge.DomainChecks -c Debug -- bin/Debug/DataForge.dll $managed $core
 ```
 
 - `GameCompatibilityChecks` uses Mono.Cecil 0.11.6 under .NET 8. It resolves direct game method/field instructions, checks literal/static mismatches, and checks explicit class/method Harmony target signatures and argument/field/result injection. It reports dynamic optional-mod targets separately. It also contains the reproducible, source-hash-pinned ServerSync adaptation described in `Libs/ServerSync.README.md`.
 - `TranspilerChecks` uses .NET Framework 4.8 and the installed Harmony/Cecil pair. It reads original game IL symbolically and executes DataForge's two transpilers, checks the four craft calls, unchanged upgrader/refund calls, one capacity replacement, label preservation and replacement stack signatures including `cheated`/`pickedUp`/`dropIfFullInv`. It initializes the new cached reflection accessors against original game declarations. It does not execute emitted game code or fake Unity instances. The installed Harmony/MonoMod does not support this test under .NET 8; keep the separate net48 runner.
+
+The same runner checks fireplace capacity multipliers, restoring different baselines,
+preserving excess fuel on decrements, and refund calculations. A managed Harmony
+fixture checks the fuel guard when installed before/after an existing prefix,
+including a previously executed prefix and unpatching. With an optional fourth
+argument pointing at AzuCraftyBoxes 1.8.27, it reads that DLL's original IL with
+Cecil, applies the production quantity transpiler and verifies only the two
+quantity calls change, branch labels and stack signatures stay intact, and an
+unsupported layout is rejected. This is not actual Azu/Unity interaction or patch
+installation: net48 cannot load the original Fireplace's default-interface
+method signature. Game patch installation still needs the checks below.
+
+## Fireplace capacity runtime checklist
+
+Use a disposable world and the same DataForge DLL/config on client, host and
+dedicated server. Repeat with AzuCraftyBoxes 1.8.27 installed and absent.
+
+1. Set `2 - Misc` / `Fireplace Fuel Multiplier` to 10. Place a wood torch and a
+   hearth; they must show maxima of 40 and 200, with original starting fuel and
+   burn speed. A mod fireplace with an original capacity of 200 must show 2000.
+   Change the multiplier repeatedly; each result must use the original baseline.
+   Infinite fires, non-refillable candles, smelters and cooking stations are excluded.
+2. Test one-at-a-time and fill-all refuelling from inventory and permitted nearby
+   containers. Counts must decrease by fuel actually accepted. Keep Azu's range,
+   allow/deny lists and container permissions in force. Inspect the DataForge log
+   for successful guard installation, and repeat while another player refuels.
+3. Store 80 fuel in a hearth, lower the multiplier to 2, then set 1. Existing fuel must remain,
+   ticking down normally. Each fireplace must recover its own original capacity
+   at 1; fill-all must not add items back to inventory or consume fuel above the
+   limit. Exercise negative AddFuelAmount RPCs and owner changes as well.
+4. Destroy/refund a fireplace with stored excess: the owner should return whole
+   fuel units excluding its original starting fuel, once only. Destruction with
+   blocked drops must return none. Save/reconnect and verify counts again.
+5. Change the locked server setting and reconnect clients, unload/reload zones,
+   switch worlds, and quit. Check instance baselines are cleared and no destroyed
+   objects remain registered. Old `maxStoredFuel` and `Fireplace Fuel Capacity`
+   values must not configure or migrate into the new key; set custom values explicitly.
+
+These gameplay, network and native Unity lifecycle checks have not been replaced
+by the managed checks.
 
 `DomainChecks` runs the merged YAML converter and plain managed game data on .NET 8.
 It checks compact regular tuples and reserved Upgrader entries, hidden metadata preservation,

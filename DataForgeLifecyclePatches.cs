@@ -70,6 +70,9 @@ internal static class DataForgeRuntimeCleanup
             DataForgeWorldLifecycle.MarkShuttingDown();
             bool cleanupSucceeded = true;
             cleanupSucceeded &= DataForgeLifecycleStep.Run(
+                "fireplace capacity cleanup",
+                FireplaceFuelCapacity.OnWorldShutdown);
+            cleanupSucceeded &= DataForgeLifecycleStep.Run(
                 "VNEI refresh cleanup",
                 VneiRefreshManager.OnWorldShutdown);
             cleanupSucceeded &= DataForgeLifecycleStep.Run(

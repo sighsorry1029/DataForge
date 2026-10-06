@@ -12,10 +12,11 @@ namespace DataForge;
 
 [BepInPlugin(ModGUID, ModName, ModVersion)]
 [BepInDependency("blacks7ar.MagicPlugin", BepInDependency.DependencyFlags.SoftDependency)]
+[BepInDependency(AzuCraftyBoxesFuelGuard.PluginGuid, BepInDependency.DependencyFlags.SoftDependency)]
 public class DataForgePlugin : BaseUnityPlugin
 {
     internal const string ModName = "DataForge";
-    internal const string ModVersion = "1.3.7";
+    internal const string ModVersion = "1.3.8";
     internal const string Author = "sighsorry";
     internal const string ModGUID = $"{Author}.{ModName}";
 
@@ -40,7 +41,7 @@ public class DataForgePlugin : BaseUnityPlugin
     internal static readonly ManualLogSource Log = BepInEx.Logging.Logger.CreateLogSource(ModName);
 
     private const long ReloadDelayTicks = TimeSpan.TicksPerSecond;
-    private const int MaxStoredFireplaceFuelLimit = 9999;
+    private const int FireplaceFuelMultiplierLimit = 9999;
     private static ConfigEntry<Toggle> _serverConfigLocked = null!;
     private static ConfigEntry<Toggle> _enableItemOverrides = null!;
     private static ConfigEntry<Toggle> _enableRecipeOverrides = null!;
@@ -52,7 +53,7 @@ public class DataForgePlugin : BaseUnityPlugin
     private static ConfigEntry<Toggle> _showPieceComfortInHammer = null!;
     private static ConfigEntry<Toggle> _highlightStationExtensionsInHammer = null!;
     private static ConfigEntry<Toggle> _ignoreStationExtensionSpacing = null!;
-    private static ConfigEntry<int> _maxStoredFireplaceFuel = null!;
+    private static ConfigEntry<int> _fireplaceFuelMultiplier = null!;
 
     public enum Toggle
     {
@@ -93,7 +94,7 @@ public class DataForgePlugin : BaseUnityPlugin
     internal static bool ShowPieceComfortInHammer => _showPieceComfortInHammer.Value.IsOn();
     internal static bool HighlightStationExtensionsInHammer => _highlightStationExtensionsInHammer.Value.IsOn();
     internal static bool IgnoreStationExtensionSpacing => _ignoreStationExtensionSpacing.Value.IsOn();
-    internal static int MaxStoredFireplaceFuel => Math.Min(MaxStoredFireplaceFuelLimit, Math.Max(0, _maxStoredFireplaceFuel.Value));
+    internal static int ConfiguredFireplaceFuelMultiplier => Math.Min(FireplaceFuelMultiplierLimit, Math.Max(1, _fireplaceFuelMultiplier.Value));
 
     public void Awake()
     {
@@ -206,14 +207,14 @@ public class DataForgePlugin : BaseUnityPlugin
             "If on, station extensions ignore the vanilla spacing check against other station extensions, allowing close or overlapping extension placement. Other placement restrictions remain unchanged.",
             order: 200);
 
-        _maxStoredFireplaceFuel = ConfigEntry(
+        _fireplaceFuelMultiplier = ConfigEntry(
             "2 - Misc",
-            "maxStoredFuel",
-            100,
-            $"Maximum stored fuel allowed in fireplaces without changing each fireplace's displayed max fuel. 0 disables this feature. Values are clamped to 0-{MaxStoredFireplaceFuelLimit}. If this value is not greater than a fireplace's max fuel, that fireplace uses vanilla behavior.",
+            "Fireplace Fuel Multiplier",
+            10,
+            $"Multiply the original fuel capacity of every finite, refillable fireplace, including its displayed maximum. 1 restores each fireplace's original capacity. Whole-number values are clamped to 1-{FireplaceFuelMultiplierLimit}. Existing fuel, starting fuel and burn speed are unchanged; excess stored fuel must burn down before more can be added.",
             order: 100);
-        _maxStoredFireplaceFuel.SettingChanged += (_, _) => ClampMaxStoredFireplaceFuel();
-        ClampMaxStoredFireplaceFuel();
+        _fireplaceFuelMultiplier.SettingChanged += OnFireplaceFuelSettingChanged;
+        ClampFireplaceFuelMultiplier();
 
         LocalizationOverrideManager.Initialize(ConfigSync);
         DataForgeIconSync.Initialize(ConfigSync);
@@ -227,6 +228,7 @@ public class DataForgePlugin : BaseUnityPlugin
 
         Assembly assembly = Assembly.GetExecutingAssembly();
         _harmony.PatchAll(assembly);
+        AzuCraftyBoxesFuelGuard.Initialize(_harmony);
         SetupWatcher();
 
         Config.Save();
@@ -239,6 +241,8 @@ public class DataForgePlugin : BaseUnityPlugin
 
     private void OnDestroy()
     {
+        if (_fireplaceFuelMultiplier != null)
+            _fireplaceFuelMultiplier.SettingChanged -= OnFireplaceFuelSettingChanged;
         DataForgeLifecycleStep.Run(
             "file watcher recovery cleanup",
             DataForgeFileWatcher.CancelPendingRecreates);
@@ -286,6 +290,7 @@ public class DataForgePlugin : BaseUnityPlugin
 
     private static void OnSourceOfTruthChanged(bool isSourceOfTruth)
     {
+        FireplaceFuelCapacity.RequestRefresh();
         DataForgeIconSync.OnSourceOfTruthChanged();
         _sourceOfTruthFileModeReady = false;
         if (isSourceOfTruth)
@@ -383,17 +388,24 @@ public class DataForgePlugin : BaseUnityPlugin
 
     private void Update()
     {
+        FireplaceFuelCapacity.Update();
         DataForgeIconSync.Update();
         VneiPrefabCleanupGuard.TryPatchVneiIndexAll(_harmony);
         DataForgeApi.DispatchPending();
     }
 
-    private static void ClampMaxStoredFireplaceFuel()
+    private static void OnFireplaceFuelSettingChanged(object sender, EventArgs args)
     {
-        int clamped = Math.Min(MaxStoredFireplaceFuelLimit, Math.Max(0, _maxStoredFireplaceFuel.Value));
-        if (_maxStoredFireplaceFuel.Value != clamped)
+        ClampFireplaceFuelMultiplier();
+        FireplaceFuelCapacity.RequestRefresh();
+    }
+
+    private static void ClampFireplaceFuelMultiplier()
+    {
+        int clamped = Math.Min(FireplaceFuelMultiplierLimit, Math.Max(1, _fireplaceFuelMultiplier.Value));
+        if (_fireplaceFuelMultiplier.Value != clamped)
         {
-            _maxStoredFireplaceFuel.Value = clamped;
+            _fireplaceFuelMultiplier.Value = clamped;
         }
     }
 
