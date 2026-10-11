@@ -16,7 +16,7 @@ namespace DataForge;
 public class DataForgePlugin : BaseUnityPlugin
 {
     internal const string ModName = "DataForge";
-    internal const string ModVersion = "1.3.8";
+    internal const string ModVersion = "1.3.9";
     internal const string Author = "sighsorry";
     internal const string ModGUID = $"{Author}.{ModName}";
 

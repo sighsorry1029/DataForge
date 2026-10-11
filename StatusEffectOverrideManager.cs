@@ -2721,7 +2721,6 @@ internal static class StatusEffectOverrideManager
                         return new
                         {
                             Entry = StatusEffectEntry.FromDefinition(effectName, pair.Value.Definition, overrideEntry: true),
-                            Comments = pair.Value.Definition.ReferenceComments,
                             OwnerKey = effectName,
                             SortKey = effectName
                         };
@@ -2735,8 +2734,7 @@ internal static class StatusEffectOverrideManager
                            entry => entry.SortKey,
                            entry => DataForgeOwnerResolver.GetAssetOwnerName(entry.OwnerKey),
                            entry => entry.Entry,
-                           FullSerializer,
-                           entry => entry.Comments);
+                           FullSerializer);
             },
             out error);
     }
@@ -2787,21 +2785,16 @@ internal static class StatusEffectOverrideManager
         HashSet<string> currentEffects = GetCurrentStatusEffectNameSet();
         var referenceEntries = Baselines
             .Where(pair => currentEffects.Contains(pair.Key))
-            .Select(pair => new
-            {
-                Entry = StatusEffectReferenceEntry.From(pair.Value.Effect.name.Trim(), pair.Value.Definition),
-                Comments = pair.Value.Definition.ReferenceComments
-            })
-            .OrderBy(entry => entry.Entry.Effect, StringComparer.OrdinalIgnoreCase)
+            .Select(pair => StatusEffectReferenceEntry.From(pair.Value.Effect.name.Trim(), pair.Value.Definition))
+            .OrderBy(entry => entry.Effect, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
         return DataForgeReferenceSections.SerializeReferenceSections(
             referenceEntries,
-            entry => entry.Entry.Effect,
-            entry => DataForgeOwnerResolver.GetAssetOwnerName(entry.Entry.Effect),
-            entry => entry.Entry,
-            SparseSerializer,
-            entry => entry.Comments);
+            entry => entry.Effect,
+            entry => DataForgeOwnerResolver.GetAssetOwnerName(entry.Effect),
+            entry => entry,
+            SparseSerializer);
     }
 
     private static bool CanBuildGeneratedArtifacts()
@@ -3005,7 +2998,6 @@ internal static class StatusEffectOverrideManager
 
     internal sealed class StatusEffectDefinition
     {
-        internal List<string> ReferenceComments { get; set; } = new();
         public StatusEffectBaseDefinition? Base { get; set; }
         public StatsDefinition? Stats { get; set; }
         public StaminaDrainModifierDefinition? StaminaDrainModifier { get; set; }
@@ -3022,7 +3014,6 @@ internal static class StatusEffectOverrideManager
             return new StatusEffectDefinition
             {
                 Base = StatusEffectBaseDefinition.From(statusEffect),
-                ReferenceComments = statusEffect is SE_React reaction ? AttackReference.Capture(reaction) : new List<string>(),
                 Stats = GetStatsDefinition(statusEffect),
                 StaminaDrainModifier = statusEffect is SE_Stats staminaStats ? StaminaDrainModifierDefinition.From(staminaStats) : null,
                 DamageTakenModifiers = statusEffect is SE_Stats damageTakenStats ? DamageTakenModifierDefinition.From(damageTakenStats.m_mods) : null,

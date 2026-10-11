@@ -2,7 +2,6 @@ using System;
 using System.Reflection;
 using System.Linq;
 using System.Collections;
-using System.Text;
 
 // Exercise the shipped serializer and plain managed data against original game types.
 // No Unity objects are created and no native/gameplay execution is simulated.
@@ -219,16 +218,6 @@ internal static class DomainChecks
         foreach (string removed in new[] { "CanOvercookItems", "UseFuelWhileEmpty", "Skill", "RecordCrafter" })
             Assert(stationType.GetProperty(removed, members) == null, "Removed cookingStation field remains in schema: " + removed);
         Assert(Rejected("piece: piece_FrostFoundry\ncookingStation:\n  canOvercookItems: false", pieceEntry), "Removed cookingStation YAML remains accepted");
-        StringBuilder comments = new();
-        Type sections = mod.GetType("DataForge.DataForgeReferenceSections", true)!;
-        sections.GetMethod("AppendEntryComments", members)!.Invoke(null, new object[] { comments, new[] { "prefab\r\n- item: unexpected\r  weight: 0\u2028override: false", "root -> child" } });
-        Assert(comments.ToString().Split(new[] { Environment.NewLine }, StringSplitOptions.RemoveEmptyEntries).All(line => line.StartsWith("# ", StringComparison.Ordinal)), "Prefab name escapes YAML comment");
-        object commentedItem = Read(comments + "item: StaffOrbofAhri\nprimaryAttack:\n  damageMultiplier: 2", itemEntry);
-        Assert((string)Get(commentedItem, "Item")! == "StaffOrbofAhri" && (float)Get(Get(commentedItem, "PrimaryAttack")!, "DamageMultiplier")! == 2, "Reference comments change editable YAML");
-        Type itemDefinitionType = mod.GetType("DataForge.ItemOverrideManager+ItemDefinition", true)!;
-        object diagnosticDefinition = Activator.CreateInstance(itemDefinitionType)!;
-        itemDefinitionType.GetProperty("ReferenceComments", members)!.SetValue(diagnosticDefinition, new System.Collections.Generic.List<string> { "diagnostic-only" });
-        Assert(!Write(diagnosticDefinition).Contains("diagnostic-only"), "Read-only graph leaked into editable/synced schema");
         object kiln = Read("piece: piece_FrostKiln\nsmelter:\n  conversions:\n  - None: FrozenFuel", pieceEntry);
         object kilnCopy = Read(Write(kiln), pieceEntry);
         IList conversions = (IList)Get(Get(kilnCopy, "Smelter")!, "Conversions")!;

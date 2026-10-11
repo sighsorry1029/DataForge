@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.9
+
+- Removed read-only attack-graph comments from item and effect references and full scaffolds. Editable fields, owner section headers, and gameplay settings are unchanged.
+- Removed the linked-prefab diagnostic traversal from the plugin. Its original source and integration notes are preserved in the repository archive, outside the DLL and release packages.
+- Regenerate existing references with `dataforge:refer item` and `dataforge:refer effect` to remove old comments. For existing full scaffolds, rerun the matching `dataforge:full` command. User override files are not rewritten.
+
 ## 1.3.8
 
 - Replaced `maxStoredFuel` with `Fireplace Fuel Multiplier`, defaulting to 10. Actual and displayed capacity now scale from each refillable fireplace's original capacity; 1 restores it. Old settings are not migrated.

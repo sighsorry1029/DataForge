@@ -71,7 +71,7 @@ Upgrader classification, exact quality, upgradeability and empty lists), and inv
 input rejection. The runtime caller supplies the recipe's upgradeability so the
 actual reference builder can run without a simulated ObjectDB. It also exercises damage
 value updates, item/effect field round trips, removed-schema checks, source-free
-conversion YAML and read-only comment escaping. Effect-list checks cover original
+conversion YAML. Effect-list checks cover original
 game metadata copying without shared mutable entries, omission, and explicit clearing.
 It constructs
 the codec without manager initialization: the installed Harmony needs the net48
@@ -118,9 +118,9 @@ Use the same rebuilt DataForge DLL on client/host/dedicated roles. This is a man
 checklist, not a record of successful gameplay tests.
 
 1. Regenerate item/effect references and full scaffolds. Inspect StaffOrbofAhri,
-   StaffThunderBlood, StaffSpiritCaller and Staff_FrostOrbs. Confirm outgoing,
-   return, active AOE_AREA, inactive AOE_ROD and chain links are labelled as prefab
-   data. Copy a commented entry to an override file and reload it without schema errors.
+   StaffThunderBlood, StaffSpiritCaller and Staff_FrostOrbs. Confirm attack-graph
+   comments are absent, owner section headers remain, and editable fields are
+   preserved. Copy an entry to an override file and reload it without schema errors.
 2. Override only Frost Kiln health, then reload and remove the override. Confirm
    `None: FrozenFuel` survives, existing fuel/queues remain, and Ice produces the
    same number of Liquid Frost items. Repeat with ordinary ore smelters.

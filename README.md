@@ -436,10 +436,10 @@ Use 256×256 PNGs when possible. Store explicit PNGs on the server in multiplaye
 | An item or effect is missing from references | Confirm the other mod actually registers it in that process. Some mods skip server prefab loading; enable their server-loading option if provided. DataForge cannot generate entries from an unloaded prefab just because its DLL is installed. |
 | A field is missing | Generate the domain's full file. Some defaults are hidden in compact references, and some components or game fields are not supported. |
 | A visual or effect looks unchanged | Existing instances may keep their state. Reapply the effect or place a new piece as appropriate. Restart the game after replacing a DLL. |
-| A weapon's damage differs from the item values | Projectiles, area effects, ammunition, and spawned creatures may own additional behaviour. Read the generated attack comments; they are diagnostics, not editable YAML. |
+| A weapon's damage differs from the item values | Projectiles, area effects, ammunition, and spawned creatures may own additional behaviour beyond the item's settings. |
 | An icon is missing | Check the name, server PNG, and log. Icon sync has size and count limits; use small PNGs. |
 
-References describe available baseline data, not every active override or every runtime damage calculation. Projectile/Aoe comments marked `prefabDamage` are not total attack damage. Shared projectile and area-effect prefabs are not directly editable through those comments.
+References describe available baseline data, not every active override or every runtime damage calculation. Shared projectile and area-effect prefabs are not directly editable through item overrides.
 
 `z_resourcemap.txt` controls reference and full-file sorting only. It does not change costs, unlocks, or stats. The default map includes Deep North after Ashlands. Existing customized maps are preserved on update; back up yours before merging entries from the [default map](DataForgeResourceMap.cs). Section order defines tiers, and the first occurrence of a resource wins.
 

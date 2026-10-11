@@ -128,7 +128,6 @@
         <Compile Include="DataForgeLogContext.cs"/>
         <Compile Include="DataForgeIconProtocol.cs"/>
         <Compile Include="DataForgeReferenceSections.cs"/>
-        <Compile Include="AttackReference.cs"/>
         <Compile Include="AssetOwnerMatching.cs"/>
         <Compile Include="DataForgeItemSortClassifier.cs"/>
         <Compile Include="DataForgeResourceMap.cs"/>
