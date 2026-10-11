@@ -153,6 +153,8 @@
         <Compile Include="DataForgeVneiTypes.cs"/>
         <Compile Include="VneiPrefabCleanupGuard.cs"/>
         <Compile Include="VneiRefreshManager.cs"/>
+        <Compile Include="VneiUiCompatibility.cs"/>
+        <Compile Include="CuisineConversionCompatibility.cs"/>
         <Compile Include="ReferenceDefaultRules.cs"/>
         <Compile Include="ReferenceValue.cs"/>
         <Compile Include="StatusEffectOwnershipApi.cs"/>

@@ -24,7 +24,61 @@ dotnet run --project tests/DataForge.DomainChecks -c Debug -- bin/Debug/DataForg
 - `GameCompatibilityChecks` uses Mono.Cecil 0.11.6 under .NET 8. It resolves direct game method/field instructions, checks literal/static mismatches, and checks explicit class/method Harmony target signatures and argument/field/result injection. It reports dynamic optional-mod targets separately. It also contains the reproducible, source-hash-pinned ServerSync adaptation described in `Libs/ServerSync.README.md`.
 - `TranspilerChecks` uses .NET Framework 4.8 and the installed Harmony/Cecil pair. It reads original game IL symbolically and executes DataForge's two transpilers, checks the four craft calls, unchanged upgrader/refund calls, one capacity replacement, label preservation and replacement stack signatures including `cheated`/`pickedUp`/`dropIfFullInv`. It initializes the new cached reflection accessors against original game declarations. It does not execute emitted game code or fake Unity instances. The installed Harmony/MonoMod does not support this test under .NET 8; keep the separate net48 runner.
 
-The same runner checks fireplace capacity multipliers, restoring different baselines,
+## Cuisine and VNEI compatibility checks
+
+Append the original Cuisine and VNEI DLL paths to DomainChecks. The supplied
+ValheimCuisine 2.3.2 / VNEI 0.17.6 DLLs are the reviewed contracts. The resolver
+also reads their profile's Jotunn/JsonDotNET dependencies when needed.
+
+```powershell
+dotnet run --project tests/DataForge.DomainChecks -c Debug -- bin/Debug/DataForge.dll $managed $core $cuisineDll $vneiDll
+# Use '-' when no AzuCraftyBoxes DLL is supplied in the fourth position.
+& tests/DataForge.TranspilerChecks/bin/Debug/net48/DataForge.TranspilerChecks.exe bin/Debug/DataForge.dll $managed $core - $vneiDll
+```
+
+These checks exercise the production UI reflection adapter against the original
+VNEI DLL, managed conversion graphs (amounts, incomplete backlinks, missing
+recipes and unindexed facilities), history object resolution, and Cuisine's
+accepted-payload lifecycle including shutdown's ServerSync restore event. Plain
+VNEI Item data is allocated without its Unity-dependent constructor; no Unity
+objects are faked. The net48 runner installs the production history prefix on a
+managed method with the original VNEI Item parameter and verifies replacement
+and unpatching. These are not game, UI-rendering or multiplayer tests.
+
+Runtime checklist (not yet executed by the automated checks):
+
+1. On a dedicated server and remote client, use the same Debug DataForge DLL.
+   Set `fermenter` to convert `MeadBaseEitrMountain_TW` into `MeadEitrMountain_TW`
+   x6, and `piece_oven` to convert `UncookedBerryCakePlains_TW` into
+   `BerryCakePlains_TW` in 60 seconds. Test both config arrival orders, unchanged
+   YAML, repeated Cuisine reloads, and lower/upper-case piece names.
+2. Check the final prefab lists, existing facilities and newly built facilities.
+   Test E/direct item input and another peer owning the facility. Input must be
+   consumed once, output must match, and fermentation progress, oven contents,
+   fuel, health and save/reconnect state must survive the reapply.
+3. Test omitted conversions, explicit `[]`, override off, and multiple entries
+   (valid then invalid, valid then empty). Each entry still replaces its entire
+   conversion list; Cuisine recovery does not merge lists or recapture baselines.
+   Test an invalid first remote payload and disconnect/reconnect into another world.
+4. Open VNEI before and after reload, including a second/inactive selection UI.
+   Preserve search/filter/favorite settings, pages, selected station, recipe view,
+   scroll, recent items and back/forward history. Remove the currently viewed item;
+   it must return to search without stale controls. VNEI does not index cooking
+   time: verify 60 seconds in the facility; verify fermentation x6 in its recipe.
+5. Repeat without either optional mod. If an optional API layout differs, retain
+   the old VNEI index and report the unsupported contract. Simulate index/known/UI
+   subscriber errors: do not report partial conversion indexes as success or roll
+   back a validated index just because UI rebinding failed. UI/known-state recovery
+   gets one bounded retry; it does not start another index or poll each frame.
+
+Index rollback restores DataForge's captured collections/fields and rebinds the
+known views. It cannot undo arbitrary effects of external IndexFinished subscribers.
+VNEI's own Item/localization-event lifetime is unchanged by this patch; repeated
+indexing memory behavior requires separate measurement/review.
+
+## Fireplace managed checks
+
+The net48 runner also checks fireplace capacity multipliers, restoring different baselines,
 preserving excess fuel on decrements, and refund calculations. A managed Harmony
 fixture checks the fuel guard when installed before/after an existing prefix,
 including a previously executed prefix and unpatching. With an optional fourth

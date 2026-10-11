@@ -70,6 +70,9 @@ internal static class DataForgeRuntimeCleanup
             DataForgeWorldLifecycle.MarkShuttingDown();
             bool cleanupSucceeded = true;
             cleanupSucceeded &= DataForgeLifecycleStep.Run(
+                "Cuisine conversion cleanup",
+                CuisineConversionCompatibility.OnWorldShutdown);
+            cleanupSucceeded &= DataForgeLifecycleStep.Run(
                 "fireplace capacity cleanup",
                 FireplaceFuelCapacity.OnWorldShutdown);
             cleanupSucceeded &= DataForgeLifecycleStep.Run(

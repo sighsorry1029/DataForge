@@ -154,6 +154,16 @@ internal static class VneiPrefabCleanupGuard
         return pieceTables;
     }
 
+    internal static HashSet<string> GetBuildablePieceNames()
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        if (ZNetScene.instance == null) return names;
+        foreach (PieceTable table in CollectBuildPieceTables(ZNetScene.instance))
+            foreach (GameObject prefab in table.m_pieces)
+                if (prefab != null) names.Add(prefab.name);
+        return names;
+    }
+
     private static IEnumerable<GameObject> GetVneiPrefabCandidates(ZNetScene scene)
     {
         HashSet<GameObject> prefabs = new();

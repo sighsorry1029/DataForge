@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.0
+
+- Reapply explicit cooking and fermentation conversion overrides after ValheimCuisine reloads, including unchanged synchronized settings. Existing facility contents, progress, fuel and saved state are not reset.
+- Keep reference-only entries and omitted conversion lists out of this recovery. Explicit empty lists still clear conversions, and both integrations remain optional.
+- Refresh VNEI search, recipe and recent-item views after reindexing while preserving navigation and filter settings. Resolve back/forward history entries against the current index.
+- Validate affected conversion recipes before accepting a refreshed VNEI index, and add bounded recovery for known-state and UI refresh failures.
+- Added original-DLL contract checks for ValheimCuisine 2.3.2 and VNEI 0.17.6, managed data and Harmony checks, and a manual game/server verification checklist. Actual Unity UI and multiplayer verification remains separate.
+
 ## 1.3.9
 
 - Removed read-only attack-graph comments from item and effect references and full scaffolds. Editable fields, owner section headers, and gameplay settings are unchanged.

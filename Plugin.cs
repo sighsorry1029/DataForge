@@ -13,10 +13,12 @@ namespace DataForge;
 [BepInPlugin(ModGUID, ModName, ModVersion)]
 [BepInDependency("blacks7ar.MagicPlugin", BepInDependency.DependencyFlags.SoftDependency)]
 [BepInDependency(AzuCraftyBoxesFuelGuard.PluginGuid, BepInDependency.DependencyFlags.SoftDependency)]
+[BepInDependency(CuisineConversionCompatibility.PluginGuid, BepInDependency.DependencyFlags.SoftDependency)]
+[BepInDependency(VneiUiCompatibility.PluginGuid, BepInDependency.DependencyFlags.SoftDependency)]
 public class DataForgePlugin : BaseUnityPlugin
 {
     internal const string ModName = "DataForge";
-    internal const string ModVersion = "1.3.9";
+    internal const string ModVersion = "1.4.0";
     internal const string Author = "sighsorry";
     internal const string ModGUID = $"{Author}.{ModName}";
 
@@ -229,6 +231,8 @@ public class DataForgePlugin : BaseUnityPlugin
         Assembly assembly = Assembly.GetExecutingAssembly();
         _harmony.PatchAll(assembly);
         AzuCraftyBoxesFuelGuard.Initialize(_harmony);
+        CuisineConversionCompatibility.Initialize(_harmony);
+        VneiUiCompatibility.Initialize(_harmony);
         SetupWatcher();
 
         Config.Save();
@@ -281,6 +285,7 @@ public class DataForgePlugin : BaseUnityPlugin
         DataForgeLifecycleStep.Run("recipe dispose", RecipeOverrideManager.Dispose);
         DataForgeLifecycleStep.Run("piece dispose", PieceOverrideManager.Dispose);
         DataForgeLifecycleStep.Run("VNEI refresh dispose", VneiRefreshManager.Dispose);
+        DataForgeLifecycleStep.Run("Cuisine compatibility dispose", CuisineConversionCompatibility.Dispose);
         DataForgeLifecycleStep.Run(
             "source-of-truth event cleanup",
             () => ConfigSync.SourceOfTruthChanged -= OnSourceOfTruthChanged);
@@ -290,6 +295,7 @@ public class DataForgePlugin : BaseUnityPlugin
 
     private static void OnSourceOfTruthChanged(bool isSourceOfTruth)
     {
+        CuisineConversionCompatibility.OnAuthorityChanged();
         FireplaceFuelCapacity.RequestRefresh();
         DataForgeIconSync.OnSourceOfTruthChanged();
         _sourceOfTruthFileModeReady = false;

@@ -201,6 +201,7 @@ internal static class PieceOverrideManager
 
     internal static void ApplyCurrentConfiguration()
     {
+        CuisineConversionCompatibility.SchedulePending();
         if (!GameDataReady ||
             !ObjectDbReady ||
             !PieceTablesReady ||
@@ -853,6 +854,7 @@ internal static class PieceOverrideManager
     {
         if (string.Equals(LastAppliedSyncedPayload, payload, StringComparison.Ordinal))
         {
+            AcceptRemoteConversionPayload();
             return;
         }
 
@@ -862,12 +864,116 @@ internal static class PieceOverrideManager
         }
 
         LastAppliedSyncedPayload = payload;
+        AcceptRemoteConversionPayload();
         lock (StateLock)
         {
             SetActiveEntries(entries);
         }
 
         ApplyCurrentConfiguration();
+    }
+
+    private static void AcceptRemoteConversionPayload()
+    {
+        // ServerSync sets LocalBaseValue when this particular key is received.
+        // Its default empty Value alone cannot distinguish receipt from no payload.
+        CuisineConversionCompatibility.AcceptPayload(SyncedPayload?.LocalBaseValue != null);
+    }
+
+    internal static bool TryReapplyCuisineConversions(ISet<string> facilities)
+    {
+        if (DataForgeWorldLifecycle.IsShuttingDown || !GameDataReady || !ObjectDbReady ||
+            !PieceTablesReady || !DataForgeWorldLifecycle.IsGameStarted ||
+            ZNetScene.instance == null || ObjectDB.instance == null ||
+            !CuisineConversionCompatibility.IsPayloadReady(
+                DataForgePlugin.UsesLocalAuthorityFiles, SyncedPayload?.LocalBaseValue != null)) return false;
+        if (!DataForgePlugin.PieceOverridesEnabled) return true;
+
+        Dictionary<string, List<PieceEntry>> entriesByPiece;
+        lock (StateLock)
+            entriesByPiece = ActiveRuntimeEntriesByPiece
+                .Where(pair => facilities.Contains(pair.Key))
+                .ToDictionary(pair => pair.Key, pair => pair.Value.ToList(), StringComparer.OrdinalIgnoreCase);
+
+        var fermenters = new Dictionary<string, List<Fermenter.ItemConversion>>(StringComparer.OrdinalIgnoreCase);
+        var cookers = new Dictionary<string, List<CookingStation.ItemConversion>>(StringComparer.OrdinalIgnoreCase);
+        var prefabs = new Dictionary<string, GameObject>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in entriesByPiece)
+        {
+            GameObject? prefab = ResolvePiecePrefab(pair.Key);
+            if (prefab == null || !IsManagedPiece(prefab)) continue;
+            prefabs[pair.Key] = prefab!;
+            Fermenter? fermenter = prefab.GetComponent<Fermenter>();
+            CookingStation? cooker = prefab.GetComponent<CookingStation>();
+            foreach (PieceEntry entry in pair.Value)
+            {
+                using (DataForgeLogContext.Push(entry.LogContext))
+                {
+                    // Match ordinary apply: the last valid explicit list wins.
+                    // Omitted lists and invalid entries do not erase an earlier valid list.
+                    if (fermenter != null && entry.Fermenter?.Conversions is { } fermentation &&
+                        TryBuildFermenterConversions(fermenter, fermentation, out var builtFermentation))
+                        fermenters[pair.Key] = builtFermentation;
+                    if (cooker != null && entry.CookingStation?.Conversions is { } cooking &&
+                        TryBuildCookingStationConversions(cooker, cooking, out var builtCooking))
+                        cookers[pair.Key] = builtCooking;
+                }
+            }
+        }
+
+        if (fermenters.Count == 0 && cookers.Count == 0) return true;
+        void Apply(GameObject target, string key)
+        {
+            // Keep separate mutable lists/entries for each Unity object. No contents,
+            // timers, fuel, health, baseline, recipe or category state is reapplied.
+            if (fermenters.TryGetValue(key, out var fermentation) && target.TryGetComponent(out Fermenter fermenter))
+                fermenter.m_conversion = fermentation.Select(c => new Fermenter.ItemConversion
+                    { m_from = c.m_from, m_to = c.m_to, m_producedItems = c.m_producedItems }).ToList();
+            if (cookers.TryGetValue(key, out var cooking) && target.TryGetComponent(out CookingStation cooker))
+                cooker.m_conversion = cooking.Select(c => new CookingStation.ItemConversion
+                    { m_from = c.m_from, m_to = c.m_to, m_cookTime = c.m_cookTime }).ToList();
+        }
+
+        var keys = new HashSet<string>(fermenters.Keys, StringComparer.OrdinalIgnoreCase);
+        keys.UnionWith(cookers.Keys);
+        using DataForgeApplyScope apiApply = DataForgeApi.BeginApply(
+            DataForgeDomain.Pieces, DataForgePlugin.UsesLocalAuthorityFiles, keys);
+        foreach (string key in keys) Apply(prefabs[key], key);
+        int instances = 0;
+        foreach (Piece piece in Piece.s_allPieces.ToList())
+        {
+            if (piece == null || !piece.gameObject.scene.IsValid() || !IsManagedPiece(piece.gameObject, piece)) continue;
+            string key = GetPrefabName(piece.gameObject);
+            if (!keys.Contains(key)) continue;
+            Apply(piece.gameObject, key);
+            instances++;
+        }
+        DataForgePlugin.Log.LogInfo($"Restored DataForge conversions after Cuisine: {keys.Count} prefabs, {instances} loaded pieces.");
+        VneiRefreshManager.RequestRefresh("Cuisine conversion recovery");
+        apiApply.Complete(DataForgeApi.GetConfiguredOverrideKeys(DataForgeDomain.Pieces));
+        return true;
+    }
+
+    internal static List<VneiRefreshManager.ConversionExpectation> GetVneiConversionExpectations()
+    {
+        var result = new List<VneiRefreshManager.ConversionExpectation>();
+        if (!DataForgePlugin.PieceOverridesEnabled || ZNetScene.instance == null) return result;
+        List<KeyValuePair<string, List<PieceEntry>>> entries;
+        lock (StateLock) entries = ActiveRuntimeEntriesByPiece.ToList();
+        foreach (var pair in entries)
+        {
+            GameObject? prefab = ResolvePiecePrefab(pair.Key);
+            if (prefab == null) continue;
+            if (pair.Value.Any(e => e.Fermenter?.Conversions != null) && prefab.TryGetComponent(out Fermenter fermenter))
+                foreach (var c in fermenter.m_conversion)
+                    if (c.m_from != null && c.m_to != null)
+                        result.Add(new VneiRefreshManager.ConversionExpectation(prefab.name, c.m_from.name, c.m_to.name, c.m_producedItems));
+            if (pair.Value.Any(e => e.CookingStation?.Conversions != null) && prefab.TryGetComponent(out CookingStation cooker))
+                foreach (var c in cooker.m_conversion)
+                    if (c.m_from != null && c.m_to != null)
+                        result.Add(new VneiRefreshManager.ConversionExpectation(prefab.name, c.m_from.name, c.m_to.name, 1));
+        }
+        return result;
     }
 
     private static void OnSyncedPieceCategoryPayloadChanged()

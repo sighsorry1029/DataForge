@@ -16,3 +16,6 @@ AppDomain.CurrentDomain.AssemblyResolve += (_, request) =>
     return null;
 };
 DomainChecks.Run(Assembly.LoadFrom(modPath), Assembly.LoadFrom(Path.Combine(managed, "assembly_valheim.dll")));
+if (args.Length > 4)
+    OptionalModChecks.Run(Assembly.LoadFrom(modPath), Assembly.LoadFrom(Path.Combine(managed, "assembly_valheim.dll")),
+        Path.GetFullPath(args[3]), Path.GetFullPath(args[4]));
